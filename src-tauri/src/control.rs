@@ -229,6 +229,39 @@ fn target_policy(t: &str) -> &str {
     }
 }
 
+/// First port of the per-group inbounds (127.0.0.1:47800 + index).
+pub const LISTEN_BASE: u16 = 47800;
+
+/// Per-group inbounds of the running config: (group name, port), read from the generated
+/// config file (the override names them netisland-g<i>).
+pub fn group_listeners(config_file: &Path) -> Vec<(String, u16)> {
+    let Ok(text) = std::fs::read_to_string(config_file) else { return Vec::new() };
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { return Vec::new() };
+    doc.get("listeners")
+        .and_then(|l| l.as_sequence())
+        .map(|s| {
+            s.iter()
+                .filter(|l| l.get("name").and_then(|n| n.as_str()).map(|n| n.starts_with("netisland-g")).unwrap_or(false))
+                .filter_map(|l| {
+                    let proxy = l.get("proxy")?.as_str()?.to_string();
+                    let port = l.get("port")?.as_u64()? as u16;
+                    Some((proxy, port))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The subscription's fallback group (target of the MATCH rule) in the running config.
+pub fn match_group(config_file: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config_file).ok()?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
+    doc.get("rules")?.as_sequence()?.iter().rev().find_map(|r| {
+        let s = r.as_str()?;
+        s.strip_prefix("MATCH,").map(|g| g.split(',').next().unwrap_or(g).trim().to_string())
+    })
+}
+
 pub const GUARD_PROVIDERS: [(&str, &str, &str); 3] = [
     ("netisland-guard-domain", "domain", "guard-domain"),
     ("netisland-guard-kw", "classical", "guard-kw"),
@@ -300,11 +333,20 @@ function main(config) {{
       "RULE-SET,netisland-guard-ip," + G + ",no-resolve");
   }}
   config.rules = own.map(([name, , target]) => "RULE-SET," + name + "," + target).concat(rest);
+  // one loopback-only inbound per proxy group: traffic entering it skips the rules and goes
+  // straight to that group, so NetIsland can measure every group's exit IP
+  const kinds = new Set(["select", "url-test", "fallback", "load-balance", "smart"]);
+  const listeners = (config.listeners || []).filter((l) => !String(l && l.name).startsWith("netisland-g"));
+  groups.filter((g) => g && kinds.has(String(g.type).toLowerCase())).slice(0, 80).forEach((g, i) => {{
+    listeners.push({{ name: "netisland-g" + i, type: "mixed", listen: "127.0.0.1", port: {listen_base} + i, proxy: g.name, udp: false }});
+  }});
+  config.listeners = listeners;
   return config;
 }}
 "#,
         own = own.join(", "),
-        guard = guard.join(", ")
+        guard = guard.join(", "),
+        listen_base = LISTEN_BASE
     )
 }
 

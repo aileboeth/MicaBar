@@ -49,6 +49,8 @@ pub struct WinState {
     pub collapse_req: AtomicBool,
     /// The page saw a mouse press on the collapsed island (click-to-open mode).
     pub click_req: AtomicBool,
+    /// Layout editing (drag handles): the window takes all mouse input, no hover logic.
+    pub edit: AtomicBool,
     pub hwnd: AtomicIsize,
 }
 
@@ -388,6 +390,19 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         let passthrough = crate::settings::bool_at("interaction.passthrough", false);
         if !click_mode || passthrough {
             ws.click_req.store(false, Ordering::SeqCst);
+        }
+
+        if ws.edit.load(Ordering::SeqCst) {
+            if ws.collapse_req.swap(false, Ordering::SeqCst) && ws.expanded.load(Ordering::SeqCst) {
+                set_expanded(&mut h, false, "layout edit");
+            }
+            ws.hotkey.store(false, Ordering::SeqCst);
+            ws.click_req.store(false, Ordering::SeqCst);
+            if h.ignoring {
+                h.ignoring = false;
+                let _ = w.set_ignore_cursor_events(false);
+            }
+            continue;
         }
 
         let mut pt = POINT { x: 0, y: 0 };

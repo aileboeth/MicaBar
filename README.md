@@ -6,8 +6,17 @@ A "dynamic island" network monitor for Windows. A frosted-glass pill at the top 
 connection count; hover it to see which program uses which port, where each connection goes and through which proxy
 node — and decide right there whether it goes through the proxy or direct.
 
-- **Exit IPs at a glance**: proxy exit and direct exit, with country, ISP / ASN and the node in use.
-- **Per-program connections**: icon, process count, live up/down speed; for every connection the local port →
+- **Exits per proxy group**: the exit IP and node of every group of your subscription (default proxy, AI,
+  streaming…) plus the direct exit, with country and ISP / ASN.
+- **Rotating pill**: group exits, the song playing (cover + title), AI quota, speed and node latency take turns;
+  what rotates and how fast is configurable.
+- **AI quota**: subscription usage (5-hour / weekly windows…) and reset times for Claude Code, Codex, Antigravity
+  and Grok.
+- **Desktop window**: normally only the island and a tray icon; click the tray icon for a desktop window whose home
+  page is an overview (exits, speed, traffic, latency, alerts, now playing, AI quota, busiest programs), with every
+  page and all settings.
+- **Any size**: width and height of the pill and the panel via sliders, or by dragging their edges on screen.
+- **Per-program connections**: icon, process count, live up/down speed, proxied programs first; for every connection the local port →
   domain / IP, country, ISP, node and the rule that matched.
 - **Exit control** (Clash Party / Mihomo Party): per program, domain, main domain, or "only this program to this
   domain" — proxy / direct / reject, applied instantly without restarting the core; switch and test the node used
@@ -40,9 +49,18 @@ with "start with Windows" enabled it starts from a scheduled task without a prom
 ## Usage
 
 - Rest the mouse on the pill for 0.3 s to open it (or switch to click); default hotkey `Ctrl+Alt+N`.
-- The gear in the panel opens settings: pill items, alert thresholds, shape, docking edge, theme, autostart,
-  resource profile and more — every feature can be switched off.
-- Tray menu: re-check exit IPs, appearance, open log, quit.
+- Left-click the tray icon for the desktop window; right-click menu: open, settings, resize the island, re-check
+  exit IPs, appearance, open log, quit.
+- The gear in the panel opens the settings page of the desktop window: pill items, rotation, sizes, alert
+  thresholds, shape, docking edge, theme, AI quota, now playing, autostart, resource profile and more — every
+  feature can be switched off.
+
+### Exits per group
+
+With exit control enabled, the override opens one loopback-only port per proxy group (from `127.0.0.1:47800`) whose
+traffic goes straight to that group. NetIsland checks the exit IP through each port, so it knows where "default",
+"AI" or "YouTube" leave from. By default it shows the fallback group plus the groups with recent traffic (up to 4);
+groups can also be picked by hand.
 
 ### Exit control
 
@@ -73,14 +91,17 @@ requests NetIsland makes itself:
 
 | Purpose | Address | When |
 | --- | --- | --- |
-| Proxy exit IP | ipinfo.io → api.ipify.org → ifconfig.me (through the local proxy port) | start, network / proxy change, every 5 min |
+| Proxy exit IP | ipinfo.io → api.ipify.org → ifconfig.me (through the local proxy port; group exits through each group's loopback port) | start, network / proxy change, every 5 min |
 | Direct exit IP | 4.ipw.cn → myip.ipip.net → ip.3322.net (bound to the physical NIC; resolved via 223.5.5.5 / 119.29.29.29) | same |
 | Node latency | measured by the mihomo core against `www.gstatic.com/generate_204` | every 15–60 s (resource profile) |
 | gfw list | cdn.jsdelivr.net / raw.githubusercontent.com (Loyalsoldier/v2ray-rules-dat) | daily, when enabled |
 | Update check | latest.json of github.com/aileboeth/net-island | daily, when enabled |
+| AI quota | api.anthropic.com (Claude Code), chatgpt.com (Codex), cli-chat-proxy.grok.com (Grok), the local Antigravity language server | every 5 min (configurable), when enabled |
 
 Country / ASN lookups use the offline databases shipped with the proxy client (`country.mmdb`, `ASN.mmdb`);
-connection IPs are never sent anywhere. The mihomo controller secret is read from its config at runtime and never
+connection IPs are never sent anywhere. AI quota uses the sign-in each tool keeps on this PC and sends it only to
+that tool's own service; it is never stored, logged or renewed. Now playing reads the Windows media controls and
+makes no network request. The mihomo controller secret is read from its config at runtime and never
 stored or sent.
 
 ## Build from source

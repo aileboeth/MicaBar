@@ -43,7 +43,8 @@ pub fn defaults() -> Value {
         },
         "pill": {
             "items": [
-                { "id": "exit", "on": true },
+                { "id": "rotate", "on": true },
+                { "id": "exit", "on": false },
                 { "id": "conns", "on": true },
                 { "id": "speed", "on": false },
                 { "id": "latency", "on": false },
@@ -55,6 +56,45 @@ pub fn defaults() -> Value {
             // simple | digital | serif
             "clockStyle": "simple",
             "clockSeconds": false
+        },
+        "size": {
+            // collapsed pill: height, and width (0 = fit the content, up to pillMaxW)
+            "pillH": 36,
+            "pillW": 0,
+            "pillMaxW": 520,
+            // expanded panel
+            "panelW": 600,
+            "panelH": 540
+        },
+        "rotate": {
+            // the pill's rotating slot: cards shown one after another
+            "interval": 5,
+            "items": [
+                { "id": "exits", "on": true },
+                { "id": "media", "on": true },
+                { "id": "ai", "on": true },
+                { "id": "speed", "on": false },
+                { "id": "latency", "on": false }
+            ]
+        },
+        "ai": {
+            "on": true,
+            // minutes between queries
+            "interval": 5,
+            "claude": true,
+            "codex": true,
+            "antigravity": true,
+            "grok": true
+        },
+        "media": {
+            "on": true,
+            "cover": true
+        },
+        "exit": {
+            // auto = the fallback (MATCH) group + the busiest proxy groups; manual = `groups`
+            "mode": "auto",
+            "groups": [],
+            "max": 4
         },
         "flash": {
             "exitChange": true,
@@ -90,8 +130,22 @@ pub fn defaults() -> Value {
     })
 }
 
-/// Recursively fills keys missing in `v` from `d` (arrays are taken as a whole from `v`).
+/// Recursively fills keys missing in `v` from `d` (arrays are taken as a whole from `v`, except
+/// ordered `{id, on}` lists: ids added in a later version are appended, switched off).
 fn fill(v: &mut Value, d: &Value) {
+    if let (Some(va), Some(da)) = (v.as_array_mut(), d.as_array()) {
+        if da.iter().all(|x| x.get("id").is_some()) {
+            for x in da {
+                let id = x.get("id");
+                if !va.iter().any(|y| y.get("id") == id) {
+                    let mut add = x.clone();
+                    add["on"] = Value::Bool(false);
+                    va.push(add);
+                }
+            }
+        }
+        return;
+    }
     if let (Some(vo), Some(dobj)) = (v.as_object_mut(), d.as_object()) {
         for (k, dv) in dobj {
             match vo.get_mut(k) {

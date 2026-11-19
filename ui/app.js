@@ -4,9 +4,12 @@ const T = window.__TAURI__;
 const invoke = T.core.invoke;
 const listen = T.event.listen;
 
-const EXPANDED_W = 600;
-const EXPANDED_H = 540;
+// the same script drives the island (index.html) and the desktop manager window (manager.html)
+const MANAGER = document.body.dataset.mode === "manager";
 const MAX_CONNS_PER_APP = 60;
+// script errors go to the app log (release builds have no devtools)
+window.addEventListener("error", (e) => invoke("log_js", { msg: `${MANAGER ? "manager" : "island"} error: ${e.message} @${e.lineno}:${e.colno}` }).catch(() => {}));
+window.addEventListener("unhandledrejection", (e) => invoke("log_js", { msg: `${MANAGER ? "manager" : "island"} rejection: ${e.reason}` }).catch(() => {}));
 
 const $ = (id) => document.getElementById(id);
 const island = $("island");
@@ -20,6 +23,10 @@ let query = "";
 const openApps = new Set();
 const showAll = new Set();
 const icons = new Map(); // path -> dataURL | null | "pending"
+if (MANAGER) {
+  expanded = true; // the manager window always shows the "panel"
+  tab = decodeURIComponent(location.hash.slice(1)) || "home";
+}
 
 let regionNames = null;
 try { regionNames = new Intl.DisplayNames(["zh-CN"], { type: "region" }); } catch { /* ignore */ }
@@ -29,6 +36,20 @@ try { regionNames = new Intl.DisplayNames(["zh-CN"], { type: "region" }); } catc
 let S = null; // settings document from the backend
 const sget = (path, dflt) => path.split(".").reduce((o, k) => (o == null ? o : o[k]), S) ?? dflt;
 const itemOn = (listPath, id) => (sget(listPath, []) || []).some((i) => i.id === id && i.on);
+
+// island sizes (CSS px); while the layout is being edited the live values come from editSize
+const SIZE_LIMITS = { pillH: [28, 60], pillW: [0, 900], pillMaxW: [200, 900], panelW: [480, 1100], panelH: [360, 900] };
+const SIZE_DEFAULTS = { pillH: 36, pillW: 0, pillMaxW: 520, panelW: 600, panelH: 540 };
+let editSize = null;
+let editing = false; // layout editing (drag handles)
+let editPart = "panel";
+const sz = (k) => {
+  const v = editSize && editSize[k] != null ? editSize[k] : sget("size." + k, SIZE_DEFAULTS[k]);
+  const [lo, hi] = SIZE_LIMITS[k];
+  return Math.min(hi, Math.max(lo, Number(v) || SIZE_DEFAULTS[k]));
+};
+const panelW = () => sz("panelW");
+const panelH = () => sz("panelH");
 
 // ---------- theme (white / black frosted glass) ----------
 
@@ -170,37 +191,54 @@ function iconHtml(app) {
 // ---------- island geometry ----------
 
 function pillWidth() {
-  // measure natural pill width
+  // fixed width from settings, else the natural width of the content (up to the max width)
+  const fixed = sz("pillW");
+  if (fixed > 0) return Math.min(window.innerWidth - 16, Math.max(120, fixed));
+  pill.style.width = "";
   const w = pill.scrollWidth;
-  return Math.max(120, Math.min(window.innerWidth - 16, w));
+  return Math.max(120, Math.min(window.innerWidth - 16, sz("pillMaxW"), w));
 }
 
 // Window size in CSS px; the backend gets it in physical px (× devicePixelRatio, which also
-// carries the Windows "text size" accessibility factor).
-const WIN_W = EXPANDED_W + 40;
-const WIN_H = EXPANDED_H + 30;
-
+// carries the Windows "text size" accessibility factor). While editing the layout the window
+// grows to the largest allowed panel so the handles can be dragged that far.
+let fitted = "";
 function fitWindow() {
+  if (MANAGER) return;
   const dpr = window.devicePixelRatio || 1;
-  invoke("fit_window", { w: Math.round(WIN_W * dpr), h: Math.round(WIN_H * dpr) }).catch(() => {});
-  matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", fitWindow, { once: true });
+  const maxW = Math.floor((screen.availWidth || 1920) * 0.98), maxH = Math.floor((screen.availHeight || 1080) * 0.95);
+  const w = Math.min(maxW, (editing ? SIZE_LIMITS.panelW[1] : Math.max(panelW(), sz("pillW"), sz("pillMaxW"))) + 40);
+  const h = Math.min(maxH, (editing ? SIZE_LIMITS.panelH[1] : panelH()) + 30);
+  const key = `${w}x${h}@${dpr}`;
+  if (key === fitted) return;
+  fitted = key;
+  invoke("fit_window", { w: Math.round(w * dpr), h: Math.round(h * dpr) }).catch(() => {});
+  matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", () => { fitted = ""; fitWindow(); }, { once: true });
 }
 
-let panelH = EXPANDED_H;
+let panelHNow = 540;
 
-// Expanded height follows the content (list rows), clamped to EXPANDED_H.
+// Expanded height follows the content (list rows), up to the panel height setting.
 function measurePanel() {
-  const list = $("list");
-  const foot = $("foot");
-  const inner = $("list-inner");
-  const footH = foot.childElementCount ? foot.offsetHeight + 10 : 0;
-  const need = list.offsetTop + (inner ? inner.offsetHeight : 120) + footH + 14;
-  const h = Math.max(240, Math.min(EXPANDED_H, Math.ceil(need)));
-  if (Math.abs(h - panelH) > 3) {
-    panelH = h;
+  if (MANAGER) return;
+  let h;
+  if (editing) h = panelH();
+  else {
+    const list = $("list");
+    const foot = $("foot");
+    const inner = $("list-inner");
+    const footH = foot.childElementCount ? foot.offsetHeight + 10 : 0;
+    const need = list.offsetTop + (inner ? inner.offsetHeight : 120) + footH + 14;
+    h = Math.max(240, Math.min(panelH(), Math.ceil(need)));
+  }
+  if (Math.abs(h - panelHNow) > 3) {
+    panelHNow = h;
     if (expanded) applySize();
   }
 }
+
+// chart width follows the panel (island) or the content column (manager window)
+const chartW = () => Math.max(420, Math.floor((MANAGER ? $("list").clientWidth - 40 : panelW() - 34)));
 
 let maximized = false; // a maximized window is in front (setting: shrink to a line)
 
@@ -220,16 +258,16 @@ function islandRect(open) {
   const W = window.innerWidth, H = window.innerHeight;
   let w, h;
   if (open) {
-    w = EXPANDED_W;
-    h = panelH;
+    w = Math.min(W - 8, panelW());
+    h = Math.min(H - 8, panelHNow);
   } else if (style === "line") {
     [w, h] = vertical ? [6, 140] : [140, 6];
   } else if (vertical) {
-    w = 40;
+    w = sz("pillH") + 4;
     h = Math.max(60, Math.min(H - 16, pill.scrollHeight));
   } else {
     w = pillWidth();
-    h = 36;
+    h = sz("pillH");
   }
   // capsule floats 6px off the edge; notch and line sit on it; an expanded panel floats unless notch
   const gap = open ? (style === "notch" ? 0 : 6) : style === "capsule" ? 6 : 0;
@@ -243,6 +281,7 @@ function islandRect(open) {
 
 // Both rectangles go to the backend, which runs the hover state machine (dwell, buttons, leave).
 function reportRect() {
+  if (MANAGER) return;
   const dpr = window.devicePixelRatio || 1;
   const phys = (r, pad) => [(r.x - pad) * dpr, (r.y - pad) * dpr, (r.w + 2 * pad) * dpr, (r.h + 2 * pad) * dpr];
   const c = islandRect(false);
@@ -251,7 +290,12 @@ function reportRect() {
 }
 
 function applySize() {
+  if (MANAGER) return;
+  document.documentElement.style.setProperty("--pill-h", sz("pillH") + "px");
   const r = islandRect(expanded);
+  const fixedW = !r.vertical && sz("pillW") > 0;
+  pill.style.width = fixedW ? r.w + "px" : "";
+  pill.style.justifyContent = fixedW ? "center" : "";
   island.classList.toggle("notch", r.style === "notch");
   island.classList.toggle("line", r.style === "line" && !expanded);
   island.classList.toggle("vertical", r.vertical && !expanded);
@@ -263,6 +307,7 @@ function applySize() {
   if (!expanded && r.style === "capsule") island.style.borderRadius = r.h / 2 + "px";
   else island.style.borderRadius = "";
   reportRect();
+  if (editing) renderEditUi();
 }
 
 function expand() {
@@ -276,7 +321,7 @@ function expand() {
 }
 
 function collapse() {
-  if (!expanded) return;
+  if (!expanded || MANAGER) return;
   expanded = false;
   closeMenu();
   confirmDisable = false;
@@ -304,6 +349,8 @@ function clockText() {
 // One pill item; "" when it has nothing to show.
 function pillItem(id, target) {
   switch (id) {
+    case "rotate":
+      return rotHtml(target);
     case "exit":
       return `${target?.cc ? flagImg(target.cc) : ""}<span class="mono ip-text">${esc(target?.ip || (target?.error ? "出口检测失败" : "检测中…"))}</span>`;
     case "conns":
@@ -329,6 +376,86 @@ function pillItem(id, target) {
       return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
   }
   return "";
+}
+
+// ---------- rotating slot (exits per group, now playing, AI quota, speed, latency) ----------
+
+let aiState = [];
+let media = null;
+const rot = { key: null, at: 0, anim: false };
+
+// "🚀 代理设置" -> "代理设置"; long names cut to 8 characters
+function shortGroup(name, isDefault) {
+  const s = String(name || "").replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}️‍]/gu, "").trim();
+  if (!s) return isDefault ? "代理" : "分组";
+  return [...s].length > 8 ? [...s].slice(0, 8).join("") + "…" : s;
+}
+
+function quotaClass(used) {
+  return used >= 90 ? "crit" : used >= 70 ? "warn" : "";
+}
+
+function shortWindow(label) {
+  if (label === "5 小时") return "5h";
+  if (label === "每周") return "周";
+  if (label === "每月") return "月";
+  return [...label].length > 8 ? [...label].slice(0, 8).join("") + "…" : label;
+}
+
+function rotCards(target) {
+  const cards = [];
+  const items = sget("rotate.items", null) || [{ id: "exits", on: true }, { id: "media", on: true }, { id: "ai", on: true }];
+  const detected = snap?.proxy?.detected;
+  for (const it of items) {
+    if (!it.on) continue;
+    if (it.id === "exits") {
+      const groups = (exitState?.groups || []).filter((g) => g.ip);
+      if (detected && groups.length) {
+        for (const g of groups) {
+          cards.push({ key: "x:" + g.group, html: `<span class="rot-tag">${esc(shortGroup(g.group, g.isDefault))}</span>${flagImg(g.cc)}<span class="mono ip-text">${esc(g.ip)}</span>` });
+        }
+      } else {
+        cards.push({ key: "x:main", html: pillItem("exit", target) });
+      }
+    } else if (it.id === "media") {
+      if (media?.title && media.playing) {
+        const cover = media.cover && sget("media.cover", true) ? `<img class="rot-cover" src="${media.cover}" alt="">` : `<span class="rot-note">♪</span>`;
+        cards.push({ key: "m:" + media.title, html: `${cover}<span class="rot-text">${esc(media.title)}${media.artist ? `<span class="rot-sub"> · ${esc(media.artist)}</span>` : ""}</span>` });
+      }
+    } else if (it.id === "ai") {
+      for (const q of aiState) {
+        if (!q.windows?.length || (q.status !== "ok" && q.status !== "stale")) continue;
+        const ws = q.windows.slice(0, 2).map((w) => `<span class="q ${quotaClass(w.used)}"><span class="q-l">${esc(shortWindow(w.label))}</span><span class="mono">${Math.round(w.used)}%</span></span>`).join("");
+        cards.push({ key: "a:" + q.tool, html: `<span class="rot-tag ai">${esc(q.name)}</span>${ws}` });
+      }
+    } else if (it.id === "speed" || it.id === "latency") {
+      const h = pillItem(it.id, target);
+      if (h) cards.push({ key: "s:" + it.id, html: h });
+    }
+  }
+  return cards;
+}
+
+function rotHtml(target) {
+  const cards = rotCards(target);
+  if (!cards.length) return "";
+  const every = Math.max(2, Number(sget("rotate.interval", 5)) || 5) * 1000;
+  let i = cards.findIndex((c) => c.key === rot.key);
+  const now = Date.now();
+  if (i < 0) {
+    i = 0;
+    rot.at = now;
+  } else if (now - rot.at >= every && cards.length > 1) {
+    i = (i + 1) % cards.length;
+    rot.at = now;
+  }
+  if (cards[i].key !== rot.key) {
+    rot.anim = rot.key !== null;
+    rot.key = cards[i].key;
+  }
+  const html = `<span class="rot-card${rot.anim ? " rot-in" : ""}">${cards[i].html}</span>`;
+  rot.anim = false;
+  return html;
 }
 
 // ---------- threshold flashes (5 s message in the pill) ----------
@@ -379,10 +506,12 @@ function checkFlashes(s) {
   }
 }
 
+let pillLast = "";
 function renderPill() {
+  if (MANAGER) return;
   const p = snap?.proxy;
   const ex = exitState;
-  const target = p?.detected ? ex?.proxy : ex?.direct;
+  const target = mainExit(ex, p?.detected);
   let dot = "dot";
   if (ex?.checking) dot += " busy";
   if (target?.ip) dot += p?.detected ? " ok" : " warn";
@@ -401,11 +530,17 @@ function renderPill() {
       .filter((i) => i.on)
       .map((i) => pillItem(i.id, target))
       .filter(Boolean);
-    html = items.map((x) => `<span class="pill-item">${x}</span>`).join(`<span class="pill-sep"></span>`);
+    html = items.map((x) => `<span class="pill-item${x.startsWith('<span class="rot-card') ? " rot-slot" : ""}">${x}</span>`).join(`<span class="pill-sep"></span>`);
   }
-  pill.innerHTML = `<span class="${dot}"></span>${html}`;
+  const full = `<span class="${dot}"></span>${html}`;
+  if (full !== pillLast) {
+    pillLast = full;
+    pill.innerHTML = full;
+  }
   if (!expanded) applySize();
 }
+// the rotating slot advances on its own, between snapshots too
+if (!MANAGER) setInterval(() => { if (!expanded) renderPill(); }, 1000);
 
 // ---------- panel ----------
 
@@ -432,11 +567,34 @@ function exitCard(title, r, opts = {}) {
   </div>`;
 }
 
+// One row per measured proxy group: group · node · exit IP · ISP
+function groupExitCard(groups) {
+  const rows = groups.map((g) => {
+    const geo = [g.cc ? country(g.cc) : "", g.org || ""].filter(Boolean).join(" · ");
+    return `<div class="gx-row">
+      <div class="gx-name">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</div>
+      <div class="gx-ip mono">${g.ip ? `${flagImg(g.cc, "sm")} ${esc(g.ip)}` : `<span class="crit">${esc(g.error ? "检测失败" : "—")}</span>`}</div>
+      <div class="gx-meta">${g.node ? decorate(g.node) : ""}${geo ? ` · ${esc(geo)}` : ""}</div>
+    </div>`;
+  }).join("");
+  return `<div class="exit-card gx"><div class="label">代理出口（按分组）</div>${rows}</div>`;
+}
+
+// The exit shown in the pill: the default (fallback) group, else the old single proxy check.
+function mainExit(ex, detected) {
+  if (!detected) return ex?.direct;
+  const d = ex?.groups?.find((g) => g.isDefault) || ex?.groups?.[0];
+  return d && (d.ip || d.error) ? d : ex?.proxy;
+}
+
 function renderExit() {
   const p = snap?.proxy;
   const ex = exitState || {};
   let html = "";
-  if (p?.detected) {
+  if (p?.detected && ex.groups?.length) {
+    html += groupExitCard(ex.groups);
+    html += exitCard("直连出口", ex.direct, { checking: ex.checking, direct: true });
+  } else if (p?.detected) {
     html += exitCard("代理出口", ex.proxy, { checking: ex.checking, sameAs: ex.direct?.ip });
     html += exitCard("直连出口", ex.direct, { checking: ex.checking, direct: true });
   } else {
@@ -706,7 +864,7 @@ function speedTabHtml() {
   const up = (src ? src.up : speedHist.up).slice(-n);
   const down = (src ? src.down : speedHist.down).slice(-n);
   const chart = Charts.line({
-    id: "speed", width: 566, height: 170, xs,
+    id: "speed", width: chartW(), height: 170, xs,
     series: [{ name: "下载", cls: "s1", values: down }, { name: "上传", cls: "s2", values: up }],
     fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, endLabels: true, binary: true,
   });
@@ -741,7 +899,7 @@ function loadTraffic(force) {
   if (!force && Date.now() - trafficAt < 10_000) return;
   trafficAt = Date.now();
   invoke("traffic_query", { days: trafficDays })
-    .then((r) => { trafficData = r; if (tab === "traffic") renderList(true); })
+    .then((r) => { trafficData = r; if (tab === "traffic" || tab === "home") renderList(true); })
     .catch(() => {});
 }
 
@@ -759,7 +917,7 @@ function trafficTabHtml() {
     ${Charts.segbar([{ value: tp, cls: "s1" }, { value: td, cls: "s2" }], `代理 ${fmtBytes(tp)} · 直连 ${fmtBytes(td)}`)}</div>`;
   const chart = trafficDays > 1
     ? Charts.columns({
-        id: "traffic", width: 566, height: 160, cats: r.days.map((d) => d.date),
+        id: "traffic", width: chartW(), height: 160, cats: r.days.map((d) => d.date),
         stacks: [{ name: "代理", cls: "s1", values: r.days.map(P) }, { name: "直连", cls: "s2", values: r.days.map(D) }],
         fmtY: fmtBytes, fmtTick: tickRate, binary: true, fmtCat: (d) => (d === r.days[r.days.length - 1].date ? "今天" : d.slice(5)),
       })
@@ -785,7 +943,7 @@ function loadLatency() {
   const at = snap?.latency?.at || 0;
   if (at === latAt) return;
   latAt = at;
-  invoke("latency_history").then((h) => { latHist = h || []; if (tab === "nodes") renderList(true); }).catch(() => {});
+  invoke("latency_history").then((h) => { latHist = h || []; if (tab === "nodes" || tab === "home") renderList(true); }).catch(() => {});
 }
 
 function nodesTabHtml() {
@@ -807,7 +965,7 @@ function nodesTabHtml() {
   const pts = latHist.filter((s) => nodeRange >= 100000 || s.at > now - nodeRange * 60_000);
   const chart = pts.length >= 2
     ? Charts.line({
-        id: "latency", width: 566, height: 170, xs: pts,
+        id: "latency", width: chartW(), height: 170, xs: pts,
         series: [{ name: "延迟", cls: "s1", values: pts.map((s) => s.ms) }],
         markers: pts.map((s, i) => (s.ms == null ? { i, label: `${noFlags(s.node)} 无响应` } : null)).filter(Boolean),
         ref: { value: sget("flash.latencyMs", 800), label: `提示阈值 ${sget("flash.latencyMs", 800)} ms` },
@@ -822,10 +980,165 @@ function nodesTabHtml() {
     <div class="m-hint">✕ 表示那次测速没有响应。节点无响应 / 延迟超过阈值时会在胶囊上提示（设置里可改）。</div></div>`;
 }
 
+// ---------- AI quota page ----------
+
+function untilText(ms) {
+  if (!ms) return "";
+  const s = Math.round((ms - Date.now()) / 1000);
+  if (s <= 0) return "已重置";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  const left = d ? `${d} 天 ${h} 小时` : h ? `${h} 小时 ${m} 分` : `${Math.max(1, m)} 分钟`;
+  const at = new Date(ms);
+  const day = ["日", "一", "二", "三", "四", "五", "六"][at.getDay()];
+  const same = at.toDateString() === new Date().toDateString();
+  return `${left}后重置（${same ? "今天" : "周" + day} ${hm(ms)}）`;
+}
+
+// one meter per usage window: the share used, coloured only past the warning thresholds
+function quotaBars(q, compact) {
+  return q.windows.map((w) => {
+    const pct = Math.max(0, Math.min(100, w.used));
+    return `<div class="qrow ${compact ? "compact" : ""}">
+      <span class="q-name">${esc(w.label)}</span>
+      <span class="meter" role="meter" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><i class="${quotaClass(pct)}" style="width:${pct}%"></i></span>
+      <span class="q-pct mono">${Math.round(pct)}%</span>
+      ${compact ? "" : `<span class="q-reset">${esc(untilText(w.resetsAt))}</span>`}
+    </div>`;
+  }).join("");
+}
+
+function aiCard(q, compact) {
+  const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">上次数据 · ${ago(q.at)}</span>` : "";
+  const body = q.windows?.length
+    ? quotaBars(q, compact)
+    : `<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || "暂无数据")}</div>`;
+  return `<div class="ai-card ${q.status}">
+    <div class="ai-head"><b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}<span class="sp"></span>${!compact && q.source ? `<span class="q-src">${esc(q.source)}</span>` : ""}</div>
+    ${body}
+    ${!compact && q.status === "stale" && q.message ? `<div class="q-msg bad">${esc(q.message)}</div>` : ""}
+  </div>`;
+}
+
+function aiTabHtml() {
+  if (!sget("ai.on", true)) return `<div class="empty">AI 额度已关闭（设置 → AI 额度）</div>`;
+  const list = aiState.length ? aiState.map((q) => aiCard(q, false)).join("") : `<div class="empty">正在查询…</div>`;
+  const last = aiState.reduce((m, q) => Math.max(m, q.at || 0), 0);
+  return `<div class="viz">
+    <div class="viz-head"><span class="viz-sel">订阅额度：用了多少、什么时候重置${last ? ` · 更新于 ${ago(last)}` : ""}</span>
+      <button class="ghost" data-do="ai-refresh">立即刷新</button></div>
+    <div class="ai-grid">${list}</div>
+    <div class="m-hint">用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方；
+      登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 5)} 分钟查一次。</div>
+  </div>`;
+}
+
+// ---------- overview (manager home) ----------
+
+const svg = (d, fill) => `<svg width="14" height="14" viewBox="0 0 24 24" fill="${fill ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="${d}"/></svg>`;
+const ICON = {
+  prev: svg("M6 5v14M19 5L9 12l10 7z", true),
+  next: svg("M18 5v14M5 5l10 7-10 7z", true),
+  play: svg("M7 4l13 8-13 8z", true),
+  pause: svg("M7 5h3v14H7zM14 5h3v14h-3z", true),
+};
+
+function mediaCardHtml() {
+  if (!sget("media.on", true)) return "";
+  const m = media;
+  if (!m?.title) return `<div class="home-card media"><div class="hc-title">正在播放</div><div class="q-msg">没有正在播放的内容</div></div>`;
+  const pct = m.duration > 0 ? Math.min(100, (m.position / m.duration) * 100) : 0;
+  const t = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  return `<div class="home-card media"><div class="hc-title">正在播放<span class="hc-sub">${esc(m.app)}</span></div>
+    <div class="mp">
+      ${m.cover && sget("media.cover", true) ? `<img class="mp-cover" src="${m.cover}" alt="">` : `<div class="mp-cover none">♪</div>`}
+      <div class="mp-info"><div class="mp-title">${esc(m.title)}</div><div class="mp-artist">${esc([m.artist, m.album].filter(Boolean).join(" · "))}</div>
+        ${m.duration > 0 ? `<div class="mp-bar"><i style="width:${pct}%"></i></div><div class="mp-time mono">${t(m.position)} / ${t(m.duration)}</div>` : ""}
+        <div class="mp-ctl"><button data-do="media-prev" title="上一首">${ICON.prev}</button><button data-do="media-toggle" title="播放 / 暂停">${m.playing ? ICON.pause : ICON.play}</button><button data-do="media-next" title="下一首">${ICON.next}</button></div>
+      </div>
+    </div></div>`;
+}
+
+function homeHtml() {
+  if (!snap) return `<div class="empty">正在读取…</div>`;
+  loadTraffic(false);
+  loadLatency();
+  const ex = exitState || {};
+  const p = snap.proxy || {};
+  const groups = ex.groups || [];
+  const exitCards = [];
+  if (p.detected && groups.length) {
+    for (const g of groups) {
+      const geo = [g.cc ? country(g.cc) : "", g.org || ""].filter(Boolean).join(" · ");
+      exitCards.push(`<div class="hx">
+        <div class="hx-g">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</div>
+        <div class="hx-ip mono">${g.ip ? `${flagImg(g.cc)}${esc(g.ip)}` : `<span class="crit">${g.error ? "检测失败" : "—"}</span>`}</div>
+        <div class="hx-m">${esc(geo)}</div>
+        ${g.node ? `<div class="hx-n">${decorate(g.node)}</div>` : ""}
+      </div>`);
+    }
+  } else if (p.detected && ex.proxy) {
+    const r = ex.proxy;
+    exitCards.push(`<div class="hx"><div class="hx-g">代理出口</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc([r.cc ? country(r.cc) : "", r.org || ""].filter(Boolean).join(" · "))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
+  }
+  const d = ex.direct;
+  exitCards.push(`<div class="hx direct"><div class="hx-g">直连出口${p.detected ? "" : "（未检测到代理）"}</div>
+    <div class="hx-ip mono">${d?.ip ? `${flagImg(d.cc)}${esc(d.ip)}` : "—"}</div>
+    <div class="hx-m">${esc(d ? [d.cc ? country(d.cc) : "", d.org || ""].filter(Boolean).join(" · ") : "")}</div></div>`);
+  const groupNote = p.detected && !groups.length
+    ? ctrl().status === "active"
+      ? `<div class="m-hint">分组出口要等覆写更新后才有：在「出口」页点「更新」</div>`
+      : `<div class="m-hint">启用「出口控制」后，可以分别看到每个分组（AI、流媒体…）的出口 IP</div>`
+    : "";
+
+  const r = trafficData;
+  const tp = r ? r.days.reduce((s, x) => s + x.pu + x.pd, 0) : 0, td = r ? r.days.reduce((s, x) => s + x.du + x.dd, 0) : 0;
+  const L = snap.latency;
+  const leaks = snap.guard?.unacked || 0;
+  const tile = (label, value, note = "", go = "") => `<div class="tile ${go ? "go" : ""}" ${go ? `data-tab="${go}"` : ""}><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
+  const tiles = `<div class="tiles home-tiles">
+    ${tile("网速", `<span class="mono">${speedHtml(snap.up, snap.down)}</span>`, "", "speed")}
+    ${tile("连接", `<span class="mono">${snap.connCount}</span>`, `${snap.apps.filter((a) => a.conns.length).length} 个程序`, "conns")}
+    ${tile("今日流量", r ? fmtBytes(tp + td) : "—", r && tp + td ? `代理 ${Math.round((tp / (tp + td)) * 100)}% · 直连 ${Math.round((td / (tp + td)) * 100)}%` : "", "traffic")}
+    ${tile("节点延迟", L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">无响应</span>`) : "—", L?.node ? decorate(L.node) : "", "nodes")}
+    ${tile("泄漏预警", leaks ? `<span class="crit">${leaks}</span>` : "0", leaks ? "点击查看" : "没有泄漏", "guard")}
+  </div>`;
+
+  const n = Math.min(120, speedHist.t.length);
+  const chart = n >= 2
+    ? Charts.line({
+        id: "home-speed", width: chartW(), height: 130, xs: speedHist.t.slice(-n),
+        series: [{ name: "下载", cls: "s1", values: speedHist.down.slice(-n) }, { name: "上传", cls: "s2", values: speedHist.up.slice(-n) }],
+        fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, endLabels: true, binary: true,
+      })
+    : "";
+
+  const top = snap.apps.filter((a) => !a.isProxy && a.conns.length).slice(0, 8).map((a) => `<div class="top-row" data-tab="conns">
+      ${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span>
+      <span class="route-tag ${a.viaProxy ? "proxy" : "direct"}">${a.viaProxy ? "代理" : "直连"}</span>
+      <span class="app-count mono">${a.conns.length}</span>
+      <span class="speed mono">${speedHtml(a.up, a.down)}</span></div>`).join("");
+
+  const ai = sget("ai.on", true) && aiState.length
+    ? `<div class="home-card"><div class="hc-title">AI 额度<span class="sp"></span><button class="link" data-tab="ai">详情</button></div>${aiState.filter((q) => q.status !== "absent").map((q) => aiCard(q, true)).join("") || `<div class="q-msg">没找到已登录的 AI 工具</div>`}</div>`
+    : "";
+
+  return `<div class="home">
+    <div class="h-sec"><div class="h-head"><b>出口</b><span class="sp"></span>${ex.lastCheck ? `<span class="h-note">${ex.checking ? "检测中…" : "上次检测 " + ago(ex.lastCheck)}</span>` : ""}<button class="ghost" data-do="exit-refresh">重新检测</button></div>
+      <div class="hx-grid">${exitCards.join("")}</div>${groupNote}</div>
+    ${tiles}
+    <div class="h-sec">${chart}</div>
+    <div class="home-cols">${mediaCardHtml()}${ai}</div>
+    <div class="h-sec"><div class="h-head"><b>正在联网的程序</b><span class="h-note">走代理的排在前面</span><span class="sp"></span><button class="link" data-tab="conns">全部连接</button></div>${top || `<div class="empty">没有连接</div>`}</div>
+  </div>`;
+}
+
 // ---------- settings page ----------
 
+const ROT_LABEL = {
+  exits: "各分组的出口 IP", media: "正在播放的歌（播放时）", ai: "AI 额度", speed: "实时网速", latency: "节点延迟",
+};
 const PILL_ITEM_LABEL = {
-  exit: "出口 IP + 国旗", conns: "连接数", speed: "实时网速", latency: "节点延迟",
+  rotate: "轮换区（出口 / 音乐 / AI 额度…）", exit: "出口 IP + 国旗（固定显示）", conns: "连接数", speed: "实时网速", latency: "节点延迟",
   leaks: "泄漏数（有泄漏时才显示）", cpu: "CPU 占用", mem: "内存占用", clock: "时钟",
 };
 
@@ -890,6 +1203,23 @@ function sNumber(path, label, min, max, step, unit, note = "") {
     <span class="s-num"><input type="number" data-sp="${path}" data-num="1" min="${min}" max="${max}" step="${step}" value="${esc(sget(path, min))}">${unit}</span></label>`;
 }
 
+function sRange(path, label, min, max, step, unit, note = "") {
+  const v = sget(path, min);
+  return `<label class="s-row"><span class="s-label">${label}${note ? `<span class="s-note">${note}</span>` : ""}</span>
+    <span class="s-num"><input type="range" data-sp="${path}" data-num="1" min="${min}" max="${max}" step="${step}" value="${esc(v)}"><span class="mono s-val">${esc(v)}${unit}</span></span></label>`;
+}
+
+let groupOptions = null;
+function groupPickerHtml() {
+  if (!groupOptions) {
+    invoke("exit_group_options").then((g) => { groupOptions = g || []; if (tab === "settings") renderList(true); }).catch(() => { groupOptions = []; });
+    return `<div class="s-note">正在读取分组…</div>`;
+  }
+  if (!groupOptions.length) return `<div class="s-note">没有可选的分组：需要先启用出口控制（覆写里才有每个分组的专用端口）</div>`;
+  const chosen = new Set(sget("exit.groups", []) || []);
+  return `<div class="s-groups">${groupOptions.map((g) => `<label class="s-grp"><input type="checkbox" data-grp="${esc(g)}" ${chosen.has(g) ? "checked" : ""}> ${decorate(g)}</label>`).join("")}</div>`;
+}
+
 function sColor(path, label) {
   return `<label class="s-row"><span class="s-label">${label}</span><input type="color" data-sp="${path}" value="${esc(sget(path, "#000000"))}"></label>`;
 }
@@ -927,10 +1257,39 @@ function settingsHtml() {
     <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
     ${sSelect("appearance.scale", "界面缩放", [[90, "90%"], [100, "100%"], [110, "110%"], [125, "125%"], [150, "150%"]])}
   </div>
+  <div class="s-sec"><div class="s-title">大小<span class="s-note">也可以在屏幕上直接拖动边缘调整</span></div>
+    ${sRange("size.pillH", "胶囊高度", 28, 60, 2, "px")}
+    ${sRange("size.pillW", "胶囊宽度", 0, 900, 10, "px", "0 = 跟着内容自动变宽")}
+    ${sRange("size.pillMaxW", "　自动宽度最多", 200, 900, 10, "px")}
+    ${sRange("size.panelW", "展开面板宽度", 480, 1100, 10, "px")}
+    ${sRange("size.panelH", "展开面板最大高度", 360, 900, 10, "px", "内容少时会矮一些")}
+    <div class="m-actions end"><button class="ghost" data-do="size-reset">恢复默认大小</button><button class="primary" data-do="layout-edit">在屏幕上拖动调整</button></div>
+  </div>
   <div class="s-sec"><div class="s-title">胶囊里显示什么<span class="s-note">勾选显示，箭头调顺序</span></div>
     ${sOrderList("pill.items", PILL_ITEM_LABEL)}
     ${sSelect("pill.clockStyle", "时钟样式", [["simple", "简洁"], ["digital", "数码管"], ["serif", "衬线"]])}
     ${sToggle("pill.clockSeconds", "时钟显示秒")}
+  </div>
+  <div class="s-sec"><div class="s-title">轮换区<span class="s-note">胶囊里的「轮换区」依次显示这些内容，没有数据的自动跳过</span></div>
+    ${sOrderList("rotate.items", ROT_LABEL)}
+    ${sNumber("rotate.interval", "每项显示", 2, 60, 1, "秒")}
+  </div>
+  <div class="s-sec"><div class="s-title">分组出口<span class="s-note">每个分组单独测一次出口 IP（经覆写里只监听本机的专用端口）</span></div>
+    ${sSelect("exit.mode", "显示哪些分组", [["auto", "自动：兜底分组 + 最近有流量的分组"], ["manual", "手动勾选"]])}
+    ${sNumber("exit.max", "　最多", 1, 12, 1, "个")}
+    ${sget("exit.mode") === "manual" ? groupPickerHtml() : ""}
+  </div>
+  <div class="s-sec"><div class="s-title">AI 额度<span class="s-note">用本机已登录的凭据向各家官方查询，只读，不保存、不外传</span></div>
+    ${sToggle("ai.on", "显示 AI 额度")}
+    ${sToggle("ai.claude", "　Claude Code")}
+    ${sToggle("ai.codex", "　Codex", "需要用 ChatGPT 账号登录的 Codex")}
+    ${sToggle("ai.antigravity", "　Antigravity", "Antigravity 打开并进入工作区时才能读到")}
+    ${sToggle("ai.grok", "　Grok", "需要用 grok CLI 登录过")}
+    ${sNumber("ai.interval", "　每隔多久查一次", 1, 120, 1, "分钟")}
+  </div>
+  <div class="s-sec"><div class="s-title">正在播放</div>
+    ${sToggle("media.on", "显示正在播放的歌", "读取 Windows 媒体控制（网易云、QQ 音乐、Spotify、浏览器等）")}
+    ${sToggle("media.cover", "　显示封面")}
   </div>
   <div class="s-sec"><div class="s-title">短暂提示<span class="s-note">发生时在胶囊上显示 5 秒，同类 1 分钟内只提示一次</span></div>
     ${sToggle("flash.exitChange", "出口 IP 变了")}
@@ -994,6 +1353,21 @@ $("list").addEventListener("change", (e) => {
   } else if (el.dataset.ol) {
     const list = (sget(el.dataset.ol, []) || []).map((i) => (i.id === el.dataset.id ? { ...i, on: el.checked } : i));
     setPath(el.dataset.ol, list);
+  } else if (el.dataset.grp != null) {
+    const cur = new Set(sget("exit.groups", []) || []);
+    if (el.checked) cur.add(el.dataset.grp);
+    else cur.delete(el.dataset.grp);
+    // keep the config order
+    setPath("exit.groups", (groupOptions || []).filter((g) => cur.has(g)));
+    invoke("refresh_exit").catch(() => {});
+  }
+});
+// sliders show their value while being dragged
+$("list").addEventListener("input", (e) => {
+  const el = e.target;
+  if (el.type === "range") {
+    const out = el.parentElement.querySelector(".s-val");
+    if (out) out.textContent = el.value + (out.textContent.match(/[^\d.]+$/)?.[0] || "");
   }
 });
 
@@ -1164,9 +1538,10 @@ function renderList(force = false) {
   if (list.contains(document.activeElement) && ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
   const rows = [];
   refs = [];
-  if (tab === "speed" || tab === "traffic" || tab === "nodes") {
+  if (tab === "speed" || tab === "traffic" || tab === "nodes" || tab === "home" || tab === "ai") {
     const scroll = list.scrollTop;
-    list.innerHTML = `<div id="list-inner">${tab === "speed" ? speedTabHtml() : tab === "traffic" ? trafficTabHtml() : nodesTabHtml()}</div>`;
+    const html = { speed: speedTabHtml, traffic: trafficTabHtml, nodes: nodesTabHtml, home: homeHtml, ai: aiTabHtml }[tab]();
+    list.innerHTML = `<div id="list-inner">${html}</div>`;
     list.scrollTop = scroll;
     Charts.restore(list);
     measurePanel();
@@ -1309,6 +1684,28 @@ async function runAction(el) {
       await invoke("settings_reset");
       toast("已恢复默认设置");
       return;
+    } else if (act === "size-reset") {
+      await setPath("size", { ...SIZE_DEFAULTS });
+      toast("已恢复默认大小");
+      return;
+    } else if (act === "layout-edit") {
+      await invoke("layout_edit", { on: true });
+      toast("到屏幕上的岛那里拖动边缘调整大小，调完点「完成」");
+      return;
+    } else if (act === "ai-refresh") {
+      await invoke("ai_refresh");
+      toast("正在查询 AI 额度…");
+      return;
+    } else if (act === "exit-refresh") {
+      await invoke("refresh_exit");
+      if (exitState) exitState.checking = true;
+      toast("正在重新检测出口…");
+    } else if (act === "media-prev" || act === "media-toggle" || act === "media-next") {
+      await invoke("media_control", { action: { "media-prev": "previous", "media-toggle": "play-pause", "media-next": "next" }[act] });
+      return;
+    } else if (act === "open-manager") {
+      await invoke("open_manager", { page: el.dataset.page || "home" });
+      return;
     } else if (act === "goto-guard" || act === "goto-rules") {
       switchTab(act === "goto-guard" ? "guard" : "rules");
       return;
@@ -1361,6 +1758,11 @@ async function applyRule(spec) {
 
 $("panel").addEventListener("click", (e) => {
   const inMenu = e.target.closest("#menu");
+  const go = e.target.closest("#list [data-tab]");
+  if (go && !e.target.closest("[data-do]")) {
+    switchTab(go.dataset.tab);
+    return;
+  }
   const set = e.target.closest("[data-set]");
   if (set) {
     applyRule(JSON.parse(set.dataset.set));
@@ -1504,7 +1906,22 @@ const TAB_DEFS = {
   nodes: { label: "节点" },
 };
 
+// pages of the manager window (sidebar), with a small line icon each
+const NAV = [
+  ["home", "总览", "M3 12l9-8 9 8M5 10v10h14V10"],
+  ["conns", "连接", "M4 6h16M4 12h16M4 18h10"],
+  ["listen", "监听端口", "M12 3v18M3 12h18"],
+  ["rules", "出口控制", "M5 12h14M13 6l6 6-6 6"],
+  ["guard", "泄漏预警", "M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"],
+  ["speed", "网速", "M3 17l5-6 4 4 8-9"],
+  ["traffic", "流量", "M6 20V10M12 20V4M18 20v-7"],
+  ["nodes", "节点", "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 8v4l3 2"],
+  ["ai", "AI 额度", "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"],
+  ["settings", "设置", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4L7 17M17 17l1.4 1.4M5.6 5.6L7 7"],
+];
+
 function visibleTabs() {
+  if (MANAGER) return NAV.map((n) => n[0]);
   const list = (sget("panel.tabs", null) || Object.keys(TAB_DEFS).map((id) => ({ id, on: true })));
   const tabs = list.filter((t) => t.on && TAB_DEFS[t.id]).map((t) => t.id);
   return tabs.length ? tabs : ["conns"];
@@ -1512,6 +1929,15 @@ function visibleTabs() {
 
 function renderTabs() {
   const tabs = visibleTabs();
+  if (MANAGER) {
+    if (!tabs.includes(tab)) tab = "home";
+    const counts = { conns: true, guard: true };
+    $("tabs").innerHTML = NAV.map(([id, label, d]) => `<button class="tab nav ${id === tab ? "active" : ""}" data-tab="${id}">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>
+      <span>${label}</span>${counts[id] ? `<span id="tab-${id}" class="mono nav-count">0</span>` : ""}</button>`).join("");
+    document.body.dataset.page = tab;
+    return;
+  }
   if (tab !== "settings" && !tabs.includes(tab)) tab = tabs[0];
   $("tabs").innerHTML = tabs
     .map((id) => `<button class="tab ${id === tab ? "active" : ""}" data-tab="${id}">${TAB_DEFS[id].label}${TAB_DEFS[id].count ? ` <span id="tab-${id}" class="mono">0</span>` : ""}</button>`)
@@ -1519,11 +1945,28 @@ function renderTabs() {
 }
 
 function switchTab(name) {
+  if (!MANAGER && name === "settings") {
+    // the island's gear opens the settings in the desktop window
+    invoke("open_manager", { page: "settings" }).catch(() => {});
+    return;
+  }
   tab = name;
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   $("gear").classList.toggle("active", name === "settings");
+  if (MANAGER) {
+    document.body.dataset.page = name;
+    if (name === "settings") {
+      refreshMonitors();
+      refreshFonts();
+      refreshAppInfo();
+      groupOptions = null;
+    }
+    if (name === "ai") invoke("ai_get").then((a) => { aiState = a || []; renderList(true); }).catch(() => {});
+    try { history.replaceState(null, "", "#" + name); } catch { /* ignore */ }
+  }
   $("list").scrollTop = 0;
   renderList(true);
+  if (MANAGER) renderPanel();
 }
 
 $("tabs").addEventListener("click", (e) => {
@@ -1531,12 +1974,11 @@ $("tabs").addEventListener("click", (e) => {
   if (b) switchTab(b.dataset.tab);
 });
 $("gear").addEventListener("click", () => {
-  if (tab !== "settings") {
-    refreshMonitors();
-    refreshFonts();
-    refreshAppInfo();
+  if (!MANAGER) {
+    invoke("open_manager", { page: "settings" }).catch(() => {});
+    return;
   }
-  switchTab(tab === "settings" ? visibleTabs()[0] : "settings");
+  switchTab("settings");
 });
 
 let glassWanted = null;
@@ -1544,6 +1986,7 @@ let zoomNow = 100;
 
 // Glass on: hand the backend a frame channel; off: drop it (no screen capture at all).
 function applyGlass() {
+  if (MANAGER) return;
   const on = sget("appearance.glass", true) !== false;
   if (on === glassWanted) return;
   glassWanted = on;
@@ -1560,14 +2003,16 @@ function applySettings(s) {
   applyTheme();
   applyGlass();
   const scale = sget("appearance.scale", 100);
-  if (scale !== zoomNow) {
+  if (scale !== zoomNow && !MANAGER) {
     zoomNow = scale;
     invoke("set_zoom", { scale }).catch(() => {});
   }
   renderTabs();
+  if (!editing) fitWindow();
   renderPill();
   if (tab === "settings") renderList(true);
   else renderPanel();
+  applySize();
 }
 
 listen("settings", (e) => applySettings(e.payload));
@@ -1597,14 +2042,32 @@ $("exit-row").addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    if (editing) {
+      endEdit(false);
+      return;
+    }
     $("search").value = "";
     query = "";
     $("search").blur();
-    invoke("collapse_island").catch(() => {});
+    if (!MANAGER) invoke("collapse_island").catch(() => {});
   }
 });
 
+listen("ai", (e) => {
+  aiState = e.payload || [];
+  renderPill();
+  if (tab === "ai" || tab === "home") renderList(true);
+});
+listen("media", (e) => {
+  media = e.payload || null;
+  renderPill();
+  if (tab === "home") renderList(true);
+});
+invoke("ai_get").then((a) => { aiState = a || []; }).catch(() => {});
+invoke("media_get").then((m) => { media = m || null; }).catch(() => {});
+
 listen("island", (e) => {
+  if (MANAGER || editing) return;
   if (e.payload) {
     expand();
     // opened by the hotkey the window has keyboard focus: start on the active tab
@@ -1618,8 +2081,151 @@ $("panel").addEventListener("scroll", () => { if ($("panel").scrollTop) $("panel
 
 // click-to-open: the window receives the press itself while the cursor is over the pill
 island.addEventListener("mousedown", () => {
-  if (!expanded) invoke("pill_click").catch(() => {});
+  if (!expanded && !MANAGER && !editing) invoke("pill_click").catch(() => {});
 });
+
+// ---------- layout editing: drag the edges of the panel / pill ----------
+// The backend hands the whole window the mouse while editing; the window is temporarily as big
+// as the largest panel, so the handles can be dragged up to the limits.
+
+function editRect() {
+  return islandRect(editPart === "panel");
+}
+
+function showEditPart() {
+  if (editPart === "panel") {
+    expanded = true;
+    island.classList.add("expanded");
+    island.classList.remove("collapsed");
+    panelHNow = panelH();
+    renderPanel();
+  } else {
+    expanded = false;
+    closeMenu();
+    island.classList.remove("expanded");
+    island.classList.add("collapsed");
+    pillLast = "";
+    renderPill();
+  }
+  applySize();
+}
+
+function startEdit() {
+  if (editing || MANAGER) return;
+  editing = true;
+  editPart = "panel";
+  const cur = {};
+  for (const k of Object.keys(SIZE_DEFAULTS)) cur[k] = sz(k);
+  editSize = cur;
+  document.body.classList.add("editing");
+  $("edit").hidden = false;
+  fitWindow();
+  setTimeout(showEditPart, 80);
+}
+
+async function endEdit(save) {
+  if (!editing) return;
+  const sizes = editSize;
+  editing = false;
+  editSize = null;
+  document.body.classList.remove("editing");
+  $("edit").hidden = true;
+  if (save) await setPath("size", sizes);
+  await invoke("layout_edit", { on: false }).catch(() => {});
+  expanded = false;
+  island.classList.remove("expanded");
+  island.classList.add("collapsed");
+  fitted = "";
+  fitWindow();
+  pillLast = "";
+  renderPill();
+  applySize();
+  if (save) toast("大小已保存");
+}
+
+// which edges can be dragged depends on the docked edge (the island stays centred on it)
+function editEdges(dock) {
+  return { top: ["e", "w", "s"], bottom: ["e", "w", "n"], left: ["e", "n", "s"], right: ["w", "n", "s"] }[dock] || ["e", "w", "s"];
+}
+
+function renderEditUi() {
+  const box = $("edit");
+  if (!editing || !box) return;
+  const r = editRect();
+  const kW = editPart === "panel" ? "panelW" : "pillW";
+  const kH = editPart === "panel" ? "panelH" : "pillH";
+  const handles = editEdges(r.dock).map((e) => {
+    const hz = e === "e" || e === "w";
+    const x = e === "e" ? r.x + r.w - 5 : e === "w" ? r.x - 5 : r.x + r.w / 2 - 22;
+    const y = e === "s" ? r.y + r.h - 5 : e === "n" ? r.y - 5 : r.y + r.h / 2 - 22;
+    return `<div class="eh ${hz ? "ew" : "ns"}" data-edge="${e}" style="left:${x}px;top:${y}px"></div>`;
+  }).join("");
+  const w = Math.round(r.w), h = Math.round(r.h);
+  const ty = editPart === "panel" ? r.y + r.h / 2 - 40 : r.dock === "bottom" ? r.y - 110 : r.y + r.h + 24;
+  box.innerHTML = `${handles}<div class="e-frame" style="left:${r.x}px;top:${r.y}px;width:${r.w}px;height:${r.h}px"></div>
+    <div class="e-bar" style="top:${Math.max(4, ty)}px">
+      <div class="e-row">${segmented("epart", editPart, [["panel", "展开面板"], ["pill", "收起的胶囊"]])}<span class="mono e-size">${w} × ${h}</span></div>
+      <div class="e-row"><span class="e-hint">拖动${editPart === "panel" ? "面板" : "胶囊"}的边缘调整大小${editPart === "pill" && !(editSize[kW] > 0) ? "（宽度现在是自动的）" : ""}</span></div>
+      <div class="e-row"><button class="ghost" data-edo="reset">恢复默认</button><button class="ghost" data-edo="cancel">取消</button><button class="primary" data-edo="done">完成</button></div>
+    </div>`;
+  box.dataset.kw = kW;
+  box.dataset.kh = kH;
+}
+
+let drag = null;
+$("edit").addEventListener("pointerdown", (e) => {
+  const hd = e.target.closest("[data-edge]");
+  if (!hd) return;
+  const r = editRect();
+  const edge = hd.dataset.edge;
+  const kW = editPart === "panel" ? "panelW" : "pillW";
+  const kH = editPart === "panel" ? "panelH" : "pillH";
+  drag = { edge, x: e.clientX, y: e.clientY, w: r.w, h: r.h, kW, kH, dock: r.dock };
+  hd.setPointerCapture(e.pointerId);
+  island.classList.add("dragging");
+  e.preventDefault();
+});
+$("edit").addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  const centredX = drag.dock === "top" || drag.dock === "bottom";
+  const centredY = !centredX;
+  let w = drag.w, h = drag.h;
+  if (drag.edge === "e") w = drag.w + (centredX ? 2 * dx : dx);
+  if (drag.edge === "w") w = drag.w - (centredX ? 2 * dx : dx);
+  if (drag.edge === "s") h = drag.h + (centredY ? 2 * dy : dy);
+  if (drag.edge === "n") h = drag.h - (centredY ? 2 * dy : dy);
+  const clamp = (k, v) => Math.round(Math.min(SIZE_LIMITS[k][1], Math.max(k === "pillW" ? 120 : SIZE_LIMITS[k][0], v)));
+  if (drag.edge === "e" || drag.edge === "w") editSize[drag.kW] = clamp(drag.kW, w);
+  else editSize[drag.kH] = clamp(drag.kH, h);
+  if (editPart === "panel") panelHNow = panelH();
+  applySize();
+});
+const stopDrag = () => {
+  if (!drag) return;
+  drag = null;
+  island.classList.remove("dragging");
+  if (editPart === "panel") renderPanel();
+};
+$("edit").addEventListener("pointerup", stopDrag);
+$("edit").addEventListener("pointercancel", stopDrag);
+$("edit").addEventListener("click", (e) => {
+  const seg = e.target.closest("[data-seg='epart']");
+  if (seg) {
+    editPart = seg.dataset.val;
+    showEditPart();
+    return;
+  }
+  const b = e.target.closest("[data-edo]");
+  if (!b) return;
+  if (b.dataset.edo === "done") endEdit(true);
+  else if (b.dataset.edo === "cancel") endEdit(false);
+  else if (b.dataset.edo === "reset") {
+    editSize = { ...SIZE_DEFAULTS };
+    showEditPart();
+  }
+});
+listen("layout-edit", (e) => (e.payload ? startEdit() : endEdit(false)));
 
 listen("maximized", (e) => {
   maximized = !!e.payload;
@@ -1662,7 +2268,13 @@ document.addEventListener("keydown", (e) => {
 });
 listen("game", (e) => island.classList.toggle("game", !!e.payload));
 
+let snapErr = 0;
 listen("snapshot", (e) => {
+  try { onSnapshot(e); } catch (err) {
+    if (snapErr++ < 3) invoke("log_js", { msg: `${MANAGER ? "manager" : "island"} snapshot error: ${err && err.stack || err}` }).catch(() => {});
+  }
+});
+function onSnapshot(e) {
   snap = e.payload;
   exitState = snap.exit;
   if (snap.maximized !== maximized) {
@@ -1674,7 +2286,7 @@ listen("snapshot", (e) => {
   checkFlashes(snap);
   renderPill();
   renderPanel();
-});
+}
 
 listen("exit", (e) => {
   exitState = e.payload;
@@ -1745,7 +2357,22 @@ function logView(tag) {
   invoke("log_js", { msg: `${tag} inner=${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio} island=${island.offsetWidth}x${island.offsetHeight}` }).catch(() => {});
 }
 
-window.addEventListener("resize", () => { reportRect(); logView("resize"); });
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  reportRect();
+  if (MANAGER) {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => renderList(true), 150); // charts follow the window width
+  } else logView("resize");
+});
+if (MANAGER) {
+  listen("goto", (e) => switchTab(e.payload || "home"));
+  $("side").addEventListener("click", (e) => {
+    const d = e.target.closest("[data-do]");
+    if (d) runAction(d);
+  });
+  // the home page has live numbers: refresh it with every snapshot (other pages already do)
+}
 fitWindow();
 applySize();
 if (S) applyGlass(); // otherwise applySettings starts it once settings arrive

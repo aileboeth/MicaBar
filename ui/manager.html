@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NetIsland</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-mode="manager">
+  <div id="island" class="expanded">
+    <canvas id="glass" hidden></canvas>
+    <div id="pill" hidden></div>
+    <aside id="side">
+      <div class="brand"><img src="icon.png" alt=""><span>NetIsland</span></div>
+      <nav class="tabs" id="tabs"></nav>
+      <div class="side-foot"><button class="ghost" data-do="layout-edit">调整岛的大小</button></div>
+    </aside>
+    <main id="panel">
+      <header id="toolbar">
+        <div id="proxy-line"></div>
+        <input id="search" type="text" placeholder="搜索 程序 / 域名 / IP / 端口" spellcheck="false" />
+        <div id="total-speed" class="mono"></div>
+        <button id="gear" hidden></button>
+      </header>
+      <div id="exit-row" hidden></div>
+      <div id="list"></div>
+      <div id="foot"></div>
+      <div id="menu" hidden></div>
+      <div id="toast"></div>
+    </main>
+  </div>
+  <div id="edit" hidden></div>
+  <script src="charts.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

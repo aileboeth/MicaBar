@@ -21,6 +21,7 @@
         "resizable": false,
         "shadow": false,
         "focus": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion",
         "visible": false
       }
     ],

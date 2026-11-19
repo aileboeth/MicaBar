@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod conn;
 mod control;
 mod dns;
@@ -8,6 +9,7 @@ mod geo;
 mod glass;
 mod guard;
 mod icon;
+mod media;
 mod mihomo;
 mod procinfo;
 mod proxy;
@@ -108,6 +110,8 @@ struct AppRow {
     up: f64,
     down: f64,
     is_proxy: bool,
+    /// at least one connection leaves through a proxy node
+    via_proxy: bool,
     conns: Vec<ConnRow>,
     listen: Vec<String>,
 }
@@ -117,8 +121,20 @@ struct AppRow {
 struct ExitState {
     proxy: Option<ExitResult>,
     direct: Option<ExitResult>,
+    /// Exit per proxy group (measured through the group's own inbound).
+    groups: Vec<GroupExit>,
     checking: bool,
     last_check: u64,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct GroupExit {
+    /// the subscription's fallback (MATCH) group
+    is_default: bool,
+    /// r.group = the proxy group, r.node = the node it currently uses
+    #[serde(flatten)]
+    r: ExitResult,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -228,6 +244,10 @@ struct Shared {
     latency: Mutex<Latency>,
     latency_history: Mutex<std::collections::VecDeque<LatencySample>>,
     traffic: Mutex<traffic::Book>,
+    group_score: Mutex<HashMap<String, f64>>,
+    ai: Mutex<Vec<ai::Quota>>,
+    ai_trigger: AtomicBool,
+    media: media::Shared,
     exit_trigger: AtomicBool,
     admin: bool,
 }
@@ -625,17 +645,47 @@ impl Collector {
                 a.listen.sort();
                 a.listen.dedup();
                 a.pids.sort();
+                a.via_proxy = a.conns.iter().any(|c| c.node.as_deref().map(|n| n != "DIRECT" && !n.starts_with("REJECT")).unwrap_or(false));
                 a
             })
             .collect();
+        // programs going through a proxy first, then by speed, connection count, name
         out.sort_by(|a, b| {
             let sa = a.up + a.down;
             let sb = b.up + b.down;
-            sb.partial_cmp(&sa)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.via_proxy
+                .cmp(&a.via_proxy)
+                .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
                 .then(b.conns.len().cmp(&a.conns.len()))
                 .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
+        // group traffic score (decaying), for picking the busiest groups to measure
+        {
+            let mut score = sh.group_score.lock().unwrap();
+            for v in score.values_mut() {
+                *v *= 0.9995; // half-life about 23 minutes: groups used a while ago stay listed
+            }
+            for c in &mconns {
+                if c.chains.first().map(|n| n == "DIRECT" || n.starts_with("REJECT")).unwrap_or(true) {
+                    continue;
+                }
+                if let (Some(g), Some((u, d))) = (c.chains.last(), conn_rate.get(&c.id)) {
+                    *score.entry(g.clone()).or_insert(0.0) += u + d;
+                }
+            }
+            // a group that just became busy and isn't measured yet: measure soon (at most once a minute)
+            static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if settings::str_at("exit.mode", "auto") == "auto" {
+                let measured: HashSet<String> = sh.exit.lock().unwrap().groups.iter().filter_map(|g| g.r.group.clone()).collect();
+                let max = settings::num_at("exit.max", 4.0).clamp(1.0, 12.0) as usize;
+                let new_busy = !measured.is_empty() && measured.len() < max && score.iter().any(|(g, v)| *v > 512.0 && !measured.contains(g));
+                let now = now_ms();
+                if new_busy && now - LAST.load(Ordering::Relaxed) > 60_000 {
+                    LAST.store(now, Ordering::Relaxed);
+                    sh.exit_trigger.store(true, Ordering::SeqCst);
+                }
+            }
+        }
         let conn_count = out.iter().map(|a| a.conns.len()).sum();
         let listen_count = out.iter().map(|a| a.listen.len()).sum();
         self.account_traffic(sh, &out);
@@ -974,6 +1024,97 @@ async fn check_one(sh: Arc<Shared>, kind: Check) -> ExitResult {
     r
 }
 
+/// Follows a group's current choice down to a real node (groups can point at groups).
+fn leaf_node(ctl: &Controller, secret: Option<&str>, group: &str) -> Option<String> {
+    let mut name = group.to_string();
+    for _ in 0..5 {
+        let b = mihomo::get(ctl, &format!("/proxies/{}", pct(&name)), secret).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&b).ok()?;
+        match v.get("now").and_then(|n| n.as_str()) {
+            Some(now) if !now.is_empty() => name = now.to_string(),
+            _ => return Some(name),
+        }
+    }
+    Some(name)
+}
+
+/// Which groups to measure: settings `exit.mode` = auto (fallback group + busiest groups) or
+/// manual (`exit.groups`); only groups that have an inbound in the running config.
+fn groups_to_measure(sh: &Shared, listeners: &[(String, u16)], default_group: Option<&str>) -> Vec<(String, u16)> {
+    let max = settings::num_at("exit.max", 4.0).clamp(1.0, 12.0) as usize;
+    let port_of = |g: &str| listeners.iter().find(|(n, _)| n == g).map(|(_, p)| *p);
+    let mut picked: Vec<String> = Vec::new();
+    if settings::str_at("exit.mode", "auto") == "manual" {
+        if let Some(list) = settings::get().pointer("/exit/groups").and_then(|v| v.as_array()) {
+            picked = list.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect();
+        }
+    } else {
+        if let Some(d) = default_group {
+            picked.push(d.to_string());
+        }
+        let score = sh.group_score.lock().unwrap();
+        let mut busy: Vec<(&String, &f64)> = score.iter().filter(|(_, v)| **v > 512.0).collect();
+        busy.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (g, _) in busy {
+            if !picked.contains(g) {
+                picked.push(g.clone());
+            }
+        }
+    }
+    picked.into_iter().filter_map(|g| port_of(&g).map(|p| (g, p))).take(max).collect()
+}
+
+async fn measure_groups(sh: Arc<Shared>) -> Vec<GroupExit> {
+    let Some(file) = mihomo::read_config().file else { return Vec::new() };
+    let path = std::path::PathBuf::from(file);
+    let listeners = control::group_listeners(&path);
+    if listeners.is_empty() {
+        return Vec::new();
+    }
+    let default_group = control::match_group(&path);
+    let todo = groups_to_measure(&sh, &listeners, default_group.as_deref());
+    let mut handles = Vec::new();
+    for (group, port) in todo {
+        let sh2 = sh.clone();
+        let is_default = default_group.as_deref() == Some(group.as_str());
+        handles.push(tauri::async_runtime::spawn(async move {
+            let mut r = ExitResult { at: now_ms(), ..Default::default() };
+            match exitip::client(Some(port)) {
+                Ok(c) => match exitip::probe(&c, false).await {
+                    Ok(p) => {
+                        let g = sh2.geo.lookup(p.ip);
+                        r.ip = Some(p.ip.to_string());
+                        r.cc = g.cc.or(p.cc);
+                        r.asn = g.asn;
+                        r.org = g.org.or(p.org);
+                        r.service = Some(p.host);
+                    }
+                    Err(e) => r.error = Some(e),
+                },
+                Err(e) => r.error = Some(e),
+            }
+            let g2 = group.clone();
+            let node = tauri::async_runtime::spawn_blocking(move || {
+                let (ctl, secret) = ctl_link(&sh2).ok()?;
+                leaf_node(&ctl, secret.as_deref(), &g2)
+            })
+            .await
+            .ok()
+            .flatten();
+            r.group = Some(group);
+            r.node = node;
+            GroupExit { is_default, r }
+        }));
+    }
+    let mut out = Vec::new();
+    for h in handles {
+        if let Ok(g) = h.await {
+            out.push(g);
+        }
+    }
+    out
+}
+
 async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
     {
         sh.exit.lock().unwrap().checking = true;
@@ -1014,10 +1155,18 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
             .await;
         }
     }
+    let groups = if p.detected { measure_groups(sh.clone()).await } else { Vec::new() };
+    if !groups.is_empty() {
+        log(format!(
+            "group exits: {}",
+            groups.iter().map(|g| format!("{}={:?}", g.r.group.as_deref().unwrap_or(""), g.r.ip)).collect::<Vec<_>>().join(", ")
+        ));
+    }
     let snap = {
         let mut e = sh.exit.lock().unwrap();
         e.direct = Some(direct);
         e.proxy = proxied;
+        e.groups = groups;
         e.checking = false;
         e.last_check = now_ms();
         e.clone()
@@ -1241,6 +1390,15 @@ fn profile_secs(saver: u64, balanced: u64, smooth: u64) -> u64 {
         "smooth" => smooth,
         _ => balanced,
     }
+}
+
+/// Proxy groups that have a NetIsland inbound (for the manual group picker), in config order.
+#[tauri::command]
+fn exit_group_options() -> Vec<String> {
+    mihomo::read_config()
+        .file
+        .map(|f| control::group_listeners(std::path::Path::new(&f)).into_iter().map(|(g, _)| g).collect())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1639,6 +1797,174 @@ fn alert_clear(state: tauri::State<'_, Arc<Shared>>) {
     state.alerts.lock().unwrap().alerts.retain(|_, a| a.active);
 }
 
+// ---------- AI quota / now playing ----------
+
+/// Proxy for the AI services: the proxy client's local port when one runs, else none (direct).
+fn ai_proxy(sh: &Shared) -> Option<u16> {
+    let p = sh.proxy.lock().unwrap();
+    if p.detected {
+        p.local_port
+    } else {
+        None
+    }
+}
+
+async fn ai_round(app: &AppHandle, sh: &Arc<Shared>) {
+    let proxy = ai_proxy(sh);
+    let prev = sh.ai.lock().unwrap().clone();
+    let mut out = Vec::new();
+    for (tool, _) in ai::TOOLS {
+        if !settings::bool_at(&format!("ai.{tool}"), true) {
+            continue;
+        }
+        let q = ai::query(tool, proxy, prev.iter().find(|p| p.tool == tool)).await;
+        if q.status != "ok" {
+            log(format!("ai {tool}: {} {}", q.status, q.message.clone().unwrap_or_default()));
+        }
+        out.push(q);
+    }
+    *sh.ai.lock().unwrap() = out.clone();
+    let _ = app.emit("ai", out);
+}
+
+fn ai_loop(app: AppHandle, sh: Arc<Shared>) {
+    tauri::async_runtime::spawn(async move {
+        let mut last: Option<Instant> = None;
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if !settings::bool_at("ai.on", true) {
+                if !sh.ai.lock().unwrap().is_empty() {
+                    sh.ai.lock().unwrap().clear();
+                    let _ = app.emit("ai", Vec::<ai::Quota>::new());
+                }
+                continue;
+            }
+            let every = Duration::from_secs((settings::num_at("ai.interval", 5.0).clamp(1.0, 120.0) * 60.0) as u64);
+            let due = last.map(|t| t.elapsed() >= every).unwrap_or(true);
+            if sh.ai_trigger.swap(false, Ordering::SeqCst) || due {
+                last = Some(Instant::now());
+                ai_round(&app, &sh).await;
+            }
+        }
+    });
+}
+
+#[tauri::command]
+fn ai_get(state: tauri::State<'_, Arc<Shared>>) -> Vec<ai::Quota> {
+    state.ai.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn ai_refresh(state: tauri::State<'_, Arc<Shared>>) {
+    state.ai_trigger.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn media_get(state: tauri::State<'_, Arc<Shared>>) -> Option<media::NowPlaying> {
+    state.media.lock().unwrap().clone()
+}
+
+#[tauri::command]
+async fn media_control(action: String) -> Result<(), String> {
+    blocking(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        media::control(&action)
+    })
+    .await
+}
+
+// ---------- manager window / layout editing ----------
+
+/// Opens (or focuses) the desktop manager window on a page.
+fn open_manager_window(app: &AppHandle, page: &str) {
+    if let Some(w) = app.get_webview_window("manager") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        let _ = app.emit_to("manager", "goto", page.to_string());
+        return;
+    }
+    let s = settings::get();
+    let g = s.pointer("/manager").cloned().unwrap_or_default();
+    let num = |k: &str, d: f64| g.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let url = tauri::WebviewUrl::App(format!("manager.html#{page}").into());
+    let mut b = tauri::WebviewWindowBuilder::new(app, "manager", url)
+        .title("NetIsland")
+        .inner_size(num("w", 1120.0).max(820.0), num("h", 740.0).max(560.0))
+        .min_inner_size(820.0, 560.0)
+        .resizable(true)
+        // same WebView2 environment as the island window (must match), and keep painting while
+        // Chromium thinks the window is covered (the island window overlaps it)
+        .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion")
+        .decorations(true)
+        // created hidden and shown below: showing an existing window also makes its webview visible,
+        // otherwise the page only repaints after mouse input
+        .visible(false);
+    if let (Some(x), Some(y)) = (g.get("x").and_then(|v| v.as_f64()), g.get("y").and_then(|v| v.as_f64())) {
+        // only when that spot is still on a monitor
+        let on_screen = window_ctl::monitor_list().iter().any(|m| x >= m.x as f64 - 50.0 && y >= m.y as f64 - 10.0 && x < (m.x + m.w) as f64 - 100.0 && y < (m.y + m.h) as f64 - 100.0);
+        if on_screen {
+            b = b.position(x, y);
+        }
+    } else {
+        b = b.center();
+    }
+    match b.build() {
+        Ok(w) => {
+            if let Some(icon) = app.default_window_icon() {
+                let _ = w.set_icon(icon.clone());
+            }
+            let _ = w.show();
+            let _ = w.set_focus();
+            let w2 = w.clone();
+            w.on_window_event(move |ev| {
+                // remember size and position (logical px) for the next time
+                if let tauri::WindowEvent::CloseRequested { .. } = ev {
+                    let sf = w2.scale_factor().unwrap_or(1.0);
+                    if let (Ok(p), Ok(sz), Ok(false)) = (w2.outer_position(), w2.inner_size(), w2.is_minimized()) {
+                        settings::update(&serde_json::json!({ "manager": {
+                            "x": p.x as f64 / sf, "y": p.y as f64 / sf,
+                            "w": sz.width as f64 / sf, "h": sz.height as f64 / sf
+                        } }));
+                    }
+                }
+            });
+            log(format!("manager window opened ({page})"));
+        }
+        Err(e) => log(format!("manager window failed: {e}")),
+    }
+}
+
+/// async: on Windows, creating a webview window inside a synchronous command deadlocks it
+#[tauri::command]
+async fn open_manager(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, page: Option<String>) -> Result<(), String> {
+    // collapse the island first: collapsing hands focus back to the previous app, and a webview
+    // window created during that hand-over doesn't repaint until it gets mouse input
+    if state.ws.expanded.load(Ordering::SeqCst) {
+        state.ws.collapse_req.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // build it on the main (event loop) thread like the tray does; a webview created from a
+    // command thread here only repainted after mouse input
+    let app2 = app.clone();
+    let page = page.unwrap_or_else(|| "home".into());
+    app.run_on_main_thread(move || open_manager_window(&app2, &page)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Layout editing: the island window takes all mouse input (drag handles) until done.
+#[tauri::command]
+fn layout_edit(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, on: bool) {
+    state.ws.edit.store(on, Ordering::SeqCst);
+    if on {
+        state.ws.collapse_req.store(true, Ordering::SeqCst);
+    }
+    let _ = app.emit_to("main", "layout-edit", on);
+    log(format!("layout edit {}", if on { "on" } else { "off" }));
+}
+
 #[tauri::command]
 fn pill_click(state: tauri::State<'_, Arc<Shared>>) {
     state.ws.click_req.store(true, Ordering::SeqCst);
@@ -1726,6 +2052,10 @@ fn main() {
         latency: Mutex::new(Latency::default()),
         latency_history: Mutex::new(std::collections::VecDeque::new()),
         traffic: Mutex::new(traffic::Book::new()),
+        group_score: Mutex::new(HashMap::new()),
+        ai: Mutex::new(Vec::new()),
+        ai_trigger: AtomicBool::new(true),
+        media: Arc::new(Mutex::new(None)),
         exit_trigger: AtomicBool::new(false),
         admin,
     });
@@ -1768,6 +2098,13 @@ fn main() {
             update_install,
             open_url,
             traffic_query,
+            exit_group_options,
+            ai_get,
+            ai_refresh,
+            media_get,
+            media_control,
+            open_manager,
+            layout_edit,
             latency_history,
             latency_probe,
             refresh_exit,
@@ -1779,6 +2116,9 @@ fn main() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
+            let open_item = MenuItem::with_id(app, "open", "打开 NetIsland", true, None::<&str>)?;
+            let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+            let layout_item = MenuItem::with_id(app, "layout", "调整岛的大小…", true, None::<&str>)?;
             let refresh = MenuItem::with_id(app, "refresh", "重新检测出口 IP", true, None::<&str>)?;
             let log_item = MenuItem::with_id(app, "log", "打开日志", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -1786,9 +2126,32 @@ fn main() {
             let theme_light = MenuItem::with_id(app, "theme:light", "外观：白色磨砂", true, None::<&str>)?;
             let theme_dark = MenuItem::with_id(app, "theme:dark", "外观：黑色磨砂", true, None::<&str>)?;
             let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&refresh, &theme_auto, &theme_light, &theme_dark, &sep, &log_item, &quit_item])?;
+            let sep0 = tauri::menu::PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(
+                app,
+                &[&open_item, &settings_item, &layout_item, &sep0, &refresh, &theme_auto, &theme_light, &theme_dark, &sep, &log_item, &quit_item],
+            )?;
             let sh_tray = shared.clone();
-            let mut tray = TrayIconBuilder::new().tooltip("NetIsland").menu(&menu).on_menu_event(move |app, ev| match ev.id.as_ref() {
+            let sh_tray2 = shared.clone();
+            let mut tray = TrayIconBuilder::new()
+                .tooltip("NetIsland")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(move |tray, ev| {
+                    // left click: the manager window (right click opens the menu)
+                    if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, button_state: tauri::tray::MouseButtonState::Up, .. } = ev {
+                        sh_tray2.ws.collapse_req.store(true, Ordering::SeqCst);
+                        open_manager_window(tray.app_handle(), "home");
+                    }
+                })
+                .on_menu_event(move |app, ev| match ev.id.as_ref() {
+                "open" => open_manager_window(app, "home"),
+                "settings" => open_manager_window(app, "settings"),
+                "layout" => {
+                    sh_tray.ws.edit.store(true, Ordering::SeqCst);
+                    sh_tray.ws.collapse_req.store(true, Ordering::SeqCst);
+                    let _ = app.emit_to("main", "layout-edit", true);
+                }
                 "refresh" => sh_tray.exit_trigger.store(true, Ordering::SeqCst),
                 "log" => {
                     let _ = std::process::Command::new("notepad.exe").arg(log_path()).spawn();
@@ -1812,6 +2175,12 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+
+            ai_loop(handle.clone(), shared.clone());
+            let h_media = handle.clone();
+            media::start(shared.media.clone(), move |np| {
+                let _ = h_media.emit("media", np);
+            });
 
             if let Some(w) = app.get_webview_window("main") {
                 window_ctl::place_window(&w);

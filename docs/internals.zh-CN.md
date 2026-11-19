@@ -82,3 +82,28 @@ GPU 生成 mip 取 1/4 尺寸，CPU 三遍盒式模糊 + 轻微提高饱和度�
 `tools\vm-test.ps1` 通过 SSH 操作一台 Windows 测试机（环境变量 `NETISLAND_VM=user@host`，可选
 `NETISLAND_VM_KEY`）：复制程序、用计划任务 `/IT` 启动到已登录的桌面、截图 / 点击 / 拖动 / 按键 / 滚轮、
 修改设置并重启、读日志。`tools\vm\fullscreen.ps1` 模拟全屏游戏窗口。
+
+## 分组出口
+
+JS 覆写给每个 select / url-test / fallback / load-balance 分组加一个 `listeners` 入站：`mixed`、只听 `127.0.0.1`、
+端口 `47800 + 序号`、`proxy: <分组名>`（进来的流量跳过规则直接交给该分组）。NetIsland 从运行中的配置文件读出这些入站，
+经各端口查出口 IP，并沿 `/proxies/<分组>` 的 `now` 一路找到实际节点。自动模式 = MATCH 规则的兜底分组 + 按连接流量
+打分（半衰期约 23 分钟）最高的分组；新分组开始有流量时最多每分钟补测一次。
+
+## AI 额度
+
+| 工具 | 凭据 | 查询 |
+| --- | --- | --- |
+| Claude Code | `~/.claude/.credentials.json` 的 `claudeAiOauth.accessToken` | `GET api.anthropic.com/api/oauth/usage`（`anthropic-beta: oauth-2025-04-20`）：`five_hour` / `seven_day` 的 `utilization`、`resets_at` |
+| Codex | `~/.codex/auth.json`（ChatGPT 登录） | `GET chatgpt.com/backend-api/wham/usage`；没有时读会话日志里最近的 `rate_limits`；自定义服务商（API）没有订阅额度 |
+| Antigravity | 运行中的 `language_server` 命令行里的 `--csrf_token` | 本机端口 `…/LanguageServerService/RetrieveUserQuotaSummary` 或 `GetUserStatus`（自签名证书，只连回环） |
+| Grok | `~/.grok/auth.json`（grok CLI 登录） | `GET cli-chat-proxy.grok.com/v1/billing?format=credits` |
+
+凭据每次查询时读取，只发给该工具自己的服务，不保存、不写日志、不续期（过期时提示打开该工具用一下）。
+查询失败时保留上次的数字并标明时间。Antigravity 和 Grok 的接口是按公开的社区资料实现的，还没有在真机上验证过。
+
+## 正在播放与桌面窗口
+
+正在播放：`GlobalSystemMediaTransportControlsSessionManager`（MTA 线程每 1.5 秒轮询；换歌时才读封面）。
+桌面窗口 `manager.html` 与岛共用 `app.js`（`body[data-mode=manager]`），在事件循环线程上创建：在命令线程里创建的
+WebView 窗口只有收到鼠标输入后才重绘。两个窗口的 WebView2 启动参数必须一致（`additionalBrowserArgs`）。

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "main island window",
-  "windows": ["main"],
+  "description": "island window and desktop manager window",
+  "windows": ["main", "manager"],
   "permissions": ["core:default"]
 }
