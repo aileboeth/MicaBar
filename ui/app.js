@@ -168,7 +168,7 @@ function routeClass(node) {
 // ---------- icons ----------
 
 function iconHtml(app) {
-  const p = app.path;
+  const p = app.icon || app.path; // helpers borrow their app's icon
   if (p && icons.has(p) && icons.get(p) && icons.get(p) !== "pending") {
     return `<img class="app-icon" src="${icons.get(p)}" alt="">`;
   }
@@ -1325,8 +1325,7 @@ function settingsHtml() {
   <div class="s-sec"><div class="s-title">关于</div>
     <div class="s-row"><span class="s-label">MicaBar ${esc(appInfo?.version || "")}<span class="s-note">${appInfo ? (appInfo.installed ? "安装版" : "便携版（不能自动更新）") : ""}</span></span>
       <button class="ghost" data-do="update-check">检查更新</button></div>
-    ${updateInfo?.available ? `<div class="s-row"><span class="s-label">有新版本 ${esc(updateInfo.version)}<span class="s-note">${esc((updateInfo.notes || "").slice(0, 120))}</span></span>
-      ${updateInfo.installed ? `<button class="primary" data-do="update-install">下载并更新</button>` : `<button class="ghost" data-do="open-releases">去 GitHub 下载</button>`}</div>` : ""}
+    ${updateInfo?.available ? updateCardHtml() : ""}
     ${sToggle("general.autoUpdate", "自动检查更新", "每天检查一次 GitHub 上的新版本，有新版本时在胶囊上提示")}
     <div class="s-row"><span class="s-label">日志与数据<span class="s-note">${esc(appInfo?.logDir || "")}</span></span>
       <span><button class="ghost" data-do="open-logs">打开目录</button> <button class="ghost" data-do="open-home">GitHub 主页</button></span></div>
@@ -1336,6 +1335,31 @@ function settingsHtml() {
 
 let appInfo = null;
 let updateInfo = null;
+
+// "MicaBar 0.2.2：a；b；c" -> ["a", "b", "c"]
+function updateNotes(text) {
+  const body = String(text || "").replace(/^\s*MicaBar\s*[\d.]+\s*[:：]\s*/, "");
+  return body.split(/[；;\n]+/).map((s) => s.trim().replace(/[。.]$/, "")).filter(Boolean);
+}
+
+function updateCardHtml() {
+  const u = updateInfo;
+  const notes = updateNotes(u.notes);
+  const installed = u.installed;
+  return `<div class="upd">
+    <div class="upd-head">
+      <span class="upd-badge">新版本</span>
+      <span class="upd-ver"><b>MicaBar ${esc(u.version)}</b><span class="upd-cur">当前 ${esc(appInfo?.version || u.current || "")}</span></span>
+      <span class="upd-btns">
+        ${installed ? `<button class="primary" data-do="update-install">下载并更新</button>` : `<button class="primary" data-do="open-releases">去下载</button>`}
+      </span>
+    </div>
+    ${notes.length ? `<ul class="upd-notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    <div class="upd-foot">${installed
+      ? "下载后会校验签名并自动安装，MicaBar 会重启一次"
+      : `便携版不能自动更新：下载新的 <span class="mono">MicaBar_${esc(u.version)}_portable.exe</span> 换掉现在这个即可，设置和记录都会保留；也可以改用安装版，以后自动更新`}</div>
+  </div>`;
+}
 function refreshAppInfo() {
   invoke("app_info").then((i) => { appInfo = i; if (tab === "settings") renderList(true); }).catch(() => {});
 }

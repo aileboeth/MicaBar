@@ -106,6 +106,8 @@ struct AppRow {
     name: String,
     exe: String,
     path: Option<String>,
+    /// exe to take the icon from (helpers borrow their app's icon)
+    icon: Option<String>,
     pids: Vec<u32>,
     up: f64,
     down: f64,
@@ -543,6 +545,7 @@ impl Collector {
                 exe: format!("pid {}", s.pid),
                 path: None,
                 display: format!("进程 {}", s.pid),
+                icon: None,
             });
             let key = app_key(&info.path, &info.exe);
             let app = apps.entry(key.clone()).or_insert_with(|| AppRow {
@@ -550,6 +553,7 @@ impl Collector {
                 name: info.display.clone(),
                 exe: info.exe.clone(),
                 path: info.path.clone(),
+                icon: info.icon.clone(),
                 is_proxy: core_set.contains(&s.pid) || proxy::client_name(&[(s.pid, info.exe.clone())]).0.is_some(),
                 ..Default::default()
             });

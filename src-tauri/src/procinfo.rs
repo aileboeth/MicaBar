@@ -20,6 +20,8 @@ pub struct ProcInfo {
     pub exe: String,
     pub path: Option<String>,
     pub display: String,
+    /// exe to take the icon from when this one has none of its own (helper of a bigger app)
+    pub icon: Option<String>,
 }
 
 pub fn wide(s: &str) -> Vec<u16> {
@@ -110,6 +112,45 @@ fn file_description(path: &str) -> Option<String> {
     }
 }
 
+/// The application a program file belongs to, from its install folder: the first folder under
+/// Program Files, %LOCALAPPDATA%\Programs, %LOCALAPPDATA% or %APPDATA% ("Antigravity" for
+/// ...\Programs\Antigravity\resources\bin\language_server.exe), plus that app's main exe if found.
+fn owner_app(path: &str) -> Option<(String, Option<String>)> {
+    let parts: Vec<&str> = path.split('\\').collect();
+    let lower: Vec<String> = parts.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut i = None;
+    for (k, s) in lower.iter().enumerate() {
+        let next = lower.get(k + 1).map(|x| x.as_str()).unwrap_or("");
+        let hit = match s.as_str() {
+            "program files" | "program files (x86)" => !matches!(next, "common files" | "windowsapps"),
+            "programs" => k > 0 && lower[k - 1] == "local",
+            "local" | "roaming" => k > 0 && lower[k - 1] == "appdata" && !matches!(next, "programs" | "temp" | "microsoft" | "packages"),
+            _ => false,
+        };
+        if hit {
+            i = Some(k + 1);
+            break;
+        }
+    }
+    let i = i?;
+    // the file must sit at least one level below the app folder
+    if i + 1 >= parts.len() {
+        return None;
+    }
+    let app = parts[i].to_string();
+    let root = parts[..=i].join("\\");
+    let main = [format!("{root}\\{app}.exe")]
+        .into_iter()
+        .find(|p| Path::new(p).is_file())
+        .or_else(|| {
+            std::fs::read_dir(&root).ok()?.flatten().map(|e| e.path()).find_map(|p| {
+                let n = p.file_name()?.to_string_lossy().to_ascii_lowercase();
+                (n.ends_with(".exe") && !n.contains("unins") && !n.contains("update") && !n.contains("crash")).then(|| p.display().to_string())
+            })
+        });
+    Some((app, main))
+}
+
 fn stem(exe: &str) -> String {
     Path::new(exe)
         .file_stem()
@@ -142,10 +183,10 @@ impl ProcCache {
 
     fn build(&mut self, pid: u32, exe: &str) -> ProcInfo {
         if pid == 0 {
-            return ProcInfo { exe: "Idle".into(), path: None, display: "系统空闲进程".into() };
+            return ProcInfo { exe: "Idle".into(), path: None, display: "系统空闲进程".into(), icon: None };
         }
         if pid == 4 {
-            return ProcInfo { exe: "System".into(), path: None, display: "System".into() };
+            return ProcInfo { exe: "System".into(), path: None, display: "System".into(), icon: None };
         }
         let path = image_path(pid);
         let desc = match &path {
@@ -156,12 +197,23 @@ impl ProcCache {
                 .clone(),
             None => None,
         };
+        let mut icon = None;
         let display = match desc {
             // Some descriptions are long sentences; keep short, meaningful ones.
             Some(d) if d.chars().count() <= 32 => d,
-            _ => stem(exe),
+            _ => {
+                // no description: a helper inside a bigger app's folder (Antigravity's
+                // language_server.exe…) is named after that app and borrows its icon
+                match path.as_deref().and_then(owner_app) {
+                    Some((app, main)) if !app.eq_ignore_ascii_case(&stem(exe)) => {
+                        icon = main;
+                        format!("{app} · {}", stem(exe))
+                    }
+                    _ => stem(exe),
+                }
+            }
         };
-        ProcInfo { exe: exe.to_string(), path, display }
+        ProcInfo { exe: exe.to_string(), path, display, icon }
     }
 
     pub fn get(&self, pid: u32) -> Option<&ProcInfo> {
