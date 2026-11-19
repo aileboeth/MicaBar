@@ -76,3 +76,50 @@ pub fn is_installed() -> bool {
         })
         .unwrap_or(false)
 }
+
+/// Removes "ghost" tray icons: icons of processes that were killed (not quit) stay in the
+/// notification area until the mouse passes over them. Moving a virtual mouse across the tray
+/// toolbars makes Explorer drop every icon whose owner window is gone. Works with the Windows 10
+/// style taskbar (visible area + the overflow flyout); a no-op where those windows don't exist.
+pub fn sweep_tray() -> usize {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowExW, FindWindowW, GetClientRect, SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_MOUSEMOVE};
+    let w = crate::procinfo::wide;
+    let find = |parent: HWND, class: &str| unsafe { FindWindowExW(parent, std::ptr::null_mut(), w(class).as_ptr(), std::ptr::null()) };
+    let mut bars: Vec<HWND> = Vec::new();
+    unsafe {
+        let tray = FindWindowW(w("Shell_TrayWnd").as_ptr(), std::ptr::null());
+        if !tray.is_null() {
+            let notify = find(tray, "TrayNotifyWnd");
+            if !notify.is_null() {
+                let pager = find(notify, "SysPager");
+                let bar = if pager.is_null() { find(notify, "ToolbarWindow32") } else { find(pager, "ToolbarWindow32") };
+                bars.push(bar);
+            }
+        }
+        let overflow = FindWindowW(w("NotifyIconOverflowWindow").as_ptr(), std::ptr::null());
+        if !overflow.is_null() {
+            bars.push(find(overflow, "ToolbarWindow32"));
+        }
+    }
+    let mut n = 0;
+    for bar in bars.into_iter().filter(|b| !b.is_null()) {
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        if unsafe { GetClientRect(bar, &mut r) } == 0 {
+            continue;
+        }
+        let mut y = 0;
+        while y < r.bottom.max(1) {
+            let mut x = 0;
+            while x < r.right.max(1) {
+                let lp = ((y as u32 & 0xffff) << 16 | (x as u32 & 0xffff)) as isize;
+                let mut res = 0usize;
+                unsafe { SendMessageTimeoutW(bar, WM_MOUSEMOVE, 0, lp, SMTO_ABORTIFHUNG, 50, &mut res) };
+                x += 6;
+            }
+            y += 6;
+        }
+        n += 1;
+    }
+    n
+}

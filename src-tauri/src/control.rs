@@ -437,6 +437,8 @@ fn stop_party(cp: &ClashParty, core_pids: &[u32]) {
         }
     }
     std::thread::sleep(Duration::from_millis(400));
+    // the killed app couldn't remove its tray icon: clear the leftover
+    crate::system::sweep_tray();
 }
 
 fn start_party(cp: &ClashParty) -> Result<(), String> {

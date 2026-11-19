@@ -2176,6 +2176,11 @@ fn main() {
             }
             tray.build(app)?;
 
+            // icons left behind by an earlier NetIsland that was killed instead of quit
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(1500));
+                log(format!("tray sweep: {} toolbar(s)", system::sweep_tray()));
+            });
             ai_loop(handle.clone(), shared.clone());
             let h_media = handle.clone();
             media::start(shared.media.clone(), move |np| {
