@@ -313,6 +313,7 @@ function applySize() {
 function expand() {
   if (expanded) return;
   expanded = true;
+  island.classList.remove("peek");
   island.classList.add("expanded");
   island.classList.remove("collapsed");
   $("panel").scrollTop = 0;
@@ -1308,7 +1309,8 @@ function settingsHtml() {
     ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成细线")}
   </div>
   <div class="s-sec"><div class="s-title">交互</div>
-    ${sSelect("interaction.expand", "怎么展开", [["hover", "鼠标停留"], ["click", "点击"]])}
+    ${sSelect("interaction.expand", "怎么展开", [["hover", "鼠标停留（收起时不挡点击）"], ["click", "点击（收起时胶囊会挡住下面的点击）"]])}
+    ${sToggle("interaction.peek", "　鼠标停在胶囊上时变透明", "能看见被挡住的标签页等；点一下下面的东西就不会展开")}
     ${sNumber("interaction.hoverDelay", "　鼠标停留多久展开", 0, 2000, 50, "ms")}
     ${sToggle("interaction.passthrough", "穿透模式", "鼠标完全不触发，点击穿透到下面的窗口；只能用快捷键打开")}
     <div class="s-row"><span class="s-label">快捷键（展开 / 收起）${snap && !snap.hotkeyOk ? `<span class="s-note bad">没注册成功：可能被别的程序占用了</span>` : ""}</span>
@@ -2301,6 +2303,8 @@ document.addEventListener("keydown", (e) => {
   }
 });
 listen("game", (e) => island.classList.toggle("game", !!e.payload));
+// cursor resting on the collapsed (click-through) pill: let the window below show through
+listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded));
 
 let snapErr = 0;
 listen("snapshot", (e) => {

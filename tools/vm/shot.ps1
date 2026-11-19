@@ -43,6 +43,7 @@ if ($Clicks) {
         [NiU]::SetCursorPos([int]$p[0], [int]$p[1]) | Out-Null
         Start-Sleep -Milliseconds 150
         [NiU]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 90  # a real click is held ~50-150 ms
         [NiU]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 600
     }

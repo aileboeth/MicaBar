@@ -30,6 +30,8 @@ pub fn defaults() -> Value {
             "hoverDelay": 300,
             // mouse never opens the island; only the hotkey does, clicks pass through
             "passthrough": false,
+            // hover mode: the collapsed pill turns see-through while the cursor rests on it
+            "peek": true,
             "hotkey": "Ctrl+Alt+N",
             // fullscreen app in front: pill | hide
             "fullscreen": "pill"

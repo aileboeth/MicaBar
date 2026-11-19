@@ -811,3 +811,7 @@ body[data-mode="manager"] #gear { display: none; }
 .m-warn { font-size: 12.5px; line-height: 1.6; color: var(--text); }
 .m-warn ul { margin: 6px 0 2px; padding-left: 18px; color: var(--dim); }
 .m-warn b { color: var(--amber); }
+
+/* collapsed pill under the resting cursor: see-through (clicks already pass through it) */
+#island.peek:not(.expanded) { opacity: 0.22; transition: opacity 0.16s ease, --ix 0.42s var(--spring), --iy 0.42s var(--spring), width 0.42s var(--spring), height 0.42s var(--spring), border-radius 0.42s var(--spring); }
+#island:not(.peek) { transition-property: --ix, --iy, width, height, border-radius, background-color, opacity; }

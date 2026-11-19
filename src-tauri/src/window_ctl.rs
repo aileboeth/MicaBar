@@ -309,6 +309,7 @@ struct Hover {
     btn_prev: bool,
     prev_fg: isize,
     ignoring: bool,
+    peek: bool,
 }
 
 pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
@@ -326,6 +327,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         btn_prev: false,
         prev_fg: 0,
         ignoring: true,
+        peek: false,
     };
     let mut n: u64 = 0;
     let mut pos = w.outer_position().unwrap_or_default();
@@ -446,8 +448,9 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             } else if !inside {
                 h.armed = true;
                 h.dwell = None;
-            } else if btn || game {
-                // a window is being dragged across / a game owns the screen
+            } else if btn || pressed || game {
+                // a click went through to the window below (the user meant that window), a window is
+                // being dragged across, or a game owns the screen: don't open until the cursor leaves
                 h.armed = false;
                 h.dwell = None;
             } else if h.armed {
@@ -475,8 +478,17 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
 
         let expanded = ws.expanded.load(Ordering::SeqCst);
         let mut capture = inside || (expanded && btn && h.press_inside);
-        if (game || passthrough) && !expanded {
-            capture = false; // clicks always go to the window below (game / pass-through mode)
+        // Collapsed in hover mode the pill is "hollow": opening only needs the cursor position
+        // (polled above), so clicks always go to whatever is under it (a browser tab…).
+        // Click-to-open needs the press itself; game / pass-through never capture.
+        if !expanded && (game || passthrough || !click_mode) {
+            capture = false;
+        }
+        // see-through while the cursor rests on the collapsed pill (hover mode)
+        let peek = !expanded && inside && !click_mode && !passthrough && !game && crate::settings::bool_at("interaction.peek", true);
+        if peek != h.peek {
+            h.peek = peek;
+            let _ = app.emit("peek", peek);
         }
         if capture == h.ignoring {
             h.ignoring = !capture;
