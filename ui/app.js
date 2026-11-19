@@ -773,7 +773,7 @@ function rulesTabHtml() {
       ${nodesCache ? `<button data-do="test">测速</button>` : ""}
     </div>${nodeList}
     <div class="rules">${rules}</div>
-    <div class="m-actions end"><button class="${confirmDisable ? "danger" : "ghost"}" data-do="disable">${confirmDisable ? "再点一次：移除覆写并重启 Clash Party" : "停用出口控制"}</button></div>`;
+    <div class="m-actions end"><button class="${confirmDisable ? "danger" : "ghost"}" data-do="disable">${confirmDisable ? "再点一次：移除覆写并重启 Clash Party（代理会断开几秒）" : "停用出口控制"}</button></div>`;
 }
 
 function bannerHtml() {
@@ -1458,7 +1458,8 @@ const appOrder = { order: null, last: new Map() };
 const connOrders = new Map();
 
 function stable(items, keyFn, st) {
-  if (!listHover) {
+  // also frozen while an exit menu is open (the cursor is on the menu, outside the list)
+  if (!listHover && $("menu").hidden) {
     st.order = null;
     st.last = new Map(items.map((i) => [keyFn(i), i]));
     return items;
@@ -1479,10 +1480,22 @@ function stable(items, keyFn, st) {
 const connKey = (c) => `${c.proto}|${c.localPort}|${c.remote}|${c.remotePort}`;
 
 $("list").addEventListener("mouseenter", () => { listHover = true; });
+$("list").addEventListener("mousemove", () => { listHover = true; });
 $("list").addEventListener("mouseleave", () => {
   listHover = false;
   renderList();
 });
+// A click is a press and a release on the same element: rebuilding the rows in between (every
+// snapshot does) swallows it. While a button is held over the list, the list is not rebuilt.
+let listPress = false;
+$("list").addEventListener("pointerdown", () => { listPress = true; });
+const releaseList = () => {
+  if (!listPress) return;
+  listPress = false;
+  setTimeout(() => renderList(), 60);
+};
+document.addEventListener("pointerup", releaseList);
+document.addEventListener("pointercancel", releaseList);
 
 function connHtml(app, c) {
   if (c._gone) {
@@ -1520,6 +1533,7 @@ function connHtml(app, c) {
 
 function renderList(force = false) {
   const list = $("list");
+  if (listPress && !force) return;
   if (tab === "settings") {
     // the settings page only re-renders when settings change (not on every snapshot), so open
     // dropdowns and number fields are not destroyed while the user works with them
@@ -1637,10 +1651,30 @@ async function runAction(el) {
   const act = el.dataset.do;
   try {
     if (act === "enable") {
-      toast("正在写入覆写并重启 Clash Party…");
+      // installing / updating the override restarts the proxy client: ask first
+      const c = ctrl();
+      const client = c.client || "Clash Party";
+      const what = c.status === "available" && c.message ? "更新覆写" : c.status === "error" ? "重试" : "启用出口控制";
+      const html = `<div class="m-title">${what}需要重启 ${esc(client)}</div>
+        <div class="m-warn">MicaBar 会给 ${esc(client)} 写入一个全局覆写，然后把它关掉再打开一次：
+          <ul><li><b>代理会断开约 3~5 秒</b>，正在进行的下载、通话、游戏可能会掉线</li>
+          <li>${esc(client)} 的窗口可能会弹出来</li>
+          <li>加载失败会自动还原成原来的设置</li></ul></div>
+        <div class="m-actions"><button class="ghost" data-do="menu-close">取消</button><button class="primary" data-do="enable-go">现在重启并${what === "重试" ? "重试" : what.replace("启用出口控制", "启用")}</button></div>`;
+      if (el.closest && el.closest("#menu")) {
+        $("menu").innerHTML = html; // already inside a menu: replace it in place
+      } else {
+        openMenu(el, html);
+      }
+      return;
+    } else if (act === "enable-go") {
       closeMenu();
+      toast(`正在写入覆写并重启 ${ctrl().client || "Clash Party"}（代理会断开几秒）…`);
       await invoke("control_enable");
       toast("出口控制已启用");
+    } else if (act === "menu-close") {
+      closeMenu();
+      return;
     } else if (act === "dismiss") {
       try { localStorage.setItem("ni-setup-dismissed", "1"); } catch { /* ignore */ }
     } else if (act === "disable") {

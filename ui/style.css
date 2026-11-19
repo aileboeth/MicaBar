@@ -802,3 +802,12 @@ body[data-mode="manager"] #exit-row { display: none !important; }
 body[data-mode="manager"] #list { overflow-x: hidden; }
 .mp-ctl button { display: grid; place-items: center; }
 body[data-mode="manager"] #gear { display: none; }
+
+/* fixed width so the 出口 chip doesn't move while the speed digits change */
+.app-head .speed { flex: none; width: 158px; min-width: 0; overflow: hidden; text-overflow: clip; }
+.app-head .app-count { flex: none; width: 30px; }
+.app-head .app-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* restart confirmation */
+.m-warn { font-size: 12.5px; line-height: 1.6; color: var(--text); }
+.m-warn ul { margin: 6px 0 2px; padding-left: 18px; color: var(--dim); }
+.m-warn b { color: var(--amber); }

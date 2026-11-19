@@ -105,10 +105,18 @@ fn window_label(secs: f64) -> String {
     }
 }
 
-fn http_err(tool: &str, status: reqwest::StatusCode, body: &str) -> String {
+/// Retry-After (seconds) of a response, when the service sends one.
+fn retry_after(r: &reqwest::Response) -> Option<u64> {
+    r.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// 429 comes back as "429:<retry-after seconds or 0>" so query can back off.
+fn http_err(tool: &str, status: reqwest::StatusCode, body: &str, retry: Option<u64>) -> String {
+    if status.as_u16() == 429 {
+        return format!("429:{}", retry.unwrap_or(0));
+    }
     match status.as_u16() {
         401 | 403 => format!("{tool} 的登录已失效，打开 {tool} 用一下就会自动续期"),
-        429 => "查询太频繁，稍后再试".into(),
         _ => format!("{tool} 返回 {}：{}", status.as_u16(), body.chars().take(80).collect::<String>()),
     }
 }
@@ -137,9 +145,10 @@ async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
         .await
         .map_err(|e| format!("连不上 Anthropic：{e}"))?;
     let status = r.status();
+    let retry = retry_after(&r);
     let body = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(http_err("Claude Code", status, &body));
+        return Err(http_err("Claude Code", status, &body, retry));
     }
     let u: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let mut windows = Vec::new();
@@ -230,6 +239,7 @@ async fn codex(proxy: Option<u16>) -> Result<Quota, String> {
         match req.send().await {
             Ok(r) => {
                 let status = r.status();
+                let retry = retry_after(&r);
                 let body = r.text().await.unwrap_or_default();
                 if status.is_success() {
                     let u: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
@@ -242,7 +252,7 @@ async fn codex(proxy: Option<u16>) -> Result<Quota, String> {
                 if let Some((windows, at)) = codex_from_sessions() {
                     return Ok(Quota { windows, source: Some(format!("最近一次 Codex 会话（{}）", crate::fmt_time(at))), ..Default::default() });
                 }
-                return Err(http_err("Codex", status, &body));
+                return Err(http_err("Codex", status, &body, retry));
             }
             Err(e) => {
                 if let Some((windows, at)) = codex_from_sessions() {
@@ -424,9 +434,10 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
     };
     let r = get("/v1/billing?format=credits").await.map_err(|e| format!("连不上 grok.com：{e}"))?;
     let status = r.status();
+    let retry = retry_after(&r);
     let body = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(http_err("Grok", status, &body));
+        return Err(http_err("Grok", status, &body, retry));
     }
     let b: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let cfg = b.get("config").unwrap_or(&b);
@@ -452,17 +463,47 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
     Ok(Quota { plan, windows, source: Some("Grok 账户用量".into()), ..Default::default() })
 }
 
+/// Per tool: (429s in a row, no request before this epoch ms).
+fn backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, (u32, u64)>> {
+    static B: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u32, u64)>>> = std::sync::OnceLock::new();
+    B.get_or_init(Default::default)
+}
+
 /// Queries one tool. `prev` keeps the last good numbers when a query fails.
 pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quota {
     let name = TOOLS.iter().find(|(t, _)| *t == tool).map(|(_, n)| *n).unwrap_or(tool).to_string();
-    let r = match tool {
-        "claude" => claude(proxy).await,
-        "codex" => codex(proxy).await,
-        "antigravity" => antigravity().await,
-        "grok" => grok(proxy).await,
-        _ => Err("absent:未知工具".into()),
-    };
     let at = crate::now_ms();
+    // backing off after a 429: no request until the pause is over
+    let until = backoff().lock().unwrap().get(tool).map(|b| b.1).unwrap_or(0);
+    let r = if at < until {
+        Err(format!("官方接口限流，{} 后再查", crate::fmt_time(until).get(..5).unwrap_or("")))
+    } else {
+        match tool {
+            "claude" => claude(proxy).await,
+            "codex" => codex(proxy).await,
+            "antigravity" => antigravity().await,
+            "grok" => grok(proxy).await,
+            _ => Err("absent:未知工具".into()),
+        }
+    };
+    // 429 -> pause: the service's Retry-After, else 10, 20, 40 then 60 minutes
+    let r = match r {
+        Err(e) if e.starts_with("429:") => {
+            let retry: u64 = e[4..].parse().unwrap_or(0);
+            let mut map = backoff().lock().unwrap();
+            let entry = map.entry(tool.to_string()).or_insert((0, 0));
+            entry.0 += 1;
+            let step = (10u64 << (entry.0 - 1).min(3)).min(60) * 60_000;
+            entry.1 = at + step.max(retry * 1000);
+            crate::log(format!("ai {tool}: 429, next query after {}", crate::fmt_time(entry.1)));
+            Err(format!("官方接口限流，{} 后再查", crate::fmt_time(entry.1).get(..5).unwrap_or("")))
+        }
+        Ok(q) => {
+            backoff().lock().unwrap().remove(tool);
+            Ok(q)
+        }
+        other => other,
+    };
     match r {
         Ok(mut q) => {
             q.tool = tool.into();
