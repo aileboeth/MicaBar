@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+    GetAsyncKeyState, RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_LBUTTON, VK_MBUTTON, VK_MENU, VK_RBUTTON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, IsWindow, SetForegroundWindow,
@@ -51,6 +51,11 @@ pub struct WinState {
     pub click_req: AtomicBool,
     /// Layout editing (drag handles): the window takes all mouse input, no hover logic.
     pub edit: AtomicBool,
+    /// The island is grabbed / being flung along the edge: all input to the window, which spans
+    /// the whole edge meanwhile.
+    pub grab: AtomicBool,
+    /// After a grab: don't reopen until the cursor has left the pill.
+    pub disarm: AtomicBool,
     pub hwnd: AtomicIsize,
 }
 
@@ -137,13 +142,23 @@ pub fn place_window(w: &WebviewWindow) {
     let (ww, wh) = (size.width as i32, size.height as i32);
     let f = m.full;
     let work = m.work;
-    let cx = f.left + (f.right - f.left - ww) / 2;
-    let cy = f.top + (f.bottom - f.top - wh) / 2;
+    // position along the edge: start (left / top), centre, end (right / bottom)
+    let anchor = crate::settings::str_at("shape.anchor", "center");
+    let along_x = match anchor.as_str() {
+        "start" => f.left,
+        "end" => f.right - ww,
+        _ => f.left + (f.right - f.left - ww) / 2,
+    };
+    let along_y = match anchor.as_str() {
+        "start" => work.top,
+        "end" => work.bottom - wh,
+        _ => f.top + (f.bottom - f.top - wh) / 2,
+    };
     let (x, y) = match crate::settings::str_at("shape.dock", "top").as_str() {
-        "bottom" => (cx, work.bottom - wh),
-        "left" => (f.left, cy),
-        "right" => (f.right - ww, cy),
-        _ => (cx, f.top),
+        "bottom" => (along_x, work.bottom - wh),
+        "left" => (f.left, along_y),
+        "right" => (f.right - ww, along_y),
+        _ => (along_x, f.top),
     };
     if let Ok(cur) = w.outer_position() {
         if cur.x == x && cur.y == y {
@@ -151,6 +166,23 @@ pub fn place_window(w: &WebviewWindow) {
         }
     }
     let _ = w.set_position(PhysicalPosition::new(x, y));
+}
+
+/// While the island is grabbed the window spans the whole docked edge of its monitor, so the
+/// pill can slide from wall to wall inside it. `fit_window` + `place_window` undo it afterwards.
+pub fn span_edge(w: &WebviewWindow) {
+    let Some(m) = target_monitor() else { return };
+    let Ok(size) = w.outer_size() else { return };
+    let Ok(pos) = w.outer_position() else { return };
+    let f = m.full;
+    let vertical = matches!(crate::settings::str_at("shape.dock", "top").as_str(), "left" | "right");
+    if vertical {
+        let _ = w.set_size(tauri::PhysicalSize::new(size.width, (f.bottom - f.top) as u32));
+        let _ = w.set_position(PhysicalPosition::new(pos.x, f.top));
+    } else {
+        let _ = w.set_size(tauri::PhysicalSize::new((f.right - f.left) as u32, size.height));
+        let _ = w.set_position(PhysicalPosition::new(f.left, pos.y));
+    }
 }
 
 /// Foreground window maximized on the island's monitor (taskbar still visible).
@@ -364,7 +396,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         n += 1;
         // placement: every 2 s, or every 0.3 s when following the cursor across monitors
         let follow = n % 20 == 0 && !ws.expanded.load(Ordering::SeqCst) && crate::settings::str_at("general.monitor", "primary") == "cursor";
-        if n % 130 == 0 || follow {
+        if (n % 130 == 0 || follow) && !ws.grab.load(Ordering::SeqCst) {
             place_window(&w);
             pos = w.outer_position().unwrap_or(pos);
         }
@@ -394,6 +426,21 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             ws.click_req.store(false, Ordering::SeqCst);
         }
 
+        if ws.disarm.swap(false, Ordering::SeqCst) {
+            h.armed = false;
+            h.dwell = None;
+        }
+        if ws.grab.load(Ordering::SeqCst) {
+            // grabbed: the page follows the pointer; nothing opens or closes meanwhile
+            ws.hotkey.store(false, Ordering::SeqCst);
+            ws.click_req.store(false, Ordering::SeqCst);
+            ws.collapse_req.store(false, Ordering::SeqCst);
+            if h.ignoring {
+                h.ignoring = false;
+                let _ = w.set_ignore_cursor_events(false);
+            }
+            continue;
+        }
         if ws.edit.load(Ordering::SeqCst) {
             if ws.collapse_req.swap(false, Ordering::SeqCst) && ws.expanded.load(Ordering::SeqCst) {
                 set_expanded(&mut h, false, "layout edit");
@@ -417,6 +464,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         let rect = if expanded { *ws.panel.lock().unwrap() } else { *ws.pill.lock().unwrap() };
         let inside = rect.contains(cx, cy);
         let (l, r, m) = (key_state(VK_LBUTTON), key_state(VK_RBUTTON), key_state(VK_MBUTTON));
+        let alt = key_state(VK_MENU).0;
         let btn = l.0 || r.0 || m.0;
         let pressed = (btn && !h.btn_prev) || l.1 || r.1 || m.1;
         if pressed {
@@ -441,12 +489,16 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
                 // only the hotkey opens the island
                 h.dwell = None;
             } else if click_mode {
-                let clicked = ws.click_req.swap(false, Ordering::SeqCst) || (inside && pressed);
+                // reported by the page on release (a long press grabs the island instead)
+                let clicked = ws.click_req.swap(false, Ordering::SeqCst);
                 if clicked && !game {
                     set_expanded(&mut h, true, "click");
                 }
             } else if !inside {
                 h.armed = true;
+                h.dwell = None;
+            } else if alt {
+                // Alt + long press grabs the collapsed pill: don't open meanwhile
                 h.dwell = None;
             } else if btn || pressed || game {
                 // a click went through to the window below (the user meant that window), a window is
@@ -484,8 +536,12 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         if !expanded && (game || passthrough || !click_mode) {
             capture = false;
         }
+        // Alt over the collapsed pill makes it solid, so a long press grabs it (not the window below)
+        if !expanded && inside && alt && !game && !passthrough {
+            capture = true;
+        }
         // see-through while the cursor rests on the collapsed pill (hover mode)
-        let peek = !expanded && inside && !click_mode && !passthrough && !game && crate::settings::bool_at("interaction.peek", true);
+        let peek = !expanded && inside && !alt && !click_mode && !passthrough && !game && crate::settings::bool_at("interaction.peek", true);
         if peek != h.peek {
             h.peek = peek;
             let _ = app.emit("peek", peek);

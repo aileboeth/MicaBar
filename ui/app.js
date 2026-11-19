@@ -209,8 +209,12 @@ function fitWindow() {
   if (MANAGER) return;
   const dpr = window.devicePixelRatio || 1;
   const maxW = Math.floor((screen.availWidth || 1920) * 0.98), maxH = Math.floor((screen.availHeight || 1080) * 0.95);
-  const w = Math.min(maxW, (editing ? SIZE_LIMITS.panelW[1] : Math.max(panelW(), sz("pillW"), sz("pillMaxW"))) + 40);
-  const h = Math.min(maxH, (editing ? SIZE_LIMITS.panelH[1] : panelH()) + 30);
+  let w = Math.min(maxW, (editing ? SIZE_LIMITS.panelW[1] : Math.max(panelW(), sz("pillW"), sz("pillMaxW"))) + 40);
+  let h = Math.min(maxH, (editing ? SIZE_LIMITS.panelH[1] : panelH()) + 30);
+  // the window spans the whole docked edge (transparent and click-through outside the island),
+  // so the island can sit at either end or slide between them without the window moving
+  if (shape().vertical) h = screen.height;
+  else w = screen.width;
   const key = `${w}x${h}@${dpr}`;
   if (key === fitted) return;
   fitted = key;
@@ -278,6 +282,18 @@ function islandRect(open) {
   else if (dock === "bottom") y = H - h - gap;
   else if (dock === "left") x = gap;
   else x = W - w - gap;
+  // where along the edge (set by flinging it): the window sits at that end, the island too
+  const anchor = sget("shape.anchor", "center");
+  if (anchor === "start" || anchor === "end") {
+    if (vertical) y = anchor === "start" ? EDGE_M : H - h - EDGE_M;
+    else x = anchor === "start" ? EDGE_M : W - w - EDGE_M;
+  }
+  // grabbed / flying: wherever the drag or the animation puts it
+  if (fling.active && !open) {
+    const local = fling.pos - (vertical ? window.screenY : window.screenX);
+    if (vertical) y = local;
+    else x = local;
+  }
   return { x, y, w, h, style, dock, vertical };
 }
 
@@ -1309,6 +1325,7 @@ function settingsHtml() {
   <div class="s-sec"><div class="s-title">外形</div>
     ${sSelect("shape.style", "收起时的样子", [["capsule", "胶囊（悬浮）"], ["notch", "刘海（贴边）"], ["line", "细线（只显示状态色）"]])}
     ${sSelect("shape.dock", "停靠位置", [["top", "屏幕上边"], ["bottom", "屏幕下边（任务栏上方）"], ["left", "屏幕左边"], ["right", "屏幕右边"]], "左右两边时，胶囊会变成竖着的刘海")}
+    ${sSelect("shape.anchor", "在这条边上的位置", [["start", "靠左（停靠左右两边时为靠上）"], ["center", "居中"], ["end", "靠右（停靠左右两边时为靠下）"]], "也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊")}
     ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成细线")}
   </div>
   <div class="s-sec"><div class="s-title">交互</div>
@@ -2143,9 +2160,187 @@ listen("island", (e) => {
 $("panel").addEventListener("scroll", () => { if ($("panel").scrollTop) $("panel").scrollTop = 0; });
 
 // click-to-open: the window receives the press itself while the cursor is over the pill
-island.addEventListener("mousedown", () => {
-  if (!expanded && !MANAGER && !editing) invoke("pill_click").catch(() => {});
+// ---------- grab and fling ----------
+// Long press on the island (the open panel, the pill in click mode, or Alt + the collapsed pill)
+// grabs it: it shrinks to the pill under the pointer and slides along the edge. Flung right it
+// moves one spot right (centre -> right wall, left wall -> centre), flung left the other way;
+// at a wall it bounces a few times, back to the centre it springs.
+
+const EDGE_M = 10; // gap to the screen side at the start / end spot (CSS px)
+const ANCHORS = ["start", "center", "end"];
+const fling = { active: false, phase: "", pos: 0, vel: 0, samples: [], from: "center", target: "", w: 0, bumps: 0, raf: 0 };
+let press = null; // pending long press {sx, sy, timer, id}
+let suppressClick = false;
+
+// edge geometry in screen CSS px along the island's axis
+function edgeAxis() {
+  const vertical = shape().vertical;
+  const origin = vertical ? (screen.top ?? screen.availTop ?? 0) : (screen.left ?? screen.availLeft ?? 0);
+  const extent = vertical ? screen.height : screen.width;
+  return { vertical, origin, extent };
+}
+
+function slotPos(anchor, w) {
+  const { origin, extent } = edgeAxis();
+  if (anchor === "start") return origin + EDGE_M;
+  if (anchor === "end") return origin + extent - w - EDGE_M;
+  return origin + (extent - w) / 2;
+}
+
+function startGrab(e) {
+  press = null;
+  if (fling.active || editing) return;
+  const wasOpen = expanded;
+  const { vertical } = edgeAxis();
+  expanded = false;
+  closeMenu();
+  island.classList.remove("expanded", "peek");
+  island.classList.add("collapsed", "grabbed", "flinging");
+  pillLast = "";
+  renderPill();
+  const r = islandRect(false);
+  fling.w = vertical ? r.h : r.w;
+  fling.from = sget("shape.anchor", "center");
+  const p = vertical ? e.screenY : e.screenX;
+  fling.pos = p - fling.w / 2;
+  fling.vel = 0;
+  fling.samples = [{ p, t: performance.now() }];
+  fling.phase = "drag";
+  fling.active = true;
+  suppressClick = true;
+  try { island.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+  invoke("grab_start").catch(() => {});
+  invoke("log_js", { msg: `grab (${wasOpen ? "open panel" : "pill"}) from ${fling.from}` }).catch(() => {});
+  applySize();
+}
+
+function cancelPress() {
+  if (press) clearTimeout(press.timer);
+  press = null;
+}
+
+island.addEventListener("pointerdown", (e) => {
+  if (MANAGER || editing || fling.active || e.button !== 0) return;
+  if (e.target.closest("input, select, textarea, #menu")) return;
+  const ev = { pointerId: e.pointerId, screenX: e.screenX, screenY: e.screenY };
+  press = { sx: e.screenX, sy: e.screenY, timer: setTimeout(() => startGrab(ev), 420) };
 });
+
+document.addEventListener("pointermove", (e) => {
+  if (press && Math.hypot(e.screenX - press.sx, e.screenY - press.sy) > 6) cancelPress();
+  if (!fling.active || fling.phase !== "drag") return;
+  const { vertical } = edgeAxis();
+  const p = vertical ? e.screenY : e.screenX;
+  const lo = slotPos("start", fling.w), hi = slotPos("end", fling.w);
+  let pos = p - fling.w / 2;
+  // a little give past the walls
+  if (pos < lo) pos = lo - Math.sqrt(lo - pos) * 2;
+  if (pos > hi) pos = hi + Math.sqrt(pos - hi) * 2;
+  fling.pos = pos;
+  const now = performance.now();
+  fling.samples.push({ p, t: now });
+  while (fling.samples.length > 2 && now - fling.samples[0].t > 90) fling.samples.shift();
+  applySize();
+});
+
+document.addEventListener("pointerup", (e) => {
+  if (press) {
+    // a short press: in click mode that's the click that opens the island
+    cancelPress();
+    if (!expanded && !fling.active && sget("interaction.expand", "hover") === "click") invoke("pill_click").catch(() => {});
+    return;
+  }
+  if (fling.active && fling.phase === "drag") release();
+});
+
+// swallow the click that ends a grab (it might land on a button)
+document.addEventListener("click", (e) => {
+  if (suppressClick) {
+    suppressClick = false;
+    e.stopPropagation();
+    e.preventDefault();
+  }
+}, true);
+
+function release() {
+  const s = fling.samples;
+  const a = s[0], b = s[s.length - 1];
+  const v = b && a && b.t > a.t ? (b.p - a.p) / (b.t - a.t) : 0; // px per ms
+  let i = ANCHORS.indexOf(fling.from);
+  if (i < 0) i = 1;
+  if (v > 0.45) i = Math.min(2, i + 1);
+  else if (v < -0.45) i = Math.max(0, i - 1);
+  else {
+    // no real fling: the nearest spot to where it was let go
+    let best = 1, d = Infinity;
+    ANCHORS.forEach((an, k) => { const dd = Math.abs(slotPos(an, fling.w) - fling.pos); if (dd < d) { d = dd; best = k; } });
+    i = best;
+  }
+  fling.target = ANCHORS[i];
+  fling.vel = v;
+  fling.bumps = 0;
+  fling.phase = "anim";
+  island.classList.remove("grabbed");
+  let last = performance.now();
+  const step = (now) => {
+    const dt = Math.min(32, now - last);
+    last = now;
+    if (stepFling(dt)) {
+      applySize();
+      fling.raf = requestAnimationFrame(step);
+    } else {
+      endFling();
+    }
+  };
+  fling.raf = requestAnimationFrame(step);
+}
+
+// one physics step; false when it has come to rest
+function stepFling(dt) {
+  const target = slotPos(fling.target, fling.w);
+  if (fling.target === "center") {
+    // spring to the middle, a little overshoot
+    const k = 0.00042, c = 0.026;
+    fling.vel += (-k * (fling.pos - target) - c * fling.vel) * dt;
+    fling.pos += fling.vel * dt;
+    return !(Math.abs(fling.pos - target) < 0.6 && Math.abs(fling.vel) < 0.03);
+  }
+  // to a wall: pulled towards it, bouncing off it ("dun dun dun"), each bounce smaller
+  const dir = fling.target === "end" ? 1 : -1;
+  if (fling.vel * dir < 0.9 && fling.bumps === 0) fling.vel = 0.9 * dir; // at least a decent throw
+  fling.vel += 0.0065 * dir * dt;
+  fling.pos += fling.vel * dt;
+  if ((fling.pos - target) * dir >= 0) {
+    fling.pos = target;
+    if (Math.abs(fling.vel) < 0.22 || fling.bumps >= 4) return false;
+    fling.vel = -fling.vel * 0.42;
+    fling.bumps++;
+    bump(dir);
+  }
+  return true;
+}
+
+function bump(dir) {
+  const { vertical } = edgeAxis();
+  island.style.transformOrigin = vertical ? (dir > 0 ? "50% 100%" : "50% 0%") : (dir > 0 ? "100% 50%" : "0% 50%");
+  island.classList.remove("bump-x", "bump-y");
+  void island.offsetWidth; // restart the animation
+  island.classList.add(vertical ? "bump-y" : "bump-x");
+}
+
+function endFling() {
+  cancelAnimationFrame(fling.raf);
+  const target = fling.target;
+  fling.active = false;
+  fling.phase = "";
+  island.classList.remove("flinging", "grabbed");
+  // remember the spot; the backend refits the window there
+  if (S?.shape) S.shape.anchor = target;
+  invoke("grab_end", { anchor: target }).catch(() => {});
+  fitted = "";
+  fitWindow();
+  applySize();
+}
 
 // ---------- layout editing: drag the edges of the panel / pill ----------
 // The backend hands the whole window the mouse while editing; the window is temporarily as big
@@ -2424,6 +2619,7 @@ function logView(tag) {
 
 let resizeTimer = null;
 window.addEventListener("resize", () => {
+  if (!MANAGER && !editing) applySize();
   reportRect();
   if (MANAGER) {
     clearTimeout(resizeTimer);

@@ -18,6 +18,10 @@ param(
     [switch]$RestoreEdge,
     # "x,y,notches": scroll the wheel at a point (negative notches = down)
     [string]$Wheel = '',
+    # "x1,y1,x2,y2,holdMs,moveMs,alt": press, hold still, move fast, release at once (a fling);
+    # alt=1 holds the Alt key meanwhile. Then -Frames screenshots of the top strip, 60 ms apart.
+    [string]$Flick = '',
+    [int]$Frames = 0,
     [int]$CropW = 1400,
     [int]$CropH = 1000,
     [string]$Out = 'C:\MicaBar\shot.png'
@@ -112,7 +116,30 @@ function Save-Shot([string]$file) {
     $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
     $g.Dispose(); $bmp.Dispose()
 }
-if ($Burst -gt 0) {
+if ($Flick) {
+    $f = $Flick.Split(',') | ForEach-Object { [int]$_ }
+    if ($f[6]) { [NiU]::keybd_event(0x12, 0, 0, [IntPtr]::Zero) }
+    [NiU]::SetCursorPos($f[0], $f[1]) | Out-Null
+    Start-Sleep -Milliseconds 250
+    [NiU]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds $f[4]
+    $steps = 12
+    for ($s = 1; $s -le $steps; $s++) {
+        [NiU]::SetCursorPos([int]($f[0] + ($f[2] - $f[0]) * $s / $steps), [int]($f[1] + ($f[3] - $f[1]) * $s / $steps)) | Out-Null
+        Start-Sleep -Milliseconds ([int]($f[5] / $steps))
+    }
+    [NiU]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+    if ($f[6]) { [NiU]::keybd_event(0x12, 0, 2, [IntPtr]::Zero) }
+    for ($i = 1; $i -le $Frames; $i++) {
+        $bmp = New-Object System.Drawing.Bitmap $sw, 110
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
+        $bmp.Save(($Out -replace '\.png$', "-f$i.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+        $g.Dispose(); $bmp.Dispose()
+        Start-Sleep -Milliseconds 60
+    }
+    Start-Sleep -Milliseconds 1200
+}if ($Burst -gt 0) {
     for ($i = 1; $i -le $Burst; $i++) {
         Save-Shot ($Out -replace '\.png$', "-$i.png")
         Start-Sleep -Milliseconds 1000

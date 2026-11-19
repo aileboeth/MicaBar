@@ -14,6 +14,8 @@ param(
     [int]$Wait = 1200,
     [string]$Clicks = '',
     [string]$Drag = '',
+    [string]$Flick = '',
+    [int]$Frames = 0,
     [switch]$Hotkey,
     [switch]$Full,
     [int]$Burst = 0,
@@ -74,6 +76,7 @@ if ($Shot) {
     $tr = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\MicaBar\shot.ps1 -X $X -Y $Y -Wait $Wait"
     if ($Clicks) { $tr += " -Clicks $Clicks" }
     if ($Drag) { $tr += " -Drag $Drag" }
+    if ($Flick) { $tr += " -Flick $Flick -Frames $Frames" }
     if ($Hotkey) { $tr += " -Hotkey" }
     if ($Full) { $tr += " -CropW 4000 -CropH 3000" }
     if ($Burst -gt 0) { $tr += " -Burst $Burst -CropH 120" }
@@ -86,6 +89,9 @@ if ($Shot) {
     for ($i = 1; $i -le $Burst; $i++) {
         $name = $Shot -replace '\.png$', "-$i.png"
         & scp @sshArgs "${vm}:C:/MicaBar/shot-$i.png" (Join-Path $outDir $name)
+    }
+    for ($i = 1; $i -le $Frames; $i++) {
+        & scp @sshArgs "${vm}:C:/MicaBar/shot-f$i.png" (Join-Path $outDir ($Shot -replace '\.png$', "-f$i.png"))
     }
     Join-Path $outDir $Shot
 }

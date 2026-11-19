@@ -831,3 +831,11 @@ body[data-mode="manager"] #gear { display: none; }
 
 /* collapsed pill: user opacity (text included) */
 #island.collapsed:not(.peek) { opacity: var(--pill-op, 1); }
+
+/* grab & fling: the position follows the pointer / physics frame by frame (no easing) */
+#island.flinging { transition: width 0.28s var(--spring), height 0.28s var(--spring), border-radius 0.28s var(--spring) !important; opacity: 1 !important; }
+#island.grabbed { box-shadow: 0 16px 38px var(--shadow); scale: 1.05; }
+#island.bump-x { animation: bump-x 0.17s ease-out; }
+#island.bump-y { animation: bump-y 0.17s ease-out; }
+@keyframes bump-x { 35% { transform: scale(0.84, 1.12); } 100% { transform: none; } }
+@keyframes bump-y { 35% { transform: scale(1.12, 0.84); } 100% { transform: none; } }

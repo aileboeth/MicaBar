@@ -1973,6 +1973,29 @@ async fn open_manager(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, page
     Ok(())
 }
 
+/// Long press grabbed the island: it follows the pointer along the edge, so the window spans
+/// the whole edge and takes all input until `grab_end`.
+#[tauri::command]
+fn grab_start(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) {
+    state.ws.grab.store(true, Ordering::SeqCst);
+    state.ws.expanded.store(false, Ordering::SeqCst);
+    if let Some(w) = app.get_webview_window("main") {
+        window_ctl::span_edge(&w);
+    }
+}
+
+/// The flung island came to rest at `anchor` (start | center | end): remember it; the page then
+/// refits the window, which `place_window` puts at that spot.
+#[tauri::command]
+fn grab_end(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, anchor: String) {
+    let anchor = if matches!(anchor.as_str(), "start" | "end") { anchor } else { "center".into() };
+    let s = settings::update(&serde_json::json!({ "shape": { "anchor": anchor } }));
+    state.ws.grab.store(false, Ordering::SeqCst);
+    state.ws.disarm.store(true, Ordering::SeqCst);
+    log(format!("island flung to {}", s.pointer("/shape/anchor").and_then(|v| v.as_str()).unwrap_or("")));
+    let _ = app.emit("settings", &s);
+}
+
 /// Layout editing: the island window takes all mouse input (drag handles) until done.
 #[tauri::command]
 fn layout_edit(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, on: bool) {
@@ -2139,6 +2162,8 @@ fn main() {
             media_control,
             open_manager,
             layout_edit,
+            grab_start,
+            grab_end,
             latency_history,
             latency_probe,
             refresh_exit,

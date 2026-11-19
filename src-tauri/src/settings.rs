@@ -41,6 +41,8 @@ pub fn defaults() -> Value {
             "style": "capsule",
             // top | bottom | left | right
             "dock": "top",
+            // where along that edge: start (left / top) | center | end (right / bottom); set by flinging
+            "anchor": "center",
             "lineWhenMaximized": false
         },
         "pill": {
