@@ -102,6 +102,8 @@ function applyTheme() {
     if (t.dimmer) root.setProperty("--glass-dimmer", t.dimmer);
   }
   glassOpacity = sget("appearance.opacity", 50);
+  // the collapsed pill as a whole (text included); the open panel stays opaque
+  root.setProperty("--pill-op", String(Math.min(100, Math.max(10, Number(sget("appearance.pillOpacity", 100)) || 100)) / 100));
   // solid background (glass off): 50 -> 0.97, 100 -> opaque, 20 -> 0.7
   root.setProperty("--bg-a", String(Math.min(1, 0.52 + (0.9 * glassOpacity) / 100)));
   const font = sget("appearance.font", "");
@@ -1256,6 +1258,7 @@ function settingsHtml() {
     <label class="s-row"><span class="s-label">字体<span class="s-note">留空 = 系统默认</span></span>
       <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="例如 微软雅黑" spellcheck="false"></span></label>
     <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
+    ${sRange("appearance.pillOpacity", "收起时胶囊的不透明度", 10, 100, 5, "%", "整颗胶囊连文字一起变淡，不那么显眼；展开后总是完全不透明")}
     ${sSelect("appearance.scale", "界面缩放", [[90, "90%"], [100, "100%"], [110, "110%"], [125, "125%"], [150, "150%"]])}
   </div>
   <div class="s-sec"><div class="s-title">大小<span class="s-note">也可以在屏幕上直接拖动边缘调整</span></div>

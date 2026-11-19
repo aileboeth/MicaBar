@@ -124,6 +124,8 @@ pub fn defaults() -> Value {
             "glass": true,
             // 20..100, 50 = default look
             "opacity": 50,
+            // the collapsed pill as a whole, text included (percent; the open panel is always opaque)
+            "pillOpacity": 100,
             "font": "",
             // percent
             "scale": 100,
