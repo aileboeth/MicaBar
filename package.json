@@ -1,0 +1,17 @@
+{
+  "name": "net-island",
+  "private": true,
+  "version": "0.2.0",
+  "scripts": {
+    "tauri": "tauri",
+    "flags": "node scripts/copy-flags.mjs",
+    "build": "node scripts/copy-flags.mjs && tauri build --no-bundle",
+    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-release.ps1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "flag-icons": "^7"
+  },
+  "license": "MIT",
+  "repository": "github:aileboeth/net-island"
+}
