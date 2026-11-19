@@ -74,10 +74,14 @@ pub fn animations_enabled() -> bool {
 
 /// Installed (under Program Files, updatable by the installer) or a portable copy.
 pub fn is_installed() -> bool {
+    // the installer puts its uninstaller next to the exe, wherever the user chose to install
+    // (a path check alone took D:\MicaBar for the portable build)
     std::env::current_exe()
         .map(|p| {
             let s = p.display().to_string().to_lowercase();
-            s.contains("\\program files") || s.contains("\\appdata\\local\\micabar\\app")
+            p.parent().map(|d| d.join("uninstall.exe").is_file()).unwrap_or(false)
+                || s.contains("\\program files")
+                || s.contains("\\appdata\\local\\micabar\\app")
         })
         .unwrap_or(false)
 }
