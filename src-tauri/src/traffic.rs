@@ -1,5 +1,5 @@
 //! Per-app traffic accounting by local day, split into "through a proxy node" and "direct".
-//! One JSON file per day in %LOCALAPPDATA%\NetIsland\traffic\YYYY-MM-DD.json.
+//! One JSON file per day in %LOCALAPPDATA%\MicaBar\traffic\YYYY-MM-DD.json.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ pub struct Book {
 
 fn dir() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let d = PathBuf::from(base).join("NetIsland").join("traffic");
+    let d = PathBuf::from(base).join("MicaBar").join("traffic");
     let _ = std::fs::create_dir_all(&d);
     d
 }

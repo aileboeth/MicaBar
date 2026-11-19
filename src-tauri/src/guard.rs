@@ -1,8 +1,8 @@
 //! Leak guard: a library of "should go through the proxy" destinations, used to
 //!  - detect leaks: a connection to such a destination that left DIRECT (mihomo rule) or never
 //!    went through mihomo at all (app ignores the system proxy),
-//!  - prevent rule leaks: guard rule-providers placed in the override right after NetIsland's own
-//!    rules force those destinations to the NetIsland group,
+//!  - prevent rule leaks: guard rule-providers placed in the override right after MicaBar's own
+//!    rules force those destinations to the MicaBar group,
 //!  - stop bypass leaks: a Windows Firewall rule that blocks a program's direct traffic to public
 //!    addresses (loopback is never filtered, so the program can still use the local proxy port).
 
@@ -116,7 +116,7 @@ impl Default for Settings {
 
 fn dir() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let d = PathBuf::from(base).join("NetIsland").join("guard");
+    let d = PathBuf::from(base).join("MicaBar").join("guard");
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -343,9 +343,9 @@ impl Matcher {
 
     /// mihomo provider files: guard-domain (domain behaviour), guard-ip (ipcidr), guard-kw (classical).
     pub fn write_providers(&self, home: &Path, enabled: bool) -> Result<(), String> {
-        let d = home.join("netisland");
+        let d = home.join("micabar");
         std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        let head = "# 由 NetIsland 生成（预警规则库），请在 NetIsland 里修改\n";
+        let head = "# 由 MicaBar 生成（预警规则库），请在 MicaBar 里修改\n";
         let list = |items: Vec<String>| {
             if items.is_empty() || !enabled {
                 format!("{head}payload: []\n")
@@ -421,7 +421,7 @@ fn netsh(args: &[String]) -> Result<String, String> {
 }
 
 pub fn rule_name(exe: &str) -> String {
-    format!("NetIsland 禁止直连 - {exe}")
+    format!("MicaBar 禁止直连 - {exe}")
 }
 
 pub fn block(path: &str, exe: &str) -> Result<String, String> {
@@ -439,7 +439,7 @@ pub fn block(path: &str, exe: &str) -> Result<String, String> {
         "enable=yes".into(),
         "profile=any".into(),
         format!("remoteip={PUBLIC_V4},{PUBLIC_V6}"),
-        "description=Added by NetIsland: this program bypassed the proxy. Delete to allow direct connections again.".into(),
+        "description=Added by MicaBar: this program bypassed the proxy. Delete to allow direct connections again.".into(),
     ])?;
     log(format!("guard: firewall block {path}"));
     Ok(name)
@@ -491,7 +491,7 @@ pub fn reset_connections(pid_set: &HashSet<u32>) -> usize {
 
 // ---------- notifications ----------
 
-pub const APP_ID: &str = "com.aile.netisland";
+pub const APP_ID: &str = "com.aile.micabar";
 
 /// Registers an AppUserModelID so an unpackaged exe can show toasts under its own name.
 pub fn register_toast_identity(icon_png: &[u8]) {
@@ -499,7 +499,7 @@ pub fn register_toast_identity(icon_png: &[u8]) {
     let icon = dir().join("toast-icon.png");
     let _ = std::fs::write(&icon, icon_png);
     if let Ok((k, _)) = winreg::RegKey::predef(HKEY_CURRENT_USER).create_subkey(format!(r"Software\Classes\AppUserModelId\{APP_ID}")) {
-        let _ = k.set_value("DisplayName", &"NetIsland");
+        let _ = k.set_value("DisplayName", &"MicaBar");
         let _ = k.set_value("IconUri", &icon.display().to_string());
     }
 }

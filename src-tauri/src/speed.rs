@@ -11,7 +11,7 @@ use ferrisetw::schema_locator::SchemaLocator;
 use ferrisetw::trace::UserTrace;
 use ferrisetw::EventRecord;
 
-const SESSION: &str = "NetIsland-KernelNetwork";
+const SESSION: &str = "MicaBar-KernelNetwork";
 const KERNEL_NETWORK: &str = "7dd42a49-5329-4832-8dfd-43d979153a88";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 

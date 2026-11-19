@@ -44,9 +44,9 @@ use proxy::ProxyState;
 
 fn log_path() -> std::path::PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let dir = std::path::PathBuf::from(base).join("NetIsland");
+    let dir = std::path::PathBuf::from(base).join("MicaBar");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("netisland.log")
+    dir.join("micabar.log")
 }
 
 pub fn log(msg: impl AsRef<str>) {
@@ -236,7 +236,7 @@ struct Shared {
     control: Mutex<control::ControlState>,
     rules: Mutex<Vec<control::Rule>>,
     core_home: Mutex<Option<std::path::PathBuf>>,
-    /// Select the NetIsland group's node once the next exit check knows the current proxy node.
+    /// Select the MicaBar group's node once the next exit check knows the current proxy node.
     node_pending: AtomicBool,
     guard: Mutex<guard::Settings>,
     matcher: std::sync::RwLock<guard::Matcher>,
@@ -759,7 +759,7 @@ impl Collector {
                 if ip.map(|i| geo::is_private(&i)).unwrap_or(false) {
                     continue;
                 }
-                let own_rule = c.rule.as_deref().map(|r| r.contains("netisland-") && !r.contains("netisland-guard")).unwrap_or(false);
+                let own_rule = c.rule.as_deref().map(|r| r.contains("micabar-") && !r.contains("micabar-guard")).unwrap_or(false);
                 let kind = if c.bypass {
                     "bypass"
                 } else if c.node.as_deref() == Some("DIRECT") && !own_rule {
@@ -911,7 +911,7 @@ impl Collector {
         st.rules = sh.rules.lock().unwrap().clone();
         drop(st);
         if became_active {
-            // the guard library may have changed while NetIsland or the core was not running
+            // the guard library may have changed while MicaBar or the core was not running
             if let Err(e) = apply_guard(sh) {
                 log(format!("guard providers: {e}"));
             }
@@ -1147,7 +1147,7 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 if let Ok((ctl, secret)) = ctl_link(&sh2) {
                     match control::select(&ctl, secret.as_deref(), &n) {
-                        Ok(()) => log(format!("control: NetIsland group starts on {n}")),
+                        Ok(()) => log(format!("control: MicaBar group starts on {n}")),
                         Err(e) => log(format!("control: initial node select failed: {e}")),
                     }
                 }
@@ -1156,6 +1156,21 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
         }
     }
     let groups = if p.detected { measure_groups(sh.clone()).await } else { Vec::new() };
+    // every group failing usually means the core is still starting (e.g. right after the
+    // override was installed): try once more shortly
+    {
+        static RETRIED: AtomicBool = AtomicBool::new(false);
+        let all_failed = !groups.is_empty() && groups.iter().all(|g| g.r.ip.is_none());
+        if all_failed && !RETRIED.swap(true, Ordering::SeqCst) {
+            let sh2 = sh.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(15));
+                sh2.exit_trigger.store(true, Ordering::SeqCst);
+            });
+        } else if !all_failed {
+            RETRIED.store(false, Ordering::SeqCst);
+        }
+    }
     if !groups.is_empty() {
         log(format!(
             "group exits: {}",
@@ -1226,7 +1241,7 @@ async fn control_enable(state: tauri::State<'_, Arc<Shared>>) -> Result<(), Stri
                 let cores = proxy::client_name(&procinfo::list_processes()).1;
                 let home = cores.first().and_then(|p| control::core_home(*p));
                 *sh.core_home.lock().unwrap() = home;
-                // the NetIsland group starts on the node the proxy exit uses; the exit check
+                // the MicaBar group starts on the node the proxy exit uses; the exit check
                 // right after the restart tells us which one
                 sh.node_pending.store(true, Ordering::SeqCst);
             }
@@ -1392,7 +1407,7 @@ fn profile_secs(saver: u64, balanced: u64, smooth: u64) -> u64 {
     }
 }
 
-/// Proxy groups that have a NetIsland inbound (for the manual group picker), in config order.
+/// Proxy groups that have a MicaBar inbound (for the manual group picker), in config order.
 #[tauri::command]
 fn exit_group_options() -> Vec<String> {
     mihomo::read_config()
@@ -1891,7 +1906,7 @@ fn open_manager_window(app: &AppHandle, page: &str) {
     let num = |k: &str, d: f64| g.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
     let url = tauri::WebviewUrl::App(format!("manager.html#{page}").into());
     let mut b = tauri::WebviewWindowBuilder::new(app, "manager", url)
-        .title("NetIsland")
+        .title("MicaBar")
         .inner_size(num("w", 1120.0).max(820.0), num("h", 740.0).max(560.0))
         .min_inner_size(820.0, 560.0)
         .resizable(true)
@@ -2017,10 +2032,24 @@ fn quit(app: AppHandle) {
 fn single_instance() -> bool {
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name = procinfo::wide("Global\\NetIsland-single-instance");
+    let name = procinfo::wide("Global\\MicaBar-single-instance");
     unsafe {
         let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
         !(h.is_null() || GetLastError() == ERROR_ALREADY_EXISTS)
+    }
+}
+
+/// Data of the app's earlier name: %LOCALAPPDATA%\NetIsland -> %LOCALAPPDATA%\MicaBar (settings,
+/// rules, traffic, guard library), once, before anything writes the new folder.
+fn migrate_old_data() {
+    let Ok(base) = std::env::var("LOCALAPPDATA") else { return };
+    let (old, new) = (std::path::Path::new(&base).join("NetIsland"), std::path::Path::new(&base).join("MicaBar"));
+    if old.is_dir() && !new.exists() {
+        let ok = std::fs::rename(&old, &new).is_ok();
+        if ok {
+            let _ = std::fs::rename(new.join("netisland.log"), new.join("micabar.log"));
+        }
+        log(format!("migrated data from {} ({})", old.display(), if ok { "ok" } else { "failed" }));
     }
 }
 
@@ -2028,8 +2057,9 @@ fn main() {
     if !single_instance() {
         return;
     }
+    migrate_old_data();
     let admin = is_admin();
-    log(format!("---- NetIsland {} start, admin={admin}", env!("CARGO_PKG_VERSION")));
+    log(format!("---- MicaBar {} start, admin={admin}", env!("CARGO_PKG_VERSION")));
     let geo = Geo::load();
     log(format!("geo db: {:?}", geo.source));
     let guard_settings = guard::load_settings();
@@ -2116,7 +2146,7 @@ fn main() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            let open_item = MenuItem::with_id(app, "open", "打开 NetIsland", true, None::<&str>)?;
+            let open_item = MenuItem::with_id(app, "open", "打开 MicaBar", true, None::<&str>)?;
             let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let layout_item = MenuItem::with_id(app, "layout", "调整岛的大小…", true, None::<&str>)?;
             let refresh = MenuItem::with_id(app, "refresh", "重新检测出口 IP", true, None::<&str>)?;
@@ -2134,7 +2164,7 @@ fn main() {
             let sh_tray = shared.clone();
             let sh_tray2 = shared.clone();
             let mut tray = TrayIconBuilder::new()
-                .tooltip("NetIsland")
+                .tooltip("MicaBar")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(move |tray, ev| {
@@ -2176,7 +2206,7 @@ fn main() {
             }
             tray.build(app)?;
 
-            // icons left behind by an earlier NetIsland that was killed instead of quit
+            // icons left behind by an earlier MicaBar that was killed instead of quit
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_millis(1500));
                 log(format!("tray sweep: {} toolbar(s)", system::sweep_tray()));
@@ -2295,7 +2325,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building NetIsland")
+        .expect("error while building MicaBar")
         .run(|app, ev| {
             if let tauri::RunEvent::Exit = ev {
                 speed::stop();

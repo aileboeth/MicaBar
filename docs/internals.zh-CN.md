@@ -1,4 +1,4 @@
-# NetIsland 实现说明
+# MicaBar 实现说明
 
 ## 数据来源
 
@@ -28,30 +28,30 @@
 | 某主域 `*.x.com` | `DOMAIN-SUFFIX` | 4 |
 | 整个程序 | `PROCESS-NAME` | 5 |
 
-层级小的先匹配。每个层级 × 目标（拦截 / 直连 / 代理）是一个 file 规则集 `netisland-<层级>-<目标>`，
-文件在内核目录（mihomo 的 `-d`）下的 `netisland\`。「代理」= 覆写自带的 `NetIsland` 分组（`include-all`）。
+层级小的先匹配。每个层级 × 目标（拦截 / 直连 / 代理）是一个 file 规则集 `micabar-<层级>-<目标>`，
+文件在内核目录（mihomo 的 `-d`）下的 `micabar\`。「代理」= 覆写自带的 `MicaBar` 分组（`include-all`）。
 
 启用流程：Clash Party 把覆写列表 `override.yaml` 缓存在内存里、之后会整份写回，所以运行中改文件会被冲掉。
-启用时：备份 `override.yaml` 到 `%LOCALAPPDATA%\NetIsland\backup\` → 结束 Clash Party 和内核 → 写入全局
-JS 覆写 `override\netisland.js` 并登记 → 用原来的权限重新打开 Clash Party（原来不是管理员时经 explorer.exe 降权）
-→ 等内核报告规则集都已加载；超时则结束、还原、重启。之后每次点选只改 `netisland\*.yaml`，调用
+启用时：备份 `override.yaml` 到 `%LOCALAPPDATA%\MicaBar\backup\` → 结束 Clash Party 和内核 → 写入全局
+JS 覆写 `override\micabar.js` 并登记 → 用原来的权限重新打开 Clash Party（原来不是管理员时经 explorer.exe 降权）
+→ 等内核报告规则集都已加载；超时则结束、还原、重启。之后每次点选只改 `micabar\*.yaml`，调用
 `PUT /providers/rules/<名字>` 刷新，再 `DELETE /connections/<id>` 断开受影响的连接让程序重连。
-规则本身存在 `%LOCALAPPDATA%\NetIsland\rules.json`。覆写内容和当前版本不一致时提示「更新」。
+规则本身存在 `%LOCALAPPDATA%\MicaBar\rules.json`。覆写内容和当前版本不一致时提示「更新」。
 
 ## 泄漏守卫
 
-JS 覆写把 3 个守卫规则集（`netisland-guard-domain` / `-kw` / `-ip` → `NetIsland`）插在订阅里
+JS 覆写把 3 个守卫规则集（`micabar-guard-domain` / `-kw` / `-ip` → `MicaBar`）插在订阅里
 **最后一条按目的地分到代理组的规则之后、下一条直连规则之前**（目标是 DIRECT，或默认选中 DIRECT 的分组；
 NETWORK / DST-PORT / PROCESS 之类不按目的地分流的规则不算）。例如插在 `geolocation-!cn` 之后、
 `cn_domain → 🇨🇳 国内服务` 之前，于是 Google、Netflix、AI 等按服务分好的组照旧，只有会落进直连的才被截住。
 
-检测：经过 mihomo 且链路为 `DIRECT`（NetIsland 自己的规则除外）= 规则漏网；mihomo 在运行、目的地是公网、
+检测：经过 mihomo 且链路为 `DIRECT`（MicaBar 自己的规则除外）= 规则漏网；mihomo 在运行、目的地是公网、
 连接却没经过它 = 绕过代理。同一程序 + 目的地 10 分钟内只通知一次；全屏时不弹通知。
 
 禁止直连：`netsh advfirewall` 出站阻止规则，`program=` 该程序，`remoteip=` 公网地址段（不含回环、私网、链路本地、
 CGNAT、组播），再用 `SetTcpEntry` 重置它现有的 IPv4 连接。TUN 模式下不提供（程序的流量也走虚拟网卡，会彻底断网）。
 
-通知：未打包的 exe 要先在 `HKCU\Software\Classes\AppUserModelId\com.aile.netisland` 登记 DisplayName / IconUri。
+通知：未打包的 exe 要先在 `HKCU\Software\Classes\AppUserModelId\com.aile.micabar` 登记 DisplayName / IconUri。
 
 ## 窗口与交互
 
@@ -71,22 +71,22 @@ GPU 生成 mip 取 1/4 尺寸，CPU 三遍盒式模糊 + 轻微提高饱和度�
 
 ```powershell
 .\tools\build-release.ps1 -Notes "更新说明"
-# -> dist\release-<版本>\  NetIsland_<v>_x64-setup.exe (+ .sig)、NetIsland_<v>_portable.exe、latest.json、SHA256SUMS.txt
+# -> dist\release-<版本>\  MicaBar_<v>_x64-setup.exe (+ .sig)、MicaBar_<v>_portable.exe、latest.json、SHA256SUMS.txt
 ```
 
 把这些文件上传到 Release `v<版本>`。应用内更新读 `releases/latest/download/latest.json`，校验签名后静默安装。
-签名私钥 `keys\netisland.key` 不进仓库；公钥在 `src-tauri\tauri.conf.json`。
+签名私钥 `keys\micabar.key` 不进仓库；公钥在 `src-tauri\tauri.conf.json`。
 
 ## 测试虚拟机
 
-`tools\vm-test.ps1` 通过 SSH 操作一台 Windows 测试机（环境变量 `NETISLAND_VM=user@host`，可选
-`NETISLAND_VM_KEY`）：复制程序、用计划任务 `/IT` 启动到已登录的桌面、截图 / 点击 / 拖动 / 按键 / 滚轮、
+`tools\vm-test.ps1` 通过 SSH 操作一台 Windows 测试机（环境变量 `MICABAR_VM=user@host`，可选
+`MICABAR_VM_KEY`）：复制程序、用计划任务 `/IT` 启动到已登录的桌面、截图 / 点击 / 拖动 / 按键 / 滚轮、
 修改设置并重启、读日志。`tools\vm\fullscreen.ps1` 模拟全屏游戏窗口。
 
 ## 分组出口
 
 JS 覆写给每个 select / url-test / fallback / load-balance 分组加一个 `listeners` 入站：`mixed`、只听 `127.0.0.1`、
-端口 `47800 + 序号`、`proxy: <分组名>`（进来的流量跳过规则直接交给该分组）。NetIsland 从运行中的配置文件读出这些入站，
+端口 `47800 + 序号`、`proxy: <分组名>`（进来的流量跳过规则直接交给该分组）。MicaBar 从运行中的配置文件读出这些入站，
 经各端口查出口 IP，并沿 `/proxies/<分组>` 的 `now` 一路找到实际节点。自动模式 = MATCH 规则的兜底分组 + 按连接流量
 打分（半衰期约 23 分钟）最高的分组；新分组开始有流量时最多每分钟补测一次。
 

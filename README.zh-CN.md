@@ -1,4 +1,4 @@
-# NetIsland
+# MicaBar
 
 [English](README.md) · **简体中文**
 
@@ -24,10 +24,10 @@ Windows 上的「灵动岛」式网络监视器。屏幕顶部一颗磨砂玻璃
 
 ## 安装
 
-在 [Releases](https://github.com/aileboeth/net-island/releases) 下载：
+在 [Releases](https://github.com/aileboeth/MicaBar/releases) 下载：
 
-- `NetIsland_<版本>_x64-setup.exe`：安装版，装到 `C:\Program Files\NetIsland`，支持应用内自动更新；
-- `NetIsland_<版本>_portable.exe`：便携版，单个 exe，不能自动更新。
+- `MicaBar_<版本>_x64-setup.exe`：安装版，装到 `C:\Program Files\MicaBar`，支持应用内自动更新；
+- `MicaBar_<版本>_portable.exe`：便携版，单个 exe，不能自动更新。
 
 要求 Windows 10 2004+ / Windows 11（x64）和 WebView2 运行时（Windows 11 自带；安装版会自动安装）。
 程序需要管理员权限（按程序统计网速要用内核 ETW 事件），启动时会弹 UAC；开了「开机自启」后用计划任务启动，不再弹。
@@ -42,13 +42,13 @@ Windows 上的「灵动岛」式网络监视器。屏幕顶部一颗磨砂玻璃
 ### 分组出口
 
 启用出口控制后，覆写会给每个代理分组开一个只监听本机的端口（`127.0.0.1:47800` 起），从这个端口进来的流量直接交给
-对应分组。NetIsland 从各端口分别查一次出口 IP，就知道「默认代理」「AI」「YouTube」各自从哪里出去。默认显示兜底分组 +
+对应分组。MicaBar 从各端口分别查一次出口 IP，就知道「默认代理」「AI」「YouTube」各自从哪里出去。默认显示兜底分组 +
 最近有流量的分组（最多 4 个），也可以在设置里手动勾选。
 
 ### 出口控制
 
 第一次检测到 Clash Party / Mihomo Party 时，岛上会提示启用。启用会：备份 Clash Party 的覆写列表，加一个全局覆写
-「NetIsland 出口控制」，并重启 Clash Party 一次（断网约 3 秒）；加载失败会自动还原。之后在程序右边的「出口」
+「MicaBar 出口控制」，并重启 Clash Party 一次（断网约 3 秒）；加载失败会自动还原。之后在程序右边的「出口」
 或连接右边的「⋯」里选择即可。更具体的规则优先：「整个程序直连」+「仅它访问 *.example.com 走代理」两条可以同时生效。
 在「出口」页底部可以停用并移除覆写。
 
@@ -64,9 +64,9 @@ v2fly、Clash 规则格式）。两种泄漏：
 - **绕过代理**：程序没经过代理软件直接连了出去（不走系统代理，或连接早于 TUN）。预警卡上可以一键
   「禁止 xxx 直连」（Windows 防火墙规则，只拦公网地址，程序仍能通过本机代理端口上网），可随时解除。
 
-## 隐私：NetIsland 会连接哪些地方
+## 隐私：MicaBar 会连接哪些地方
 
-所有统计（连接、流量、规则、预警记录）都只存在本机 `%LOCALAPPDATA%\NetIsland\`。程序主动发起的网络请求只有：
+所有统计（连接、流量、规则、预警记录）都只存在本机 `%LOCALAPPDATA%\MicaBar\`。程序主动发起的网络请求只有：
 
 | 用途 | 地址 | 时机 |
 | --- | --- | --- |
@@ -74,7 +74,7 @@ v2fly、Clash 规则格式）。两种泄漏：
 | 直连出口 IP | 4.ipw.cn → myip.ipip.net → ip.3322.net（绑定物理网卡；域名经 223.5.5.5 / 119.29.29.29 解析） | 同上 |
 | 节点延迟 | 由 mihomo 内核测 `www.gstatic.com/generate_204` | 15~60 秒一次（资源档位） |
 | gfw 列表 | cdn.jsdelivr.net / raw.githubusercontent.com（Loyalsoldier/v2ray-rules-dat） | 开启时每天一次 |
-| 检查更新 | github.com/aileboeth/net-island 的 latest.json | 开启时每天一次 |
+| 检查更新 | github.com/aileboeth/MicaBar 的 latest.json | 开启时每天一次 |
 | AI 额度 | api.anthropic.com（Claude Code）、chatgpt.com（Codex）、cli-chat-proxy.grok.com（Grok）、本机的 Antigravity 语言服务器 | 开启时每 5 分钟（可改） |
 
 国家 / ASN 用的是代理客户端自带的离线库（`country.mmdb`、`ASN.mmdb`），不会把连接的 IP 发给任何服务。
@@ -88,8 +88,8 @@ mihomo 控制接口的密钥只在运行时从配置文件读取，不会保存�
 
 ```powershell
 pnpm install
-pnpm build            # 单个 exe：src-tauri\target\release\net-island.exe
-pnpm release          # 安装包 + 便携版 + 自动更新清单 -> dist\release-<版本>\（需要更新签名私钥 keys\netisland.key）
+pnpm build            # 单个 exe：src-tauri\target\release\micabar.exe
+pnpm release          # 安装包 + 便携版 + 自动更新清单 -> dist\release-<版本>\（需要更新签名私钥 keys\micabar.key）
 ```
 
 源码结构：`src-tauri\src\`（Rust 后端：连接表、ETW、mihomo 控制接口、出口检测、守卫、窗口控制、磨砂截屏……），

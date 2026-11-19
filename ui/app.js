@@ -707,7 +707,7 @@ function targetRow(label, kind, process, value) {
   const node = ctrl().node;
   const btn = (t) => {
     const on = cur && cur.target === t;
-    const title = t === "proxy" && node ? ` title="NetIsland 节点：${esc(node)}"` : "";
+    const title = t === "proxy" && node ? ` title="MicaBar 节点：${esc(node)}"` : "";
     return `<button class="mt t-${t} ${on ? "on" : ""}"${title} data-set='${esc(JSON.stringify({ kind, process, value, target: on ? "default" : t }))}'>${TARGET_LABEL[t]}</button>`;
   };
   return `<div class="m-row"><div class="m-label">${label}</div><div class="m-btns">${btn("proxy")}${btn("direct")}${btn("reject")}</div></div>`;
@@ -1321,7 +1321,7 @@ function settingsHtml() {
     ${sSelect("general.profile", "资源档位", [["saver", "省电"], ["balanced", "均衡"], ["smooth", "流畅"]], "影响节点测速等后台任务的频率")}
   </div>
   <div class="s-sec"><div class="s-title">关于</div>
-    <div class="s-row"><span class="s-label">NetIsland ${esc(appInfo?.version || "")}<span class="s-note">${appInfo ? (appInfo.installed ? "安装版" : "便携版（不能自动更新）") : ""}</span></span>
+    <div class="s-row"><span class="s-label">MicaBar ${esc(appInfo?.version || "")}<span class="s-note">${appInfo ? (appInfo.installed ? "安装版" : "便携版（不能自动更新）") : ""}</span></span>
       <button class="ghost" data-do="update-check">检查更新</button></div>
     ${updateInfo?.available ? `<div class="s-row"><span class="s-label">有新版本 ${esc(updateInfo.version)}<span class="s-note">${esc((updateInfo.notes || "").slice(0, 120))}</span></span>
       ${updateInfo.installed ? `<button class="primary" data-do="update-install">下载并更新</button>` : `<button class="ghost" data-do="open-releases">去 GitHub 下载</button>`}</div>` : ""}
@@ -1337,7 +1337,7 @@ let updateInfo = null;
 function refreshAppInfo() {
   invoke("app_info").then((i) => { appInfo = i; if (tab === "settings") renderList(true); }).catch(() => {});
 }
-const REPO = "https://github.com/aileboeth/net-island";
+const REPO = "https://github.com/aileboeth/MicaBar";
 
 $("list").addEventListener("change", (e) => {
   const el = e.target;
@@ -1422,7 +1422,7 @@ function guardTabHtml() {
     ? `<span class="g-err">${esc(s.gfwError)}</span>`
     : s.gfwUpdated ? `${srcCount("gfw")} 条 · 更新于 ${ago(s.gfwUpdated)}` : "还没下载";
   const forceNote = ctlActive
-    ? "规则库里的网站要被判成直连时，改走 NetIsland 分组（不影响订阅已分到代理组的）"
+    ? "规则库里的网站要被判成直连时，改走 MicaBar 分组（不影响订阅已分到代理组的）"
     : "需要先在「出口」页启用出口控制";
   const imports = (s.imports || []).map((i) => `<label class="g-opt"><input type="checkbox" data-imp='${ds({ url: i.url })}' ${i.enabled ? "checked" : ""}><span class="g-note" title="${esc(i.url)}">${esc(i.url)}</span><span class="g-note" style="flex:none">${i.count} 条</span><button data-imprm="${esc(i.url)}">删除</button></label>`).join("");
   const kindLabel = { suffix: "", keyword: "关键词 ", cidr: "IP ", exclude: "排除 " };
@@ -1502,8 +1502,8 @@ function connHtml(app, c) {
     const route = `<span class="${routeClass(c.node)}">${decorate(c.node)}</span>${c.group ? " · " + decorate(c.group) : ""}`;
     l2.push(route);
   }
-  if (c.rule && /netisland-guard/.test(c.rule)) l2.push(`<span class="ni" title="规则库里的网站本该被判成直连，守卫让它改走代理">守卫：强制走代理</span>`);
-  else if (c.rule && /netisland-/.test(c.rule)) l2.push(`<span class="ni">NetIsland 规则</span>`);
+  if (c.rule && /micabar-guard/.test(c.rule)) l2.push(`<span class="ni" title="规则库里的网站本该被判成直连，守卫让它改走代理">守卫：强制走代理</span>`);
+  else if (c.rule && /micabar-/.test(c.rule)) l2.push(`<span class="ni">MicaBar 规则</span>`);
   else if (c.rule) l2.push(esc(c.rule));
   if (c.viaProxyPort) l2.push("经本地代理端口");
   if (c.leak) l2.push(`<span class="leak" title="规则库里的「${esc(c.leak)}」本该走代理">⚠ 泄漏</span>`);
@@ -2021,7 +2021,7 @@ Charts.attach($("list"));
 // a newer version was found by the daily check
 listen("update", (e) => {
   updateInfo = e.payload;
-  fireFlash("update", `NetIsland 有新版本 ${updateInfo.version}，在设置里更新`, "info");
+  fireFlash("update", `MicaBar 有新版本 ${updateInfo.version}，在设置里更新`, "info");
   if (tab === "settings") renderList(true);
 });
 invoke("settings_get").then(applySettings).catch(() => {});

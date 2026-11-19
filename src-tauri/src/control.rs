@@ -1,8 +1,8 @@
 //! Exit control for Clash Party / Mihomo Party: per-process / per-domain "proxy / direct / reject".
 //!
 //! One-time setup adds a global override to Clash Party that declares file rule-providers
-//! netisland-<level>-<target> (files inside the core's home dir) placed at the top of the rules,
-//! plus a select group "NetIsland" containing every node. Levels order rules by specificity, so a
+//! micabar-<level>-<target> (files inside the core's home dir) placed at the top of the rules,
+//! plus a select group "MicaBar" containing every node. Levels order rules by specificity, so a
 //! narrower rule wins over a broader one whatever their targets:
 //!   1 app + exact domain/IP, 2 app + main domain, 3 exact domain/IP, 4 main domain, 5 whole app.
 //! After setup, every change only rewrites those files and asks mihomo to reload the providers
@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::mihomo::{self, Controller, CoreConfig};
 use crate::{log, procinfo};
 
-pub const OVERRIDE_ID: &str = "netisland";
-pub const GROUP: &str = "NetIsland";
+pub const OVERRIDE_ID: &str = "micabar";
+/// The override of the app's earlier name (NetIsland); replaced on the next install.
+const LEGACY_OVERRIDE_ID: &str = "netisland";
+pub const GROUP: &str = "MicaBar";
 const TARGETS: [&str; 3] = ["reject", "direct", "proxy"];
 const LEVELS: [u8; 5] = [1, 2, 3, 4, 5];
 
@@ -123,7 +125,7 @@ pub struct ControlState {
 
 fn state_dir() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let d = PathBuf::from(base).join("NetIsland");
+    let d = PathBuf::from(base).join("MicaBar");
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -233,7 +235,7 @@ fn target_policy(t: &str) -> &str {
 pub const LISTEN_BASE: u16 = 47800;
 
 /// Per-group inbounds of the running config: (group name, port), read from the generated
-/// config file (the override names them netisland-g<i>).
+/// config file (the override names them micabar-g<i>).
 pub fn group_listeners(config_file: &Path) -> Vec<(String, u16)> {
     let Ok(text) = std::fs::read_to_string(config_file) else { return Vec::new() };
     let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { return Vec::new() };
@@ -241,7 +243,7 @@ pub fn group_listeners(config_file: &Path) -> Vec<(String, u16)> {
         .and_then(|l| l.as_sequence())
         .map(|s| {
             s.iter()
-                .filter(|l| l.get("name").and_then(|n| n.as_str()).map(|n| n.starts_with("netisland-g")).unwrap_or(false))
+                .filter(|l| l.get("name").and_then(|n| n.as_str()).map(|n| n.starts_with("micabar-g")).unwrap_or(false))
                 .filter_map(|l| {
                     let proxy = l.get("proxy")?.as_str()?.to_string();
                     let port = l.get("port")?.as_u64()? as u16;
@@ -263,33 +265,33 @@ pub fn match_group(config_file: &Path) -> Option<String> {
 }
 
 pub const GUARD_PROVIDERS: [(&str, &str, &str); 3] = [
-    ("netisland-guard-domain", "domain", "guard-domain"),
-    ("netisland-guard-kw", "classical", "guard-kw"),
-    ("netisland-guard-ip", "ipcidr", "guard-ip"),
+    ("micabar-guard-domain", "domain", "guard-domain"),
+    ("micabar-guard-kw", "classical", "guard-kw"),
+    ("micabar-guard-ip", "ipcidr", "guard-ip"),
 ];
 
-/// Clash Party JavaScript override. Besides NetIsland's own rules (prepended, by specificity) it
+/// Clash Party JavaScript override. Besides MicaBar's own rules (prepended, by specificity) it
 /// inserts the leak-guard rule sets after the subscription's last proxy-group rule, right before
 /// the next rule that would send traffic DIRECT (literally DIRECT, or a group whose default
 /// choice is DIRECT). Service rules keep their groups; guard domains that would otherwise fall
-/// through to the broad direct rules are sent to the NetIsland group instead.
+/// through to the broad direct rules are sent to the MicaBar group instead.
 pub fn override_js() -> String {
     let own: Vec<String> = provider_names()
-        .map(|(l, t)| format!("[\"netisland-{l}-{t}\", \"{l}-{t}\", \"{}\"]", target_policy(t)))
+        .map(|(l, t)| format!("[\"micabar-{l}-{t}\", \"{l}-{t}\", \"{}\"]", target_policy(t)))
         .collect();
     let guard: Vec<String> = GUARD_PROVIDERS.iter().map(|(n, b, f)| format!("[\"{n}\", \"{b}\", \"{f}\"]")).collect();
     format!(
-        r#"// NetIsland 出口控制 + 泄漏守卫：由 NetIsland 自动添加。删除这个覆写即可停用。
+        r#"// MicaBar 出口控制 + 泄漏守卫：由 MicaBar 自动添加。删除这个覆写即可停用。
 function main(config) {{
   const G = "{GROUP}";
   const own = [{own}];
   const guard = [{guard}];
   const providers = config["rule-providers"] = config["rule-providers"] || {{}};
   for (const [name, file] of own) {{
-    providers[name] = {{ type: "file", behavior: "classical", format: "yaml", path: "./netisland/" + file + ".yaml" }};
+    providers[name] = {{ type: "file", behavior: "classical", format: "yaml", path: "./micabar/" + file + ".yaml" }};
   }}
   for (const [name, behavior, file] of guard) {{
-    providers[name] = {{ type: "file", behavior: behavior, format: "yaml", path: "./netisland/" + file + ".yaml" }};
+    providers[name] = {{ type: "file", behavior: behavior, format: "yaml", path: "./micabar/" + file + ".yaml" }};
   }}
   const groups = config["proxy-groups"] = config["proxy-groups"] || [];
   if (!groups.some((g) => g && g.name === G)) groups.unshift({{ name: G, type: "select", "include-all": true }});
@@ -310,7 +312,7 @@ function main(config) {{
     while (parts.length > 2 && ["no-resolve", "src"].includes(parts[parts.length - 1])) parts.pop();
     return parts[parts.length - 1];
   }};
-  const rest = (config.rules || []).filter((r) => !String(r).includes("netisland-"));
+  const rest = (config.rules || []).filter((r) => !String(r).includes("micabar-"));
   // insert after the last rule that routes to a proxy group, before the next direct rule, so
   // every service rule of the subscription keeps its group and only the broad direct rules
   // (cn_domain, GEOIP CN, a direct MATCH...) are guarded
@@ -328,17 +330,17 @@ function main(config) {{
   const at = rest.findIndex((r, i) => i > lastProxy && directish.has(policy(r)));
   if (at >= 0) {{
     rest.splice(at, 0,
-      "RULE-SET,netisland-guard-domain," + G,
-      "RULE-SET,netisland-guard-kw," + G,
-      "RULE-SET,netisland-guard-ip," + G + ",no-resolve");
+      "RULE-SET,micabar-guard-domain," + G,
+      "RULE-SET,micabar-guard-kw," + G,
+      "RULE-SET,micabar-guard-ip," + G + ",no-resolve");
   }}
   config.rules = own.map(([name, , target]) => "RULE-SET," + name + "," + target).concat(rest);
   // one loopback-only inbound per proxy group: traffic entering it skips the rules and goes
-  // straight to that group, so NetIsland can measure every group's exit IP
+  // straight to that group, so MicaBar can measure every group's exit IP
   const kinds = new Set(["select", "url-test", "fallback", "load-balance", "smart"]);
-  const listeners = (config.listeners || []).filter((l) => !String(l && l.name).startsWith("netisland-g"));
+  const listeners = (config.listeners || []).filter((l) => !String(l && l.name).startsWith("micabar-g"));
   groups.filter((g) => g && kinds.has(String(g.type).toLowerCase())).slice(0, 80).forEach((g, i) => {{
-    listeners.push({{ name: "netisland-g" + i, type: "mixed", listen: "127.0.0.1", port: {listen_base} + i, proxy: g.name, udp: false }});
+    listeners.push({{ name: "micabar-g" + i, type: "mixed", listen: "127.0.0.1", port: {listen_base} + i, proxy: g.name, udp: false }});
   }});
   config.listeners = listeners;
   return config;
@@ -369,9 +371,10 @@ pub fn override_installed(data_dir: &Path) -> bool {
     let item = list
         .get("items")
         .and_then(|i| i.as_sequence())
-        .and_then(|s| s.iter().find(|it| it.get("id").and_then(|v| v.as_str()) == Some(OVERRIDE_ID)).cloned());
+        .and_then(|s| s.iter().find(|it| matches!(it.get("id").and_then(|v| v.as_str()), Some(OVERRIDE_ID) | Some(LEGACY_OVERRIDE_ID))).cloned());
     item.map(|it| it.get("global").and_then(|g| g.as_bool()).unwrap_or(false)).unwrap_or(false)
         && (data_dir.join("override").join(format!("{OVERRIDE_ID}.js")).exists()
+            || data_dir.join("override").join(format!("{LEGACY_OVERRIDE_ID}.js")).exists()
             || data_dir.join("override").join(format!("{OVERRIDE_ID}.yaml")).exists())
 }
 
@@ -381,14 +384,17 @@ fn write_override(data_dir: &Path, install: bool) -> Result<(), String> {
         list = serde_yaml::from_str("items: []").unwrap();
     }
     let items = list.get_mut("items").and_then(|v| v.as_sequence_mut()).ok_or("override.yaml 格式不对")?;
-    items.retain(|it| it.get("id").and_then(|v| v.as_str()) != Some(OVERRIDE_ID));
+    items.retain(|it| !matches!(it.get("id").and_then(|v| v.as_str()), Some(OVERRIDE_ID) | Some(LEGACY_OVERRIDE_ID)));
+    for f in [format!("{LEGACY_OVERRIDE_ID}.js"), format!("{LEGACY_OVERRIDE_ID}.yaml")] {
+        let _ = std::fs::remove_file(data_dir.join("override").join(f));
+    }
     let file = data_dir.join("override").join(format!("{OVERRIDE_ID}.js"));
     // the first versions wrote a YAML override
     let _ = std::fs::remove_file(data_dir.join("override").join(format!("{OVERRIDE_ID}.yaml")));
     if install {
         let now = crate::now_ms();
         let item: serde_yaml::Value = serde_yaml::from_str(&format!(
-            "id: {OVERRIDE_ID}\nname: NetIsland 出口控制\ntype: local\next: js\nglobal: true\nupdated: {now}\n"
+            "id: {OVERRIDE_ID}\nname: MicaBar 出口控制\ntype: local\next: js\nglobal: true\nupdated: {now}\n"
         ))
         .map_err(|e| e.to_string())?;
         items.push(item);
@@ -461,7 +467,7 @@ fn wait_providers(timeout: Duration) -> Result<(Controller, Option<String>), Str
         if let Some((ctl, _)) = mihomo::discover(&cfg) {
             match providers_loaded(&ctl, cfg.secret.as_deref()) {
                 Ok(true) => return Ok((ctl, cfg.secret)),
-                Ok(false) => last = "内核已启动，但没有加载 NetIsland 规则集".into(),
+                Ok(false) => last = "内核已启动，但没有加载 MicaBar 规则集".into(),
                 Err(e) => last = e,
             }
         }
@@ -473,7 +479,7 @@ pub fn providers_loaded(ctl: &Controller, secret: Option<&str>) -> Result<bool, 
     let body = mihomo::get(ctl, "/providers/rules", secret)?;
     let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     let p = v.get("providers");
-    Ok(provider_names().all(|(l, t)| p.and_then(|p| p.get(format!("netisland-{l}-{t}"))).is_some())
+    Ok(provider_names().all(|(l, t)| p.and_then(|p| p.get(format!("micabar-{l}-{t}"))).is_some())
         && GUARD_PROVIDERS.iter().all(|(n, _, _)| p.and_then(|p| p.get(*n)).is_some()))
 }
 
@@ -496,6 +502,8 @@ pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], 
     if let Some(h) = &home {
         write_provider_files(h, &load_rules())?;
         ensure_guard_files(h)?;
+        // rule files of the app's earlier name
+        let _ = std::fs::remove_dir_all(h.join("netisland"));
     }
     stop_party(&cp, core_pids);
     if let Err(e) = write_override(&cp.data_dir, install) {
@@ -535,7 +543,7 @@ fn restore(cp: &ClashParty, bak: Option<&Path>) {
 // ---------- rules ----------
 
 pub fn write_provider_files(home: &Path, rules: &[Rule]) -> Result<(), String> {
-    let dir = home.join("netisland");
+    let dir = home.join("micabar");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建规则目录失败: {e}"))?;
     for (lv, t) in provider_names() {
         let lines: Vec<String> = rules
@@ -545,9 +553,9 @@ pub fn write_provider_files(home: &Path, rules: &[Rule]) -> Result<(), String> {
             .map(|l| format!("  - '{}'\n", l.replace('\'', "''")))
             .collect();
         let s = if lines.is_empty() {
-            String::from("# 由 NetIsland 生成，请在 NetIsland 里修改\npayload: []\n")
+            String::from("# 由 MicaBar 生成，请在 MicaBar 里修改\npayload: []\n")
         } else {
-            format!("# 由 NetIsland 生成，请在 NetIsland 里修改\npayload:\n{}", lines.concat())
+            format!("# 由 MicaBar 生成，请在 MicaBar 里修改\npayload:\n{}", lines.concat())
         };
         std::fs::write(dir.join(format!("{lv}-{t}.yaml")), s).map_err(|e| format!("写入规则失败: {e}"))?;
     }
@@ -560,7 +568,7 @@ pub fn write_provider_files(home: &Path, rules: &[Rule]) -> Result<(), String> {
 
 /// mihomo refuses to load a config whose file provider is missing: create empty guard files.
 pub fn ensure_guard_files(home: &Path) -> Result<(), String> {
-    let dir = home.join("netisland");
+    let dir = home.join("micabar");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     for (_, _, f) in GUARD_PROVIDERS {
         let p = dir.join(format!("{f}.yaml"));
@@ -580,8 +588,8 @@ pub fn reload_guard(ctl: &Controller, secret: Option<&str>) -> Result<(), String
 
 pub fn reload_providers(ctl: &Controller, secret: Option<&str>) -> Result<(), String> {
     for (l, t) in provider_names() {
-        mihomo::request(ctl, "PUT", &format!("/providers/rules/netisland-{l}-{t}"), None, secret)
-            .map_err(|e| format!("刷新规则集 netisland-{l}-{t} 失败: {e}"))?;
+        mihomo::request(ctl, "PUT", &format!("/providers/rules/micabar-{l}-{t}"), None, secret)
+            .map_err(|e| format!("刷新规则集 micabar-{l}-{t} 失败: {e}"))?;
     }
     Ok(())
 }
@@ -635,7 +643,7 @@ pub fn nodes(ctl: &Controller, secret: Option<&str>) -> Result<Nodes, String> {
     let body = mihomo::get(ctl, "/proxies", secret)?;
     let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     let proxies = v.get("proxies").ok_or("no proxies")?;
-    let g = proxies.get(GROUP).ok_or("内核里没有 NetIsland 分组")?;
+    let g = proxies.get(GROUP).ok_or("内核里没有 MicaBar 分组")?;
     let now = g.get("now").and_then(|x| x.as_str()).map(|s| s.to_string());
     let all: Vec<String> = g
         .get("all")
@@ -669,7 +677,7 @@ pub fn test_delays(ctl: &Controller, secret: Option<&str>) -> Result<(), String>
 pub fn select(ctl: &Controller, secret: Option<&str>, name: &str) -> Result<(), String> {
     let body = serde_json::json!({ "name": name }).to_string();
     mihomo::request(ctl, "PUT", &format!("/proxies/{GROUP}"), Some(&body), secret)?;
-    // move existing NetIsland connections to the new node
+    // move existing MicaBar connections to the new node
     if let Ok(conns) = mihomo::connections(ctl, secret) {
         for c in conns.iter().filter(|c| c.chains.iter().any(|x| x == GROUP)) {
             let _ = mihomo::request(ctl, "DELETE", &format!("/connections/{}", c.id), None, secret);

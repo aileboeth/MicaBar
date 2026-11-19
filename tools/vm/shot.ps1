@@ -20,7 +20,7 @@ param(
     [string]$Wheel = '',
     [int]$CropW = 1400,
     [int]$CropH = 1000,
-    [string]$Out = 'C:\NetIsland\shot.png'
+    [string]$Out = 'C:\MicaBar\shot.png'
 )
 Add-Type -AssemblyName System.Drawing
 Add-Type @'

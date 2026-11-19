@@ -1,5 +1,5 @@
 {
-  "name": "net-island",
+  "name": "micabar",
   "private": true,
   "version": "0.2.1",
   "scripts": {
@@ -13,5 +13,5 @@
     "flag-icons": "^7"
   },
   "license": "MIT",
-  "repository": "github:aileboeth/net-island"
+  "repository": "github:aileboeth/MicaBar"
 }

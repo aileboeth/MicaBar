@@ -132,7 +132,7 @@ async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
         .get("https://api.anthropic.com/api/oauth/usage")
         .bearer_auth(token)
         .header("anthropic-beta", "oauth-2025-04-20")
-        .header("User-Agent", "NetIsland")
+        .header("User-Agent", "MicaBar")
         .send()
         .await
         .map_err(|e| format!("连不上 Anthropic：{e}"))?;

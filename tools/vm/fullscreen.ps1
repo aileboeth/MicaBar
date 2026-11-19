@@ -1,6 +1,6 @@
 # Test helper (runs in the VM desktop session): shows a borderless fullscreen window like a game
 # for a few seconds, takes a hover screenshot in the middle, then closes.
-param([int]$Seconds = 9, [string]$Out = 'C:\NetIsland\fs.png')
+param([int]$Seconds = 9, [string]$Out = 'C:\MicaBar\fs.png')
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type @'
 using System; using System.Runtime.InteropServices;

@@ -5,7 +5,7 @@ use std::os::windows::process::CommandExt;
 
 use crate::log;
 
-const TASK: &str = "NetIsland Autostart";
+const TASK: &str = "MicaBar Autostart";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn schtasks(args: &[&str]) -> Result<String, String> {
@@ -44,6 +44,11 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
 
 /// Keeps the task pointing at the current exe (after an update or a move).
 pub fn sync_autostart(wanted: bool) {
+    // the logon task of the app's earlier name (NetIsland)
+    if schtasks(&["/Query", "/TN", "NetIsland Autostart"]).is_ok() {
+        let _ = schtasks(&["/Delete", "/TN", "NetIsland Autostart", "/F"]);
+        log("autostart: removed the NetIsland task");
+    }
     let exists = autostart_enabled();
     if wanted {
         let exe = std::env::current_exe().map(|p| p.display().to_string().to_lowercase()).unwrap_or_default();
@@ -72,7 +77,7 @@ pub fn is_installed() -> bool {
     std::env::current_exe()
         .map(|p| {
             let s = p.display().to_string().to_lowercase();
-            s.contains("\\program files") || s.contains("\\appdata\\local\\netisland\\app")
+            s.contains("\\program files") || s.contains("\\appdata\\local\\micabar\\app")
         })
         .unwrap_or(false)
 }

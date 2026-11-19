@@ -1,4 +1,4 @@
-//! User settings: one JSON document in %LOCALAPPDATA%\NetIsland\settings.json.
+//! User settings: one JSON document in %LOCALAPPDATA%\MicaBar\settings.json.
 //! The page edits it by sending partial patches; missing keys fall back to the defaults, so new
 //! settings added in later versions appear with their default values.
 
@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 fn path() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let d = PathBuf::from(base).join("NetIsland");
+    let d = PathBuf::from(base).join("MicaBar");
     let _ = std::fs::create_dir_all(&d);
     d.join("settings.json")
 }

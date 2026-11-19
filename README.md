@@ -1,4 +1,4 @@
-# NetIsland
+# MicaBar
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -37,13 +37,13 @@ The interface is in Chinese (Simplified).
 
 ## Install
 
-Download from [Releases](https://github.com/aileboeth/net-island/releases):
+Download from [Releases](https://github.com/aileboeth/MicaBar/releases):
 
-- `NetIsland_<version>_x64-setup.exe` — installer (`C:\Program Files\NetIsland`), with in-app updates;
-- `NetIsland_<version>_portable.exe` — single portable exe, no auto-update.
+- `MicaBar_<version>_x64-setup.exe` — installer (`C:\Program Files\MicaBar`), with in-app updates;
+- `MicaBar_<version>_portable.exe` — single portable exe, no auto-update.
 
 Requires Windows 10 2004+ / Windows 11 (x64) and the WebView2 runtime (built into Windows 11; the installer adds
-it when missing). NetIsland runs elevated (per-program speed needs kernel ETW events), so it asks for UAC on start;
+it when missing). MicaBar runs elevated (per-program speed needs kernel ETW events), so it asks for UAC on start;
 with "start with Windows" enabled it starts from a scheduled task without a prompt.
 
 ## Usage
@@ -58,14 +58,14 @@ with "start with Windows" enabled it starts from a scheduled task without a prom
 ### Exits per group
 
 With exit control enabled, the override opens one loopback-only port per proxy group (from `127.0.0.1:47800`) whose
-traffic goes straight to that group. NetIsland checks the exit IP through each port, so it knows where "default",
+traffic goes straight to that group. MicaBar checks the exit IP through each port, so it knows where "default",
 "AI" or "YouTube" leave from. By default it shows the fallback group plus the groups with recent traffic (up to 4);
 groups can also be picked by hand.
 
 ### Exit control
 
 When Clash Party / Mihomo Party is detected, the island offers to enable exit control. Enabling backs up Clash
-Party's override list, adds a global override "NetIsland 出口控制" and restarts Clash Party once (about 3 s offline);
+Party's override list, adds a global override "MicaBar 出口控制" and restarts Clash Party once (about 3 s offline);
 if the core fails to load it, everything is restored. Afterwards pick a target from "出口" on a program row or "⋯"
 on a connection. More specific rules win, so "this program direct" and "only this program to *.example.com via
 proxy" work together. The override can be removed from the bottom of the "出口" tab.
@@ -84,10 +84,10 @@ The "should go through the proxy" library = a built-in list of common services (
   the connection predates TUN). The alert card can block the program's direct connections (a Windows Firewall rule
   for public addresses only; the program still reaches the local proxy port) and undo it later.
 
-## Privacy: what NetIsland connects to
+## Privacy: what MicaBar connects to
 
-All statistics (connections, traffic, rules, alerts) stay on this PC in `%LOCALAPPDATA%\NetIsland\`. The only
-requests NetIsland makes itself:
+All statistics (connections, traffic, rules, alerts) stay on this PC in `%LOCALAPPDATA%\MicaBar\`. The only
+requests MicaBar makes itself:
 
 | Purpose | Address | When |
 | --- | --- | --- |
@@ -95,7 +95,7 @@ requests NetIsland makes itself:
 | Direct exit IP | 4.ipw.cn → myip.ipip.net → ip.3322.net (bound to the physical NIC; resolved via 223.5.5.5 / 119.29.29.29) | same |
 | Node latency | measured by the mihomo core against `www.gstatic.com/generate_204` | every 15–60 s (resource profile) |
 | gfw list | cdn.jsdelivr.net / raw.githubusercontent.com (Loyalsoldier/v2ray-rules-dat) | daily, when enabled |
-| Update check | latest.json of github.com/aileboeth/net-island | daily, when enabled |
+| Update check | latest.json of github.com/aileboeth/MicaBar | daily, when enabled |
 | AI quota | api.anthropic.com (Claude Code), chatgpt.com (Codex), cli-chat-proxy.grok.com (Grok), the local Antigravity language server | every 5 min (configurable), when enabled |
 
 Country / ASN lookups use the offline databases shipped with the proxy client (`country.mmdb`, `ASN.mmdb`);
@@ -110,8 +110,8 @@ Needs Rust (rustup), Visual Studio C++ Build Tools, Node.js + pnpm.
 
 ```powershell
 pnpm install
-pnpm build            # single exe: src-tauri\target\release\net-island.exe
-pnpm release          # installer + portable + update manifest -> dist\release-<version>\ (needs keys\netisland.key)
+pnpm build            # single exe: src-tauri\target\release\micabar.exe
+pnpm release          # installer + portable + update manifest -> dist\release-<version>\ (needs keys\micabar.key)
 ```
 
 Layout: `src-tauri\src\` (Rust backend: socket tables, ETW, mihomo controller, exit checks, leak guard, window

@@ -1,10 +1,10 @@
 [package]
-name = "net-island"
+name = "micabar"
 version = "0.2.1"
 edition = "2021"
 description = "A Windows dynamic-island style network monitor"
 license = "MIT"
-repository = "https://github.com/aileboeth/net-island"
+repository = "https://github.com/aileboeth/MicaBar"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -2082,6 +2082,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "micabar"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "ferrisetw",
+ "ipconfig",
+ "maxminddb",
+ "png 0.17.16",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-updater",
+ "tauri-winrt-notification",
+ "tokio",
+ "windows 0.62.2",
+ "windows-sys 0.59.0",
+ "winreg 0.55.0",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2196,29 +2219,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
-]
-
-[[package]]
-name = "net-island"
-version = "0.2.1"
-dependencies = [
- "base64 0.22.1",
- "ferrisetw",
- "ipconfig",
- "maxminddb",
- "png 0.17.16",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "tauri",
- "tauri-build",
- "tauri-plugin-updater",
- "tauri-winrt-notification",
- "tokio",
- "windows 0.62.2",
- "windows-sys 0.59.0",
- "winreg 0.55.0",
 ]
 
 [[package]]

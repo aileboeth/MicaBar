@@ -1,10 +1,10 @@
 # Builds a signed release into dist\release-<version>\ :
-#   NetIsland_<v>_x64-setup.exe (+ .sig)   installer, used by the in-app updater
-#   NetIsland_<v>_portable.exe             single exe, no installer (no auto-update)
+#   MicaBar_<v>_x64-setup.exe (+ .sig)   installer, used by the in-app updater
+#   MicaBar_<v>_portable.exe             single exe, no installer (no auto-update)
 #   latest.json                            updater manifest (upload with the release)
 #   SHA256SUMS.txt
-# Upload all of them to a GitHub release tagged v<version> on aileboeth/net-island.
-# The signing key lives in keys\netisland.key (git-ignored, never published).
+# Upload all of them to a GitHub release tagged v<version> on aileboeth/MicaBar.
+# The signing key lives in keys\micabar.key (git-ignored, never published).
 param([string]$Notes = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -18,25 +18,25 @@ if ($cargoHome) {
 }
 if (-not $env:RUSTUP_HOME) { $env:RUSTUP_HOME = [Environment]::GetEnvironmentVariable('RUSTUP_HOME', 'User') }
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw 'cargo not found: install Rust (rustup) first' }
-if (-not (Test-Path keys\netisland.key)) { throw 'keys\netisland.key missing: the updater signing key is required' }
-$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content keys\netisland.key -Raw).Trim()
+if (-not (Test-Path keys\micabar.key)) { throw 'keys\micabar.key missing: the updater signing key is required' }
+$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content keys\micabar.key -Raw).Trim()
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
 
 $ver = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
-Write-Host "building NetIsland $ver"
+Write-Host "building MicaBar $ver"
 node scripts/copy-flags.mjs
 # via cmd: pnpm/cargo write progress to stderr, which PowerShell 5 would turn into errors
 cmd /c "pnpm tauri build 2>&1"
 if ($LASTEXITCODE -ne 0) { throw "tauri build failed ($LASTEXITCODE)" }
 
 $bundle = "src-tauri\target\release\bundle\nsis"
-$setup = Join-Path $bundle "NetIsland_${ver}_x64-setup.exe"
+$setup = Join-Path $bundle "MicaBar_${ver}_x64-setup.exe"
 if (-not (Test-Path $setup)) { throw "installer not found: $setup" }
 $out = "dist\release-$ver"
 New-Item -ItemType Directory -Force $out | Out-Null
 Copy-Item $setup $out -Force
 Copy-Item "$setup.sig" $out -Force
-Copy-Item 'src-tauri\target\release\net-island.exe' (Join-Path $out "NetIsland_${ver}_portable.exe") -Force
+Copy-Item 'src-tauri\target\release\micabar.exe' (Join-Path $out "MicaBar_${ver}_portable.exe") -Force
 
 $manifest = [ordered]@{
     version   = $ver
@@ -45,7 +45,7 @@ $manifest = [ordered]@{
     platforms = [ordered]@{
         'windows-x86_64' = [ordered]@{
             signature = (Get-Content "$setup.sig" -Raw).Trim()
-            url       = "https://github.com/aileboeth/net-island/releases/download/v$ver/NetIsland_${ver}_x64-setup.exe"
+            url       = "https://github.com/aileboeth/MicaBar/releases/download/v$ver/MicaBar_${ver}_x64-setup.exe"
         }
     }
 }
