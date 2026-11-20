@@ -38,8 +38,8 @@ const sget = (path, dflt) => path.split(".").reduce((o, k) => (o == null ? o : o
 const itemOn = (listPath, id) => (sget(listPath, []) || []).some((i) => i.id === id && i.on);
 
 // island sizes (CSS px); while the layout is being edited the live values come from editSize
-const SIZE_LIMITS = { pillH: [28, 60], pillW: [0, 900], pillMaxW: [200, 900], panelW: [480, 1100], panelH: [360, 900] };
-const SIZE_DEFAULTS = { pillH: 36, pillW: 0, pillMaxW: 520, panelW: 600, panelH: 540 };
+const SIZE_LIMITS = { pillH: [28, 64], pillW: [0, 1400], pillMaxW: [200, 1400], panelW: [480, 1100], panelH: [360, 900] };
+const SIZE_DEFAULTS = { pillH: 44, pillW: 0, pillMaxW: 760, panelW: 600, panelH: 540 };
 let editSize = null;
 let editing = false; // layout editing (drag handles)
 let editPart = "panel";
@@ -335,8 +335,10 @@ function expand() {
   island.classList.add("expanded");
   island.classList.remove("collapsed");
   $("panel").scrollTop = 0;
+  if (tab === "sys") renderList(true); // fresh numbers instead of the ones from the last time
   renderPanel();
   applySize();
+  ensureSysPoll();
 }
 
 function collapse() {
@@ -393,8 +395,64 @@ function pillItem(id, target) {
       return snap?.sys?.memTotal ? `<span class="pill-unit">内存</span><span class="mono">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
     case "clock":
       return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
+    case "exits": {
+      // every measured group's exit side by side (just the main exit without a proxy client)
+      const groups = (exitState?.groups || []).filter((g) => g.ip);
+      if (!snap?.proxy?.detected || !groups.length) return pillItem("exit", target);
+      return groups.map((g) => `<span class="px-exit">${groups.length > 1 ? `<span class="rot-tag">${esc(shortGroup(g.group, g.isDefault))}</span>` : ""}${flagImg(g.cc)}<span class="mono ip-text">${esc(g.ip)}</span></span>`).join("");
+    }
+    case "media": {
+      if (!sget("media.on", true) || !media?.title || !media.playing) return "";
+      const cover = media.cover && sget("media.cover", true) ? `<img class="rot-cover" src="${media.cover}" alt="">` : `<span class="rot-note">♪</span>`;
+      return `${cover}<span class="rot-text">${esc(media.title)}${media.artist ? `<span class="rot-sub"> · ${esc(media.artist)}</span>` : ""}</span>`;
+    }
+  }
+  if (id.startsWith("ai-")) {
+    if (!sget("ai.on", true)) return "";
+    const q = aiState.find((x) => x.tool === id.slice(3));
+    return q ? ringPill(q) : "";
   }
   return "";
+}
+
+// ---------- quota rings ----------
+
+const RING_LETTER = { claude: "C", codex: "X", antigravity: "A", grok: "G" };
+const ringLevel = (used) => (used >= Number(sget("ai.ring.crit", 85)) ? "crit" : used >= Number(sget("ai.ring.warn", 60)) ? "warn" : "ok");
+
+// The windows a tool's ring shows: [outer, inner?] from its setting (both | first | second | max).
+function ringWindows(q) {
+  const ws = (q.windows || []).filter((w) => w && w.used != null);
+  if (!ws.length) return [];
+  const mode = sget(`ai.ring.mode.${q.tool}`, "both");
+  if (mode === "first") return [ws[0]];
+  if (mode === "second") return [ws[1] || ws[0]];
+  if (mode === "max") return [ws.reduce((a, b) => (b.used > a.used ? b : a))];
+  return ws.slice(0, 2);
+}
+
+// SVG ring: one arc per window (outer = first), the tool's letter in the middle.
+function ringSvg(q, size, stroke, center) {
+  const ws = ringWindows(q);
+  const c = size / 2;
+  const arcs = ws.map((w, i) => {
+    const r = c - stroke / 2 - i * (stroke + 1.5);
+    const len = 2 * Math.PI * r;
+    const pct = Math.max(0, Math.min(100, w.used));
+    return `<circle class="rg-track" cx="${c}" cy="${c}" r="${r}" stroke-width="${stroke}"/>` +
+      (pct > 0 ? `<circle class="rg-arc ${ringLevel(pct)}" cx="${c}" cy="${c}" r="${r}" stroke-width="${stroke}" stroke-dasharray="${(len * pct) / 100} ${len}" transform="rotate(-90 ${c} ${c})"/>` : "");
+  }).join("");
+  return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">${arcs}<text x="${c}" y="${c}" dy="0.36em" text-anchor="middle">${center ?? (RING_LETTER[q.tool] || esc((q.name || "?")[0]))}</text></svg>`;
+}
+
+// pill item: ring + the share used (both windows: "44/12%")
+function ringPill(q) {
+  if (!q.windows?.length || (q.status !== "ok" && q.status !== "stale")) return "";
+  const ws = ringWindows(q);
+  if (!ws.length) return "";
+  const size = Math.max(20, Math.round(sz("pillH") * 0.6));
+  const nums = ws.map((w, i) => (i ? `<span class="rg-sub">/${Math.round(w.used)}</span>` : Math.round(w.used))).join("");
+  return `<span class="ring-item ${q.status}">${ringSvg(q, size, ws.length > 1 ? 2.5 : 3)}<span class="mono">${nums}%</span></span>`;
 }
 
 // ---------- rotating slot (exits per group, now playing, AI quota, speed, latency) ----------
@@ -411,7 +469,8 @@ function shortGroup(name, isDefault) {
 }
 
 function quotaClass(used) {
-  return used >= 90 ? "crit" : used >= 70 ? "warn" : "";
+  const l = ringLevel(used);
+  return l === "ok" ? "" : l;
 }
 
 function shortWindow(label) {
@@ -443,9 +502,8 @@ function rotCards(target) {
       }
     } else if (it.id === "ai") {
       for (const q of aiState) {
-        if (!q.windows?.length || (q.status !== "ok" && q.status !== "stale")) continue;
-        const ws = q.windows.slice(0, 2).map((w) => `<span class="q ${quotaClass(w.used)}"><span class="q-l">${esc(shortWindow(w.label))}</span><span class="mono">${Math.round(w.used)}%</span></span>`).join("");
-        cards.push({ key: "a:" + q.tool, html: `<span class="rot-tag ai">${esc(q.name)}</span>${ws}` });
+        const h = ringPill(q);
+        if (h) cards.push({ key: "a:" + q.tool, html: h });
       }
     } else if (it.id === "speed" || it.id === "latency") {
       const h = pillItem(it.id, target);
@@ -456,24 +514,30 @@ function rotCards(target) {
 }
 
 function rotHtml(target) {
-  const cards = rotCards(target);
+  return rotateCards(rotCards(target), "main");
+}
+
+// A slot that shows one card at a time, advancing every rotate.interval seconds.
+const rots = { main: rot };
+function rotateCards(cards, name) {
   if (!cards.length) return "";
+  const r = rots[name] || (rots[name] = { key: null, at: 0, anim: false });
   const every = Math.max(2, Number(sget("rotate.interval", 5)) || 5) * 1000;
-  let i = cards.findIndex((c) => c.key === rot.key);
+  let i = cards.findIndex((c) => c.key === r.key);
   const now = Date.now();
   if (i < 0) {
     i = 0;
-    rot.at = now;
-  } else if (now - rot.at >= every && cards.length > 1) {
+    r.at = now;
+  } else if (now - r.at >= every && cards.length > 1) {
     i = (i + 1) % cards.length;
-    rot.at = now;
+    r.at = now;
   }
-  if (cards[i].key !== rot.key) {
-    rot.anim = rot.key !== null;
-    rot.key = cards[i].key;
+  if (cards[i].key !== r.key) {
+    r.anim = r.key !== null;
+    r.key = cards[i].key;
   }
-  const html = `<span class="rot-card${rot.anim ? " rot-in" : ""}">${cards[i].html}</span>`;
-  rot.anim = false;
+  const html = `<span class="rot-card${r.anim ? " rot-in" : ""}">${cards[i].html}</span>`;
+  r.anim = false;
   return html;
 }
 
@@ -545,11 +609,11 @@ function renderPill() {
     html = `<span class="flash-msg ${flash.msg.level}">${decorate(flash.msg.text)}</span>`;
   } else {
     flash.msg = null;
-    const items = (sget("pill.items", null) || [{ id: "exit", on: true }, { id: "conns", on: true }, { id: "leaks", on: true }])
+    const items = (sget("pill.items", null) || [{ id: "exits", on: true }, { id: "speed", on: true }, { id: "leaks", on: true }])
       .filter((i) => i.on)
-      .map((i) => pillItem(i.id, target))
-      .filter(Boolean);
-    html = items.map((x) => `<span class="pill-item${x.startsWith('<span class="rot-card') ? " rot-slot" : ""}">${x}</span>`).join(`<span class="pill-sep"></span>`);
+      .map((i) => ({ id: i.id, html: pillItem(i.id, target) }))
+      .filter((i) => i.html);
+    html = foldPill(dot, items);
   }
   const full = `<span class="${dot}"></span>${html}`;
   if (full !== pillLast) {
@@ -557,6 +621,53 @@ function renderPill() {
     pill.innerHTML = full;
   }
   if (!expanded) applySize();
+}
+
+const pillSpan = (it) => `<span class="pill-item${it.html.startsWith('<span class="rot-card') ? " rot-slot" : ""}" data-pi="${esc(it.id)}">${it.html}</span>`;
+const PILL_SEP = `<span class="pill-sep"></span>`;
+const fold = { sig: "", keep: 0, slotW: 0 };
+
+// Items sit side by side in their order; the ones at the end that don't fit the width take turns
+// in one rotating slot (as wide as the widest of them, so the pill doesn't jump).
+function foldPill(dot, items) {
+  const all = items.map(pillSpan).join(PILL_SEP);
+  if (shape().vertical || items.length < 2) return all;
+  const fixed = sz("pillW");
+  const limit = fixed > 0 ? fixed : sz("pillMaxW");
+  // measure only when the set of items (or the width) changed noticeably; text changes inside an
+  // item (speeds, percentages) reuse the last decision
+  const sig = `${limit}|${items.map((i) => i.id).join(",")}|${Math.round(all.length / 40)}`;
+  if (sig !== fold.sig) {
+    fold.sig = sig;
+    pill.style.width = "";
+    pill.innerHTML = `<span class="${dot}"></span>${all}`;
+    pillLast = "";
+    const els = [...pill.querySelectorAll(":scope > .pill-item")];
+    const widths = els.map((e) => e.getBoundingClientRect().width);
+    const gap = 8, sepW = 1 + 2 * gap;
+    let total = pill.scrollWidth;
+    let keep = items.length;
+    let slotW = 0;
+    if (total > limit) {
+      // fold from the end until the kept items plus the rotating slot fit
+      const base = total - widths.reduce((a, b) => a + b, 0) - (items.length - 1) * sepW;
+      while (keep > 1) {
+        keep--;
+        slotW = Math.max(...widths.slice(keep));
+        const w = base + widths.slice(0, keep).reduce((a, b) => a + b, 0) + keep * sepW + slotW;
+        if (w <= limit) break;
+      }
+      // the slot shrinks to what is left when even one kept item plus the widest card is too wide
+      const left = limit - (base + widths.slice(0, keep).reduce((a, b) => a + b, 0) + keep * sepW);
+      slotW = Math.max(60, Math.min(slotW, left));
+    }
+    fold.keep = keep;
+    fold.slotW = slotW;
+  }
+  if (fold.keep >= items.length) return all;
+  const kept = items.slice(0, fold.keep).map(pillSpan).join(PILL_SEP);
+  const cards = items.slice(fold.keep).map((i) => ({ key: "f:" + i.id, html: i.html }));
+  return `${kept}${PILL_SEP}<span class="pill-item rot-slot fold" style="width:${Math.ceil(fold.slotW)}px">${rotateCards(cards, "fold")}</span>`;
 }
 // the rotating slot advances on its own, between snapshots too
 if (!MANAGER) setInterval(() => { if (!expanded) renderPill(); }, 1000);
@@ -1014,11 +1125,13 @@ function untilText(ms) {
 }
 
 // one meter per usage window: the share used, coloured only past the warning thresholds
-function quotaBars(q, compact) {
+function quotaBars(q, compact, ringed = []) {
   return q.windows.map((w) => {
     const pct = Math.max(0, Math.min(100, w.used));
+    const pos = ringed.indexOf(w);
+    const where = pos < 0 ? "" : ringed.length > 1 ? (pos ? " · 内圈" : " · 外圈") : " · 环";
     return `<div class="qrow ${compact ? "compact" : ""}">
-      <span class="q-name">${esc(w.label)}</span>
+      <span class="q-name" title="${esc(w.label + where)}">${esc(w.label)}${where ? `<span class="q-where">${where}</span>` : ""}</span>
       <span class="meter" role="meter" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><i class="${quotaClass(pct)}" style="width:${pct}%"></i></span>
       <span class="q-pct mono">${Math.round(pct)}%</span>
       ${compact ? "" : `<span class="q-reset">${esc(untilText(w.resetsAt))}</span>`}
@@ -1028,9 +1141,14 @@ function quotaBars(q, compact) {
 
 function aiCard(q, compact) {
   const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">上次数据 · ${ago(q.at)}</span>` : "";
-  const body = q.windows?.length
-    ? quotaBars(q, compact)
+  const ringed = !compact && q.windows?.length ? ringWindows(q) : [];
+  const bars = q.windows?.length
+    ? quotaBars(q, compact, ringed)
     : `<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || "暂无数据")}</div>`;
+  // big ring on the left (the share used of its outer window in the middle), the windows on the right
+  const body = ringed.length
+    ? `<div class="ai-body">${ringSvg(q, 88, ringed.length > 1 ? 7 : 9, `${Math.round(ringed[0].used)}%`)}<div class="ai-rows">${bars}</div></div>`
+    : bars;
   return `<div class="ai-card ${q.status}">
     <div class="ai-head"><b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}<span class="sp"></span>${!compact && q.source ? `<span class="q-src">${esc(q.source)}</span>` : ""}</div>
     ${body}
@@ -1049,6 +1167,217 @@ function aiTabHtml() {
     <div class="m-hint">用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方；
       登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 10)} 分钟查一次（Claude 至少 10 分钟一次：官方接口限流很严，而且和 Claude Code 自己共用额度）；结果会保存，重启 MicaBar 不会重新查。</div>
   </div>`;
+}
+
+// ---------- system monitor page ----------
+// Built once, then updated in place from sysmon_sample (polled once a second while the page is
+// visible), so bars can animate and nothing flickers.
+
+let sysData = null;
+let sysTimer = null;
+const sysHist = { cpu: [], gpu: [] };
+let corePeak = [];
+let sysSort = "cpu";
+try { sysSort = localStorage.getItem("mb-sys-sort") || "cpu"; } catch { /* ignore */ }
+const GB = (b) => (b / 1073741824).toFixed(1);
+const fmtMem = (b) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(1)}G` : `${Math.round(b / 1048576)}M`);
+
+function sysWanted() {
+  return tab === "sys" && (MANAGER ? !document.hidden : expanded);
+}
+function ensureSysPoll() {
+  if (sysWanted() && !sysTimer) sysTimer = setTimeout(sysPoll, 0);
+}
+function sysPoll() {
+  if (!sysWanted()) { sysTimer = null; return; }
+  invoke("sysmon_sample").then((d) => {
+    sysData = d;
+    const push = (arr, v) => { arr.push(v); if (arr.length > 60) arr.shift(); };
+    if (d.cpu != null) push(sysHist.cpu, d.cpu);
+    if (d.gpu != null) push(sysHist.gpu, d.gpu);
+    // peak marks: hold the highest value, sinking slowly
+    corePeak = d.cores.map((v, i) => Math.max(v, (corePeak[i] ?? 0) - 1.5));
+    updateSys();
+  }).catch(() => {}).finally(() => {
+    // the first sample has no rates yet (they need two readings): take the second one soon
+    sysTimer = sysWanted() ? setTimeout(sysPoll, sysData?.cores?.length ? 1000 : 250) : null;
+  });
+}
+document.addEventListener("visibilitychange", ensureSysPoll);
+
+// small line over a fixed 0..max scale; recessive, no axes (the number next to it is the reading)
+function spark(values, cls, max = 100, w = 160, h = 28) {
+  if (values.length < 2) return `<svg class="spark" width="${w}" height="${h}"></svg>`;
+  const n = 60;
+  const pts = values.map((v, i) => `${((i + n - values.length) / (n - 1)) * w},${h - 2 - (Math.min(v, max) / max) * (h - 4)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><polyline class="c-line ${cls}" points="${pts}" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function sysPageHtml() {
+  return `<div id="sysmon" class="sysmon">
+    <div class="sm-main">
+      <div class="sm-heads">
+        <div class="sm-stat"><span class="sm-k">CPU</span><b class="mono" id="sm-cpu">–</b><span class="sm-u">%</span><span id="sm-cpu-line" class="sm-line"></span></div>
+        <div class="sm-stat" id="sm-gpu-stat"><span class="sm-k">GPU</span><b class="mono" id="sm-gpu">–</b><span class="sm-u">%</span></div>
+      </div>
+      <div class="sm-bars" id="sm-bars"></div>
+      <div class="sm-legend" id="sm-legend"></div>
+      <div class="sm-meter"><span class="sm-k">内存</span><b class="mono" id="sm-mem">–</b><span class="meter"><i id="sm-mem-bar"></i></span></div>
+      <div class="sm-meter" id="sm-vram-row"><span class="sm-k">显存</span><b class="mono" id="sm-vram">–</b><span class="meter"><i id="sm-vram-bar"></i></span></div>
+      <div class="sm-net">
+        <div><span class="sm-k">↓</span><b class="mono" id="sm-down">–</b><span id="sm-down-line" class="sm-line"></span></div>
+        <div><span class="sm-k">↑</span><b class="mono" id="sm-up">–</b><span id="sm-up-line" class="sm-line"></span></div>
+      </div>
+    </div>
+    <div class="sm-apps">
+      <div class="viz-head"><span class="viz-sel">占用最多的程序<span id="sm-name" class="sm-name"></span></span>${segmented("sys-sort", sysSort, [["cpu", "CPU"], ["mem", "内存"]])}</div>
+      <div id="sm-list" class="sm-list"><div class="empty">正在读取…</div></div>
+    </div>
+  </div>`;
+}
+
+function updateSys() {
+  const d = sysData;
+  if (!d || !$("sysmon")) return;
+  const set = (id, v) => { const el = $(id); if (el && el.textContent !== v) el.textContent = v; };
+  set("sm-cpu", d.cpu != null ? String(Math.round(d.cpu)) : "–");
+  $("sm-cpu-line").innerHTML = spark(sysHist.cpu, "s1");
+  $("sm-gpu-stat").hidden = d.gpu == null;
+  set("sm-gpu", d.gpu != null ? String(Math.round(d.gpu)) : "–");
+  // per-core bars (+ one for the GPU): performance and efficiency cores in two colours
+  const classes = [...new Set(d.eff)].sort((a, b) => b - a);
+  const hybrid = classes.length > 1;
+  const kind = (i) => (hybrid && d.eff[i] !== classes[0] ? "e" : "p");
+  const bars = $("sm-bars");
+  const n = d.cores.length + (d.gpu != null ? 1 : 0);
+  if (bars.childElementCount !== n) {
+    bars.innerHTML = d.cores.map((_, i) => `<div class="sm-bar ${kind(i)}"><i></i><s></s></div>`).join("") +
+      (d.gpu != null ? `<div class="sm-bar gpu"><i></i><span>GPU</span></div>` : "");
+    $("sm-legend").innerHTML = hybrid
+      ? `<span><i class="key sk-p"></i>性能核</span><span><i class="key sk-e"></i>能效核</span><span class="sm-dim">每根柱子一个逻辑核心，横线是最近的峰值</span>`
+      : `<span class="sm-dim">每根柱子一个逻辑核心，横线是最近的峰值</span>`;
+  }
+  [...bars.children].forEach((b, i) => {
+    const v = i < d.cores.length ? d.cores[i] : d.gpu;
+    b.firstElementChild.style.height = `${Math.max(2, v)}%`;
+    if (i < d.cores.length) {
+      b.querySelector("s").style.bottom = `${Math.min(98, corePeak[i] ?? v)}%`;
+      b.title = `${kind(i) === "e" ? "能效核" : hybrid ? "性能核" : "核心"} ${i}：${Math.round(v)}%`;
+    } else {
+      b.title = `GPU：${Math.round(v)}%${d.gpuName ? " · " + d.gpuName : ""}`;
+    }
+  });
+  set("sm-name", d.cpuName ? ` · ${d.cpuName}` : "");
+  set("sm-mem", d.memTotal ? `${GB(d.memUsed)} / ${GB(d.memTotal)} GB` : "–");
+  $("sm-mem-bar").style.width = d.memTotal ? `${(d.memUsed / d.memTotal) * 100}%` : "0";
+  const vr = d.vramTotal && d.vramUsed != null;
+  $("sm-vram-row").hidden = !vr;
+  if (vr) {
+    set("sm-vram", `${GB(d.vramUsed)} / ${GB(d.vramTotal)} GB`);
+    $("sm-vram-bar").style.width = `${Math.min(100, (d.vramUsed / d.vramTotal) * 100)}%`;
+  }
+  // network from the snapshots' history
+  const tail = (a) => a.slice(-60);
+  const maxNet = Math.max(1, ...tail(speedHist.down), ...tail(speedHist.up));
+  set("sm-down", `${fmtRate(snap?.down || 0)}`);
+  set("sm-up", `${fmtRate(snap?.up || 0)}`);
+  $("sm-down-line").innerHTML = spark(tail(speedHist.down), "s1", maxNet);
+  $("sm-up-line").innerHTML = spark(tail(speedHist.up), "s2", maxNet);
+  // apps
+  const rows = [...d.apps].sort((a, b) => (sysSort === "mem" ? b.mem - a.mem : b.cpu - a.cpu || b.mem - a.mem)).slice(0, MANAGER ? 16 : 8);
+  $("sm-list").innerHTML = rows.map((a) => `<div class="sm-app">
+      ${iconHtml(a)}<span class="sm-app-name">${esc(a.name)}${a.procs > 1 ? `<span class="sub">${a.procs} 个进程</span>` : ""}</span>
+      <span class="mono sm-num ${sysSort === "cpu" ? "on" : ""}">${a.cpu.toFixed(1)}%</span><span class="mono sm-num ${sysSort === "mem" ? "on" : ""}">${fmtMem(a.mem)}</span>
+    </div>`).join("") || `<div class="empty">正在读取…</div>`;
+  measurePanel();
+}
+
+// ---------- music page ----------
+
+let musicKey = "";
+function mediaPos(m) {
+  const p = m.position + (m.playing && m.at ? (Date.now() - m.at) / 1000 : 0);
+  return m.duration > 0 ? Math.min(m.duration, p) : p;
+}
+const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+function musicPageHtml() {
+  const m = media;
+  musicKey = m ? `${m.title}|${m.artist}|${m.playing}|${m.cover ? m.cover.length : 0}|${m.duration > 0}` : "";
+  if (!sget("media.on", true)) return `<div class="empty">正在播放已关闭（设置 → 正在播放）</div>`;
+  if (!m?.title) return `<div class="music empty-music"><div class="mu-cover none">♪</div><div class="mu-info"><div class="mu-title">没有正在播放的内容</div><div class="mu-artist">网易云、QQ 音乐、Spotify、浏览器里的视频等开始播放后会显示在这里</div></div></div>`;
+  const cover = m.cover && sget("media.cover", true) ? m.cover : null;
+  const pos = mediaPos(m);
+  return `<div class="music" id="music">
+    ${cover ? `<div class="mu-bg" style="background-image:url('${cover}')"></div>` : ""}
+    ${cover ? `<img class="mu-cover" src="${cover}" alt="">` : `<div class="mu-cover none">♪</div>`}
+    <div class="mu-info">
+      <div class="mu-title">${esc(m.title)}</div>
+      <div class="mu-artist">${esc([m.artist, m.album].filter(Boolean).join(" · "))}</div>
+      <div class="mu-app">${esc(m.app || "")}</div>
+      ${m.duration > 0 ? `<div class="mu-bar"><i id="mu-fill" style="width:${(pos / m.duration) * 100}%"></i></div>
+        <div class="mu-time mono"><span id="mu-pos">${mmss(pos)}</span><span>${mmss(m.duration)}</span></div>` : ""}
+      <div class="mu-ctl">
+        <button data-do="media-prev" title="上一首">${ICON.prev}</button>
+        <button class="main" data-do="media-toggle" title="播放 / 暂停">${m.playing ? ICON.pause : ICON.play}</button>
+        <button data-do="media-next" title="下一首">${ICON.next}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// progress between media events
+setInterval(() => {
+  if (tab !== "music" || !media?.duration || !$("mu-fill")) return;
+  const pos = mediaPos(media);
+  $("mu-fill").style.width = `${(pos / media.duration) * 100}%`;
+  $("mu-pos").textContent = mmss(pos);
+}, 1000);
+
+// ---------- pages of the open island (icons at its top) ----------
+
+const PAGE_DEFS = {
+  net: ["网络", "M3 17l5-6 4 4 8-9"],
+  sys: ["系统监控", "M6 20V12M10 20V6M14 20V10M18 20V4"],
+  music: ["音乐", "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
+  ai: ["AI 额度", "M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5"],
+};
+const PAGE_TABS = new Set(["sys", "music", "ai"]);
+let netTab = "conns";
+
+function visiblePages() {
+  const list = sget("panel.pages", null) || Object.keys(PAGE_DEFS).map((id) => ({ id, on: true }));
+  const on = list.filter((p) => p.on && PAGE_DEFS[p.id]).map((p) => p.id);
+  return on.length ? on : ["net"];
+}
+const curPage = () => (PAGE_TABS.has(tab) ? tab : "net");
+
+function renderPages() {
+  if (MANAGER) return;
+  const pages = visiblePages();
+  // the current page was switched off in the settings: go to the first one left
+  if (!pages.includes(curPage())) tab = pages[0] === "net" ? netTab : pages[0];
+  island.dataset.page = curPage();
+  const html = pages.length > 1 ? pages.map((id) => {
+    const [label, d] = PAGE_DEFS[id];
+    return `<button class="pg ${id === curPage() ? "active" : ""}" data-page="${id}" title="${label}" aria-label="${label}" role="tab" aria-selected="${id === curPage()}">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg></button>`;
+  }).join("") : "";
+  if ($("pages").innerHTML !== html) $("pages").innerHTML = html;
+}
+
+function switchPage(id) {
+  try { localStorage.setItem("mb-page", id); } catch { /* ignore */ }
+  switchTab(id === "net" ? netTab : id);
+}
+
+if (!MANAGER) {
+  $("pages").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-page]");
+    if (b) switchPage(b.dataset.page);
+  });
+  // clock in the page bar
+  setInterval(() => { if (expanded) $("page-clock").textContent = clockText(); }, 1000);
 }
 
 // ---------- overview (manager home) ----------
@@ -1157,9 +1486,14 @@ const ROT_LABEL = {
   exits: "各分组的出口 IP", media: "正在播放的歌（播放时）", ai: "AI 额度", speed: "实时网速", latency: "节点延迟",
 };
 const PILL_ITEM_LABEL = {
-  rotate: "轮换区（出口 / 音乐 / AI 额度…）", exit: "出口 IP + 国旗（固定显示）", conns: "连接数", speed: "实时网速", latency: "节点延迟",
-  leaks: "泄漏数（有泄漏时才显示）", cpu: "CPU 占用", mem: "内存占用", clock: "时钟",
+  exits: "出口 IP（每个分组一个，并排显示）", speed: "实时网速",
+  "ai-claude": "Claude 额度环", "ai-codex": "Codex 额度环", "ai-antigravity": "Antigravity 额度环", "ai-grok": "Grok 额度环",
+  media: "正在播放的歌（播放时）", leaks: "泄漏数（有泄漏时才显示）", conns: "连接数", latency: "节点延迟",
+  cpu: "CPU 占用", mem: "内存占用", clock: "时钟", exit: "主出口 IP（只显示一个）",
+  rotate: "轮换区（下面勾选的内容轮流显示）",
 };
+const PAGE_LABEL = Object.fromEntries(Object.entries(PAGE_DEFS).map(([k, v]) => [k, v[0]]));
+const RING_MODES = [["both", "两圈：外圈短周期，内圈长周期"], ["first", "只看短周期（如 5 小时）"], ["second", "只看长周期（如每周）"], ["max", "用得最多的那个"]];
 
 let monitorsCache = [];
 let hotkeyRec = false;
@@ -1278,14 +1612,14 @@ function settingsHtml() {
     ${sSelect("appearance.scale", "界面缩放", [[90, "90%"], [100, "100%"], [110, "110%"], [125, "125%"], [150, "150%"]])}
   </div>
   <div class="s-sec"><div class="s-title">大小<span class="s-note">也可以在屏幕上直接拖动边缘调整</span></div>
-    ${sRange("size.pillH", "胶囊高度", 28, 60, 2, "px")}
-    ${sRange("size.pillW", "胶囊宽度", 0, 900, 10, "px", "0 = 跟着内容自动变宽")}
-    ${sRange("size.pillMaxW", "　自动宽度最多", 200, 900, 10, "px")}
+    ${sRange("size.pillH", "胶囊高度", 28, 64, 2, "px")}
+    ${sRange("size.pillW", "胶囊宽度", 0, 1400, 10, "px", "0 = 跟着内容自动变宽")}
+    ${sRange("size.pillMaxW", "　自动宽度最多", 200, 1400, 10, "px")}
     ${sRange("size.panelW", "展开面板宽度", 480, 1100, 10, "px")}
     ${sRange("size.panelH", "展开面板最大高度", 360, 900, 10, "px", "内容少时会矮一些")}
     <div class="m-actions end"><button class="ghost" data-do="size-reset">恢复默认大小</button><button class="primary" data-do="layout-edit">在屏幕上拖动调整</button></div>
   </div>
-  <div class="s-sec"><div class="s-title">胶囊里显示什么<span class="s-note">勾选显示，箭头调顺序</span></div>
+  <div class="s-sec"><div class="s-title">胶囊里显示什么<span class="s-note">勾选的并排显示，箭头调顺序；宽度放不下时，排在后面的几项在最后一格里轮流显示</span></div>
     ${sOrderList("pill.items", PILL_ITEM_LABEL)}
     ${sSelect("pill.clockStyle", "时钟样式", [["simple", "简洁"], ["digital", "数码管"], ["serif", "衬线"]])}
     ${sToggle("pill.clockSeconds", "时钟显示秒")}
@@ -1307,6 +1641,21 @@ function settingsHtml() {
     ${sToggle("ai.grok", "　Grok", "需要用 grok CLI 登录过")}
     ${sNumber("ai.interval", "　每隔多久查一次", 1, 120, 1, "分钟", "Claude 最少 10 分钟一次，设得更短也按 10 分钟")}
   </div>
+  <div class="s-sec"><div class="s-title">额度环<span class="s-note">胶囊和「AI 额度」页里的圆环</span></div>
+    ${sSelect("ai.ring.mode.claude", "Claude 显示", RING_MODES)}
+    ${sSelect("ai.ring.mode.codex", "Codex 显示", RING_MODES)}
+    ${sSelect("ai.ring.mode.antigravity", "Antigravity 显示", RING_MODES, "Antigravity 按模型分别计额度")}
+    ${sSelect("ai.ring.mode.grok", "Grok 显示", RING_MODES)}
+    ${sNumber("ai.ring.warn", "用到多少变成提醒色", 1, 99, 1, "%")}
+    ${sNumber("ai.ring.crit", "用到多少变成警告色", 1, 100, 1, "%")}
+    ${sColor("ai.ring.colors.ok", "　正常")}
+    ${sColor("ai.ring.colors.warn", "　提醒")}
+    ${sColor("ai.ring.colors.crit", "　警告")}
+    <div class="m-actions end"><button class="ghost" data-do="ring-reset">恢复默认颜色和阈值</button></div>
+  </div>
+  <div class="s-sec"><div class="s-title">展开后的页面<span class="s-note">岛顶部的图标切换；勾选显示，箭头调顺序，会记住上次停在哪一页</span></div>
+    ${sOrderList("panel.pages", PAGE_LABEL)}
+  </div>
   <div class="s-sec"><div class="s-title">正在播放</div>
     ${sToggle("media.on", "显示正在播放的歌", "读取 Windows 媒体控制（网易云、QQ 音乐、Spotify、浏览器等）")}
     ${sToggle("media.cover", "　显示封面")}
@@ -1319,7 +1668,7 @@ function settingsHtml() {
     ${sToggle("flash.speedSpike", "网速突增")}
     ${sNumber("flash.speedMBps", "　突增到超过", 1, 1000, 1, "MB/s")}
   </div>
-  <div class="s-sec"><div class="s-title">面板页签<span class="s-note">勾选显示，箭头调顺序</span></div>
+  <div class="s-sec"><div class="s-title">网络页的页签<span class="s-note">勾选显示，箭头调顺序</span></div>
     ${sOrderList("panel.tabs", tabLabels)}
   </div>
   <div class="s-sec"><div class="s-title">外形</div>
@@ -1618,6 +1967,16 @@ function renderList(force = false) {
     measurePanel();
     return;
   }
+  if (tab === "sys" || tab === "music") {
+    // built once and updated in place (sys) or rebuilt only when the song / state changes (music)
+    const m = media;
+    const key = m ? `${m.title}|${m.artist}|${m.playing}|${m.cover ? m.cover.length : 0}|${m.duration > 0}` : "";
+    if (!force && (tab === "sys" ? $("sysmon") : list.querySelector(".music") && key === musicKey)) return;
+    list.innerHTML = `<div id="list-inner">${tab === "sys" ? sysPageHtml() : musicPageHtml()}</div>`;
+    if (tab === "sys") { updateSys(); ensureSysPoll(); }
+    measurePanel();
+    return;
+  }
   if (!snap) {
     list.innerHTML = `<div class="empty">正在读取连接…</div>`;
     return;
@@ -1780,6 +2139,10 @@ async function runAction(el) {
         throw err;
       }
       return;
+    } else if (act === "ring-reset") {
+      await invoke("settings_set", { patch: { ai: { ring: { warn: 60, crit: 85, colors: { ok: "#34d399", warn: "#fbbf24", crit: "#f87171" } } } } });
+      toast("额度环的颜色和阈值已恢复默认");
+      return;
     } else if (act === "open-releases") {
       invoke("open_url", { url: REPO + "/releases/latest" });
       return;
@@ -1912,6 +2275,13 @@ $("panel").addEventListener("click", (e) => {
     return;
   }
   const seg = e.target.closest("[data-seg]");
+  if (seg?.dataset.seg === "sys-sort") {
+    sysSort = seg.dataset.val;
+    try { localStorage.setItem("mb-sys-sort", sysSort); } catch { /* ignore */ }
+    seg.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === seg));
+    updateSys();
+    return;
+  }
   if (seg) {
     const v = Number(seg.dataset.val);
     if (seg.dataset.seg === "srange") speedRange = v;
@@ -2033,6 +2403,8 @@ const NAV = [
   ["speed", "网速", "M3 17l5-6 4 4 8-9"],
   ["traffic", "流量", "M6 20V10M12 20V4M18 20v-7"],
   ["nodes", "节点", "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 8v4l3 2"],
+  ["sys", "系统监控", "M6 20V12M10 20V6M14 20V10M18 20V4"],
+  ["music", "音乐", "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
   ["ai", "AI 额度", "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"],
   ["settings", "设置", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4L7 17M17 17l1.4 1.4M5.6 5.6L7 7"],
 ];
@@ -2055,7 +2427,9 @@ function renderTabs() {
     document.body.dataset.page = tab;
     return;
   }
-  if (tab !== "settings" && !tabs.includes(tab)) tab = tabs[0];
+  if (tab !== "settings" && !PAGE_TABS.has(tab) && !tabs.includes(tab)) tab = tabs[0];
+  if (!tabs.includes(netTab)) netTab = tabs[0];
+  renderPages();
   $("tabs").innerHTML = tabs
     .map((id) => `<button class="tab ${id === tab ? "active" : ""}" data-tab="${id}">${TAB_DEFS[id].label}${TAB_DEFS[id].count ? ` <span id="tab-${id}" class="mono">0</span>` : ""}</button>`)
     .join("");
@@ -2068,6 +2442,8 @@ function switchTab(name) {
     return;
   }
   tab = name;
+  if (!PAGE_TABS.has(name) && name !== "settings" && name !== "home") netTab = name;
+  renderPages();
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   $("gear").classList.toggle("active", name === "settings");
   if (MANAGER) {
@@ -2084,6 +2460,8 @@ function switchTab(name) {
   $("list").scrollTop = 0;
   renderList(true);
   if (MANAGER) renderPanel();
+  else measurePanel();
+  ensureSysPoll();
 }
 
 $("tabs").addEventListener("click", (e) => {
@@ -2115,8 +2493,20 @@ function applyGlass() {
   }
 }
 
+let pageRestored = MANAGER;
 function applySettings(s) {
   S = s;
+  if (!pageRestored) {
+    // open on the page used last time
+    pageRestored = true;
+    try {
+      const p = localStorage.getItem("mb-page");
+      if (PAGE_TABS.has(p)) tab = p;
+    } catch { /* ignore */ }
+  }
+  document.documentElement.style.setProperty("--q-ok", sget("ai.ring.colors.ok", "#34d399"));
+  document.documentElement.style.setProperty("--q-warn", sget("ai.ring.colors.warn", "#fbbf24"));
+  document.documentElement.style.setProperty("--q-crit", sget("ai.ring.colors.crit", "#f87171"));
   applyTheme();
   applyGlass();
   const scale = sget("appearance.scale", 100);
@@ -2179,6 +2569,7 @@ listen("media", (e) => {
   media = e.payload || null;
   renderPill();
   if (tab === "home") renderList(true);
+  else if (tab === "music") renderList();
 });
 invoke("ai_get").then((a) => { aiState = a || []; }).catch(() => {});
 invoke("media_get").then((m) => { media = m || null; }).catch(() => {});
@@ -2188,7 +2579,9 @@ listen("island", (e) => {
   if (e.payload) {
     expand();
     // opened by the hotkey the window has keyboard focus: start on the active tab
-    setTimeout(() => { if (document.hasFocus()) document.querySelector(".tab.active")?.focus({ preventScroll: true }); }, 60);
+    setTimeout(() => {
+      if (document.hasFocus()) document.querySelector(curPage() === "net" ? ".tab.active" : ".pg.active")?.focus({ preventScroll: true });
+    }, 60);
   } else {
     collapse();
   }
@@ -2538,7 +2931,14 @@ document.addEventListener("keydown", (e) => {
   if (!expanded) return;
   const a = document.activeElement;
   const typing = a && (a.tagName === "INPUT" || a.tagName === "SELECT");
-  if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.classList.contains("tab")) {
+  if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.classList.contains("pg")) {
+    const pages = visiblePages();
+    const i = pages.indexOf(a.dataset.page) + (e.key === "ArrowRight" ? 1 : -1);
+    const id = pages[(i + pages.length) % pages.length];
+    switchPage(id);
+    document.querySelector(`.pg[data-page="${id}"]`)?.focus({ preventScroll: true });
+    e.preventDefault();
+  } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.classList.contains("tab")) {
     const tabs = [...document.querySelectorAll(".tab")];
     const i = tabs.indexOf(a) + (e.key === "ArrowRight" ? 1 : -1);
     const t = tabs[(i + tabs.length) % tabs.length];

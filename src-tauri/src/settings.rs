@@ -46,16 +46,23 @@ pub fn defaults() -> Value {
             "lineWhenMaximized": false
         },
         "pill": {
+            // shown side by side in this order; what doesn't fit the width takes turns in one slot at the end
             "items": [
-                { "id": "rotate", "on": true },
-                { "id": "exit", "on": false },
-                { "id": "conns", "on": true },
-                { "id": "speed", "on": false },
-                { "id": "latency", "on": false },
+                { "id": "exits", "on": true },
+                { "id": "speed", "on": true },
+                { "id": "ai-claude", "on": true },
+                { "id": "ai-codex", "on": true },
+                { "id": "ai-antigravity", "on": true },
+                { "id": "ai-grok", "on": true },
+                { "id": "media", "on": true },
                 { "id": "leaks", "on": true },
+                { "id": "conns", "on": false },
+                { "id": "latency", "on": false },
                 { "id": "cpu", "on": false },
                 { "id": "mem", "on": false },
-                { "id": "clock", "on": false }
+                { "id": "clock", "on": false },
+                { "id": "exit", "on": false },
+                { "id": "rotate", "on": false }
             ],
             // simple | digital | serif
             "clockStyle": "simple",
@@ -63,9 +70,9 @@ pub fn defaults() -> Value {
         },
         "size": {
             // collapsed pill: height, and width (0 = fit the content, up to pillMaxW)
-            "pillH": 36,
+            "pillH": 44,
             "pillW": 0,
-            "pillMaxW": 520,
+            "pillMaxW": 760,
             // expanded panel
             "panelW": 600,
             "panelH": 540
@@ -88,7 +95,15 @@ pub fn defaults() -> Value {
             "claude": true,
             "codex": true,
             "antigravity": true,
-            "grok": true
+            "grok": true,
+            // quota rings: which usage window each tool's ring shows (both | first | second | max),
+            // colour steps by share used, and the three colours
+            "ring": {
+                "mode": { "claude": "both", "codex": "both", "antigravity": "max", "grok": "first" },
+                "warn": 60,
+                "crit": 85,
+                "colors": { "ok": "#34d399", "warn": "#fbbf24", "crit": "#f87171" }
+            }
         },
         "media": {
             "on": true,
@@ -117,7 +132,18 @@ pub fn defaults() -> Value {
                 { "id": "speed", "on": true },
                 { "id": "traffic", "on": true },
                 { "id": "nodes", "on": true }
+            ],
+            // pages of the open island, switched by the icons at its top
+            "pages": [
+                { "id": "net", "on": true },
+                { "id": "sys", "on": true },
+                { "id": "music", "on": true },
+                { "id": "ai", "on": true }
             ]
+        },
+        "meta": {
+            // 2 = big pill with items side by side (0.2.4)
+            "pillV": 2
         },
         "appearance": {
             // auto | glass-dark | glass-light | <preset id> | custom
@@ -191,7 +217,22 @@ fn store() -> &'static Mutex<Value> {
         if !v.is_object() {
             v = json!({});
         }
+        let fresh = v.as_object().map(|o| o.is_empty()).unwrap_or(true);
+        let old_pill = v.pointer("/meta/pillV").and_then(|x| x.as_u64()).unwrap_or(0) < 2;
         fill(&mut v, &defaults());
+        if old_pill && !fresh {
+            // 0.2.4: bigger pill, items side by side instead of one rotating slot
+            let d = defaults();
+            let h = v.pointer("/size/pillH").and_then(|x| x.as_f64()).unwrap_or(36.0).max(44.0);
+            let w = v.pointer("/size/pillMaxW").and_then(|x| x.as_f64()).unwrap_or(520.0).max(760.0);
+            v["size"]["pillH"] = json!(h);
+            v["size"]["pillMaxW"] = json!(w);
+            v["pill"]["items"] = d["pill"]["items"].clone();
+            v["meta"]["pillV"] = json!(2);
+            if let Ok(t) = serde_json::to_string_pretty(&v) {
+                let _ = std::fs::write(path(), t);
+            }
+        }
         Mutex::new(v)
     })
 }

@@ -16,6 +16,7 @@ mod proxy;
 mod settings;
 mod speed;
 mod sysinfo;
+mod sysmon;
 mod system;
 mod traffic;
 mod window_ctl;
@@ -1919,6 +1920,12 @@ fn ai_get(state: tauri::State<'_, Arc<Shared>>) -> Vec<ai::Quota> {
     state.ai.lock().unwrap().clone()
 }
 
+/// One sample for the system monitor page (the page polls this while it is open).
+#[tauri::command]
+async fn sysmon_sample() -> sysmon::Sample {
+    tauri::async_runtime::spawn_blocking(|| sysmon::monitor().lock().unwrap().sample()).await.unwrap_or_default()
+}
+
 #[tauri::command]
 fn ai_refresh(state: tauri::State<'_, Arc<Shared>>) {
     state.ai_trigger.store(true, Ordering::SeqCst);
@@ -2204,6 +2211,7 @@ fn main() {
             exit_group_options,
             ai_get,
             ai_refresh,
+            sysmon_sample,
             media_get,
             media_control,
             open_manager,
