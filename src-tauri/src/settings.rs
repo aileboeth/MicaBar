@@ -160,8 +160,9 @@ pub fn defaults() -> Value {
             "style": "icon",
             // seconds a note shows (inline / card; longer while the cursor is on a card)
             "duration": 5,
-            // smart (text hidden while fullscreen / recording) | source (app + sender only) | full
-            "privacy": "smart",
+            // source (app + sender, never the message text) | smart (text hidden while fullscreen /
+            // recording) | full
+            "privacy": "source",
             "followDnd": true,
             "quiet": { "on": false, "from": 23, "to": 8 },
             // local endpoint for the Claude Code / Codex hooks
@@ -174,8 +175,9 @@ pub fn defaults() -> Value {
             "pillV": 2,
             // 1 = Antigravity ring shows 5 h + weekly of its busier model group (0.2.6)
             "ringV": 1,
-            // 1 = notifications: the page and the pill's unread count switched on once
-            "notifyV": 1
+            // 1 = notifications: the page and the pill's unread count switched on once;
+            // 2 = message text hidden by default ("所有的通知都不要显示内容")
+            "notifyV": 2
         },
         "appearance": {
             // auto | glass-dark | glass-light | <preset id> | custom
@@ -252,8 +254,19 @@ fn store() -> &'static Mutex<Value> {
         let fresh = v.as_object().map(|o| o.is_empty()).unwrap_or(true);
         let old_pill = v.pointer("/meta/pillV").and_then(|x| x.as_u64()).unwrap_or(0) < 2;
         let old_ring = v.pointer("/meta/ringV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
-        let old_notify = v.pointer("/meta/notifyV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
+        let notify_v = v.pointer("/meta/notifyV").and_then(|x| x.as_u64()).unwrap_or(0);
+        let old_notify = notify_v < 1;
         fill(&mut v, &defaults());
+        if notify_v < 2 && !fresh {
+            // the first notification builds showed the text: now hidden unless chosen again
+            if v.pointer("/notify/privacy").and_then(|x| x.as_str()) == Some("smart") {
+                v["notify"]["privacy"] = json!("source");
+            }
+            v["meta"]["notifyV"] = json!(2);
+            if let Ok(t) = serde_json::to_string_pretty(&v) {
+                let _ = std::fs::write(path(), t);
+            }
+        }
         if old_notify && !fresh {
             // new lists items arrive switched off; the notification page and count start on
             for (list, id) in [("/panel/pages", "notes"), ("/pill/items", "notes")] {
@@ -263,7 +276,7 @@ fn store() -> &'static Mutex<Value> {
                     }
                 }
             }
-            v["meta"]["notifyV"] = json!(1);
+            v["meta"]["notifyV"] = json!(2);
             if let Ok(t) = serde_json::to_string_pretty(&v) {
                 let _ = std::fs::write(path(), t);
             }

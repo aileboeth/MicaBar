@@ -802,11 +802,13 @@ const GLYPH = { claude: "✳", codex: "◎" };
 const noteById = (id) => notes.find((n) => n.id === id);
 const unreadCount = () => notes.filter((n) => !n.read).length;
 
-// privacy: the text stays hidden in "source" mode, and in "smart" mode while a fullscreen app
-// (game, presentation) is in front or a screen recorder runs
+// privacy: 0 = everything, 1 = no message text (default "source": app + sender), 2 = only the
+// app ("smart" while a fullscreen app is in front or a screen recorder runs)
 function noteHidden(n) {
-  const p = sget("notify.privacy", "smart");
-  return p === "source" || (p === "smart" && (gameOn || n.capturing));
+  const p = sget("notify.privacy", "source");
+  if (p === "full") return 0;
+  if (p === "smart") return gameOn || n.capturing ? 2 : 0;
+  return 1;
 }
 
 function noteIcon(n) {
@@ -815,19 +817,22 @@ function noteIcon(n) {
     : n.icon
       ? iconHtml({ path: n.icon, name: n.app })
       : `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc(GLYPH[n.key] || [...(n.app || "?")][0])}</div>`;
-  if (n.avatar && !noteHidden(n)) return `<div class="n-ico avatar"><img class="n-av" src="${n.avatar}" alt=""><span class="n-badge">${app}</span></div>`;
+  if (n.avatar && noteHidden(n) < 2) return `<div class="n-ico avatar"><img class="n-av" src="${n.avatar}" alt=""><span class="n-badge">${app}</span></div>`;
   return `<div class="n-ico">${app}</div>`;
 }
 
 function noteText(n) {
-  if (noteHidden(n)) return { title: n.app, body: n.count > 1 ? `${n.count} 条新消息` : "新消息", sub: "" };
-  return { title: n.title, body: n.body, sub: n.sub };
+  const h = noteHidden(n);
+  if (!h) return { title: n.title, body: n.body, sub: n.sub };
+  // without the text: a neutral line (AI notes say what happened, not what they wrote)
+  const body = n.kind === "done" ? n.sub || "任务完成" : n.kind === "ask" ? "等你确认" : n.count > 1 ? `${n.count} 条新消息` : n.source === "flash" && n.app !== "微信" ? "需要你注意" : "新消息";
+  return { title: h === 2 ? n.app : n.title, body, sub: "" };
 }
 
 function noteCardHtml(n, close) {
   const t = noteText(n);
   const showApp = t.title !== n.app;
-  const cnt = n.count > 1 && n.source !== "flash" && !noteHidden(n) ? `<span class="n-cnt">${n.count}</span>` : "";
+  const cnt = n.count > 1 && n.source !== "flash" && noteHidden(n) < 2 ? `<span class="n-cnt">${n.count}</span>` : "";
   return `<div class="ncard ${n.read ? "read" : ""} k-${esc(n.kind)}" data-nid="${n.id}">
     ${noteIcon(n)}
     <div class="n-main">
@@ -847,7 +852,7 @@ let notePop = 0; // newest note: its icon pops in the pill
 
 // small round icon: the sender's picture (inline only, privacy permitting) or the app's icon
 function noteMini(n, avatar) {
-  if (avatar && n.avatar && !noteHidden(n)) return `<img class="nm-av" src="${n.avatar}" alt="">`;
+  if (avatar && n.avatar && noteHidden(n) < 2) return `<img class="nm-av" src="${n.avatar}" alt="">`;
   if (n.iconUrl) return `<img class="app-icon" src="${n.iconUrl}" alt="">`;
   if (n.icon) return iconHtml({ path: n.icon, name: n.app });
   return `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc(GLYPH[n.key] || [...(n.app || "?")][0])}</div>`;
@@ -2143,7 +2148,7 @@ function notifySettingsHtml() {
     ${sToggle("notify.on", "在岛上显示通知")}
     ${sSelect("notify.style", "　提示方式", [["icon", "胶囊右边一格，只显示程序图标"], ["inline", "胶囊里的内容暂时让开，显示一行消息"], ["card", "胶囊展开成卡片"]], "胶囊里有「未读通知」这一项时才显示图标（设置 → 胶囊里显示什么）")}
     ${sNumber("notify.duration", "　每次停留", 2, 30, 1, "秒", "鼠标放在通知上时一直停着；同时来几条会叠起来，放上去就展开")}
-    ${sSelect("notify.privacy", "　显示内容", [["smart", "平时全文；全屏、录屏时只显示来源"], ["source", "只显示是哪个程序、谁发的"], ["full", "始终显示全文"]])}
+    ${sSelect("notify.privacy", "　显示内容", [["source", "不显示内容，只显示程序和发送人"], ["smart", "显示全文；全屏、录屏时只显示程序"], ["full", "始终显示全文"]], "岛上和通知页都按这个显示")}
     ${sToggle("notify.followDnd", "　跟随 Windows 勿扰", "Windows 开着勿扰 / 专注时，通知只收进通知页，不在岛上弹出")}
     ${sToggle("notify.quiet.on", "　免打扰时段")}
     ${sget("notify.quiet.on", false) ? `${sSelect("notify.quiet.from", "　　从", HOURS)}${sSelect("notify.quiet.to", "　　到", HOURS)}` : ""}
