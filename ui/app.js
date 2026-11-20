@@ -266,6 +266,10 @@ function islandRect(open) {
   if (open) {
     w = Math.min(W - 8, panelW());
     h = Math.min(H - 8, panelHNow);
+  } else if (nst.on) {
+    // a notification card (any shape / edge)
+    w = Math.min(W - 16, NOTE_W);
+    h = Math.min(H - 16, Math.max(sz("pillH"), nst.h || 64));
   } else if (style === "line") {
     [w, h] = vertical ? [6, 140] : [140, 6];
   } else if (vertical) {
@@ -276,7 +280,7 @@ function islandRect(open) {
     h = sz("pillH");
   }
   // capsule floats 6px off the edge; notch and line sit on it; an expanded panel floats unless notch
-  const gap = open ? (style === "notch" ? 0 : 6) : style === "capsule" ? 6 : 0;
+  const gap = open ? (style === "notch" ? 0 : 6) : style === "capsule" || (nst.on && style === "line") ? 6 : 0;
   let x = (W - w) / 2, y = (H - h) / 2;
   if (dock === "top") y = gap;
   else if (dock === "bottom") y = H - h - gap;
@@ -315,21 +319,24 @@ function applySize() {
   pill.style.width = fixedW ? r.w + "px" : "";
   pill.style.justifyContent = fixedW ? "center" : "";
   island.classList.toggle("notch", r.style === "notch");
-  island.classList.toggle("line", r.style === "line" && !expanded);
-  island.classList.toggle("vertical", r.vertical && !expanded);
+  island.classList.toggle("line", r.style === "line" && !expanded && !nst.on);
+  island.classList.toggle("vertical", r.vertical && !expanded && !nst.on);
   for (const d of ["top", "bottom", "left", "right"]) island.classList.toggle("dock-" + d, r.dock === d);
   island.style.setProperty("--ix", r.x + "px");
   island.style.setProperty("--iy", r.y + "px");
   island.style.width = r.w + "px";
   island.style.height = r.h + "px";
-  if (!expanded && r.style === "capsule") island.style.borderRadius = r.h / 2 + "px";
+  if (!expanded && nst.on) island.style.borderRadius = r.style === "notch" ? "" : "22px";
+  else if (!expanded && r.style === "capsule") island.style.borderRadius = r.h / 2 + "px";
   else island.style.borderRadius = "";
+  placeTail(r);
   reportRect();
   if (editing) renderEditUi();
 }
 
 function expand() {
   if (expanded) return;
+  hideNotes(); // they stay on the notes page
   expanded = true;
   island.classList.remove("peek");
   island.classList.add("expanded");
@@ -405,6 +412,10 @@ function pillItem(id, target) {
       return snap?.sys?.memTotal ? `<span class="pill-unit">内存</span><span class="mono pn pn4">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
     case "clock":
       return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
+    case "notes": {
+      const u = sget("notify.on", true) ? unreadCount() : 0;
+      return u ? `<span class="pill-bell"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${BELL}"/></svg><span class="mono">${u > 99 ? "99+" : u}</span></span>` : "";
+    }
     case "exits": {
       // every measured group's exit side by side (just the main exit without a proxy client)
       // one entry per exit IP; the tag names its main group (+N more) only when the IPs differ
@@ -757,6 +768,254 @@ function foldPill(dot, items) {
 }
 // the rotating slot advances on its own, between snapshots too
 if (!MANAGER) setInterval(() => { if (!expanded) renderPill(); }, 1000);
+
+// ---------- notifications ----------
+// A note springs out of the island like on an iPhone: the pill becomes a card (app icon or the
+// sender's picture, app · sender, two lines, "刚刚"); several stack up (the edges of the ones
+// behind peek out under the island), the cursor on the stack fans it out into a list and holds it.
+// The notes page keeps today's notes grouped by app (in memory only, like the backend).
+
+let notes = []; // newest first
+const NOTE_W = 400;
+const nst = { active: [], hover: false, fan: false, timer: 0, h: 0, on: false };
+let gameOn = false;
+const BELL = "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0";
+const GLYPH = { claude: "✳", codex: "◎" };
+
+const noteById = (id) => notes.find((n) => n.id === id);
+const unreadCount = () => notes.filter((n) => !n.read).length;
+
+// privacy: the text stays hidden in "source" mode, and in "smart" mode while a fullscreen app
+// (game, presentation) is in front or a screen recorder runs
+function noteHidden(n) {
+  const p = sget("notify.privacy", "smart");
+  return p === "source" || (p === "smart" && (gameOn || n.capturing));
+}
+
+function noteIcon(n) {
+  const app = n.iconUrl
+    ? `<img class="n-appimg" src="${n.iconUrl}" alt="">`
+    : n.icon
+      ? iconHtml({ path: n.icon, name: n.app })
+      : `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc(GLYPH[n.key] || [...(n.app || "?")][0])}</div>`;
+  if (n.avatar && !noteHidden(n)) return `<div class="n-ico avatar"><img class="n-av" src="${n.avatar}" alt=""><span class="n-badge">${app}</span></div>`;
+  return `<div class="n-ico">${app}</div>`;
+}
+
+function noteText(n) {
+  if (noteHidden(n)) return { title: n.app, body: n.count > 1 ? `${n.count} 条新消息` : "新消息", sub: "" };
+  return { title: n.title, body: n.body, sub: n.sub };
+}
+
+function noteCardHtml(n, close) {
+  const t = noteText(n);
+  const showApp = t.title !== n.app;
+  const cnt = n.count > 1 && n.source !== "flash" && !noteHidden(n) ? `<span class="n-cnt">${n.count}</span>` : "";
+  return `<div class="ncard ${n.read ? "read" : ""} k-${esc(n.kind)}" data-nid="${n.id}">
+    ${noteIcon(n)}
+    <div class="n-main">
+      <div class="n-top">${showApp ? `<span class="n-app">${esc(n.app)}</span>` : ""}<b class="n-title">${esc(t.title)}</b>${cnt}<span class="n-time">${esc(ago(n.at))}</span></div>
+      <div class="n-body">${esc(t.body)}</div>
+      ${t.sub ? `<div class="n-sub">${n.kind === "done" ? "✓ " : n.kind === "ask" ? "● " : ""}${esc(t.sub)}</div>` : ""}
+    </div>
+    ${close ? `<button class="n-x" data-nclose="${n.id}" title="关闭" aria-label="关闭">✕</button>` : ""}
+  </div>`;
+}
+
+function renderNote() {
+  if (MANAGER) return;
+  const list = nst.active.map(noteById).filter(Boolean);
+  if (!list.length) { hideNotes(); return; }
+  const el = $("note");
+  nst.fan = nst.hover && list.length > 1;
+  el.innerHTML = nst.fan
+    ? `<div class="nfan">${list.slice(0, 4).map((n) => noteCardHtml(n, true)).join("")}${list.length > 4 ? `<div class="n-more">还有 ${list.length - 4} 条，在通知页里</div>` : ""}</div>`
+    : noteCardHtml(list[0], nst.hover);
+  el.style.width = Math.min(window.innerWidth - 16, NOTE_W) + "px";
+  nst.h = Math.ceil(el.offsetHeight);
+  const behind = nst.fan ? 0 : Math.min(2, list.length - 1);
+  $("note-tail").className = behind ? `n${behind}` : "";
+  $("note-tail").innerHTML = "<i></i><i></i>";
+  applySize();
+}
+
+function showNote(id) {
+  if (MANAGER || expanded || editing || fling.active) return;
+  nst.active = [id, ...nst.active.filter((x) => x !== id)].slice(0, 12);
+  if (!nst.on) {
+    nst.on = true;
+    island.classList.add("noting");
+    invoke("note_mode", { on: true }).catch(() => {});
+  }
+  // a small spring for every new note
+  island.classList.remove("n-pop");
+  void island.offsetWidth;
+  island.classList.add("n-pop");
+  renderNote();
+  armNoteTimer();
+}
+
+function armNoteTimer(ms) {
+  clearTimeout(nst.timer);
+  if (nst.hover) return;
+  nst.timer = setTimeout(hideNotes, ms ?? Math.min(30, Math.max(2, Number(sget("notify.duration", 5)) || 5)) * 1000);
+}
+
+function hideNotes() {
+  clearTimeout(nst.timer);
+  nst.active = [];
+  nst.hover = false;
+  nst.fan = false;
+  if (!nst.on) return;
+  nst.on = false;
+  island.classList.remove("noting", "n-pop");
+  $("note-tail").className = "";
+  invoke("note_mode", { on: false }).catch(() => {});
+  setTimeout(() => { if (!nst.on) $("note").innerHTML = ""; }, 450);
+  if (!expanded) applySize();
+}
+
+// the edges of the cards behind the front one, just outside the island (top / bottom dock)
+function placeTail(r) {
+  const t = $("note-tail");
+  if (MANAGER || !t) return;
+  if (!nst.on || expanded || r.vertical || nst.fan || !t.className) { t.style.display = "none"; return; }
+  const n = t.classList.contains("n2") ? 2 : 1;
+  t.style.display = r.dock === "bottom" ? "flex" : "block";
+  t.style.left = r.x + "px";
+  t.style.width = r.w + "px";
+  t.style.top = (r.dock === "bottom" ? r.y - n * 7 : r.y + r.h) + "px";
+  t.classList.toggle("up", r.dock === "bottom");
+}
+
+function readNotes(ids) {
+  notes.forEach((n) => { if (ids.includes(n.id)) n.read = true; });
+  invoke("notify_read", { ids }).catch(() => {});
+}
+
+function openNote(id) {
+  const n = noteById(id);
+  if (n) n.read = true;
+  invoke("notify_open", { id }).catch((e) => toast(String(e), true));
+  afterNotesChange();
+}
+
+function afterNotesChange() {
+  renderPill();
+  if (!MANAGER) renderPages();
+  const c = $("tab-notes");
+  if (c) {
+    const u = unreadCount();
+    c.textContent = u ? String(u) : "";
+    c.parentElement?.classList.toggle("has", u > 0);
+  }
+  if (tab === "notes") renderList(true);
+}
+
+if (!MANAGER) {
+  const el = $("note");
+  el.addEventListener("mouseenter", () => { nst.hover = true; clearTimeout(nst.timer); renderNote(); });
+  el.addEventListener("mouseleave", () => { nst.hover = false; if (nst.on) { renderNote(); armNoteTimer(2500); } });
+  el.addEventListener("click", (e) => {
+    const x = e.target.closest("[data-nclose]");
+    const c = e.target.closest("[data-nid]");
+    const id = Number((x || c)?.dataset[x ? "nclose" : "nid"]);
+    if (!id) return;
+    if (x) readNotes([id]);
+    else openNote(id);
+    nst.active = nst.active.filter((i) => i !== id);
+    renderNote();
+    afterNotesChange();
+  });
+}
+
+listen("note", (e) => {
+  const n = e.payload;
+  if (!n) return;
+  notes = [n, ...notes.filter((x) => x.id !== n.id)].slice(0, 300);
+  if (!n.silent) showNote(n.id);
+  afterNotesChange();
+});
+listen("notes-read", (e) => {
+  const key = e.payload;
+  notes.forEach((n) => { if (n.key === key) n.read = true; });
+  if (nst.on) {
+    nst.active = nst.active.filter((id) => noteById(id)?.key !== key);
+    renderNote();
+  }
+  afterNotesChange();
+});
+invoke("notify_list").then((l) => { notes = l || []; afterNotesChange(); }).catch(() => {});
+
+// notification centre (a page of the island and of the manager window)
+const ncOpen = new Set();
+let notifyInfo = null; // { port, quiet, hooks }
+let notifyApps = null;
+let hookConfirm = null;
+let notifyInfoAt = 0;
+function loadNotifyInfo() {
+  notifyInfoAt = Date.now();
+  invoke("notify_hooks").then((i) => { notifyInfo = i; if (tab === "settings" || tab === "notes") renderList(true); }).catch(() => {});
+  invoke("notify_apps").then((a) => { notifyApps = a || []; if (tab === "settings") renderList(true); }).catch(() => {});
+}
+
+function notesPageHtml() {
+  if (!notifyInfo) loadNotifyInfo();
+  if (!sget("notify.on", true)) return `<div class="empty">通知已关闭（设置 → 通知）</div>`;
+  const unread = unreadCount();
+  const head = `<div class="viz-head"><span class="viz-sel">${notes.length ? `今天 ${notes.length} 条${unread ? ` · ${unread} 条未读` : ""}` : "通知"}</span>
+    ${notifyInfo?.quiet ? `<span class="tag">勿扰中：只收进这里，不在岛上弹出</span>` : ""}<span class="sp"></span>
+    ${notes.length ? `${unread ? `<button class="ghost" data-do="notes-read">全部已读</button>` : ""}<button class="ghost" data-do="notes-clear">全部清除</button>` : ""}</div>`;
+  if (!notes.length) {
+    return `<div class="viz">${head}<div class="nc-empty">
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="${BELL}"/></svg>
+      <div class="nc-e1">没有通知</div>
+      <div class="m-hint">微信、Telegram、邮件等程序的提醒，Claude Code / Codex 完成任务或等你确认时，会在岛上弹出并收在这里。<br>设置 → 通知 里可以发一条测试通知看看样子。</div></div></div>`;
+  }
+  const groups = new Map();
+  for (const n of notes) {
+    if (!groups.has(n.key)) groups.set(n.key, []);
+    groups.get(n.key).push(n);
+  }
+  const body = [...groups.entries()].map(([key, list]) => {
+    const open = ncOpen.has(key) || list.length === 1;
+    const cards = open
+      ? list.slice(0, 40).map((n) => noteCardHtml(n)).join("")
+      : noteCardHtml(list[0]) + `<div class="ng-edges n${Math.min(2, list.length - 1)}"><i></i><i></i></div>`;
+    return `<div class="ng ${open ? "open" : "stacked"}">
+      <div class="ng-head"><span class="ng-app">${esc(list[0].app)}</span>${list.length > 1 ? `<span class="ng-n mono">${list.length}</span>` : ""}<span class="sp"></span>
+        ${list.length > 1 ? `<button class="link" data-ngtoggle="${esc(key)}">${open ? "收起" : "展开"}</button>` : ""}
+        <button class="ng-x" data-ngclear="${esc(key)}" title="清除这一组" aria-label="清除这一组">✕</button></div>
+      <div class="ng-cards" ${open ? "" : `data-ngtoggle="${esc(key)}"`}>${cards}</div></div>`;
+  }).join("");
+  return `<div class="viz nc">${head}${body}
+    <div class="m-hint">点一条打开对应的程序。通知只在内存里，重启 MicaBar 后清空；消息内容不写硬盘、不写日志。</div></div>`;
+}
+
+function notesClick(e) {
+  const tg = e.target.closest("[data-ngtoggle]");
+  if (tg && (tg.tagName === "BUTTON" || !e.target.closest("button"))) {
+    const k = tg.dataset.ngtoggle;
+    if (ncOpen.has(k)) ncOpen.delete(k);
+    else ncOpen.add(k);
+    renderList(true);
+    return true;
+  }
+  const cl = e.target.closest("[data-ngclear]");
+  if (cl) {
+    const ids = notes.filter((n) => n.key === cl.dataset.ngclear).map((n) => n.id);
+    notes = notes.filter((n) => !ids.includes(n.id));
+    invoke("notify_dismiss", { ids }).catch(() => {});
+    afterNotesChange();
+    return true;
+  }
+  const c = e.target.closest("#list [data-nid]");
+  if (c) {
+    openNote(Number(c.dataset.nid));
+    return true;
+  }
+  return false;
+}
 
 // ---------- panel ----------
 
@@ -1631,8 +1890,9 @@ const PAGE_DEFS = {
   sys: ["系统监控", "M6 20V12M10 20V6M14 20V10M18 20V4"],
   music: ["音乐", "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
   ai: ["AI 额度", "M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5"],
+  notes: ["通知", "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
 };
-const PAGE_TABS = new Set(["sys", "music", "ai"]);
+const PAGE_TABS = new Set(["sys", "music", "ai", "notes"]);
 let netTab = "conns";
 
 function visiblePages() {
@@ -1650,8 +1910,9 @@ function renderPages() {
   island.dataset.page = curPage();
   const html = pages.length > 1 ? pages.map((id) => {
     const [label, d] = PAGE_DEFS[id];
+    const dot = id === "notes" && unreadCount() ? `<i class="pg-dot"></i>` : "";
     return `<button class="pg ${id === curPage() ? "active" : ""}" data-page="${id}" title="${label}" aria-label="${label}" role="tab" aria-selected="${id === curPage()}">
-      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg></button>`;
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>${dot}</button>`;
   }).join("") : "";
   if ($("pages").innerHTML !== html) $("pages").innerHTML = html;
 }
@@ -1791,7 +2052,47 @@ const PILL_ITEM_LABEL = {
   media: "正在播放的歌（播放时）", leaks: "泄漏数（有泄漏时才显示）", conns: "连接数", latency: "节点延迟",
   cpu: "CPU 占用", mem: "内存占用", clock: "时钟", exit: "主出口 IP（只显示一个）",
   rotate: "轮换区（下面勾选的内容轮流显示）",
+  notes: "未读通知数（有未读时才显示）",
 };
+
+const HOURS = Array.from({ length: 24 }, (_, h) => [h, `${String(h).padStart(2, "0")}:00`]);
+const SRC_LABEL = { toast: "系统通知", flash: "任务栏闪烁", ai: "AI 钩子", test: "测试" };
+
+function notifySettingsHtml() {
+  // the tools' configs can change outside MicaBar: re-read when the page is built again later
+  if (!notifyInfo || !notifyApps || Date.now() - notifyInfoAt > 10_000) loadNotifyInfo();
+  const hooks = (notifyInfo?.hooks || []).map((h) => {
+    const state = !h.found ? `没找到 ${esc(h.name)} 的配置文件夹` : h.installed ? "已接入：完成任务、等你确认时会通知" : h.conflict ? "已有别的 notify 设置，MicaBar 不覆盖" : "未接入";
+    const btn = !h.found || (h.conflict && !h.installed) ? ""
+      : h.installed ? `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="0">移除</button>`
+        : hookConfirm === h.tool ? `<button class="primary" data-do="hook" data-tool="${h.tool}" data-on="1">确认：修改 ${esc(h.path.replace(/^.*\\(\.[^\\]+\\[^\\]+)$/, "~\\$1"))}（先自动备份）</button>`
+          : `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="1">接入</button>`;
+    return `<div class="s-row"><span class="s-label">${esc(h.name)}<span class="s-note">${state}</span></span>${btn}</div>`;
+  }).join("");
+  const apps = (notifyApps || []).filter((a) => a.source !== "test").map((a) => {
+    const cfg = sget("notify.apps", {})?.[a.key] || {};
+    const icon = a.iconUrl ? `<img class="app-icon" src="${a.iconUrl}" alt="">` : iconHtml({ path: a.icon, name: a.app });
+    return `<div class="na-row">${icon}<span class="na-name" title="${esc(a.key)}">${esc(a.app)}</span><span class="na-src">${SRC_LABEL[a.source] || ""} · ${a.count} 条</span>
+      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="island" ${cfg.island !== false ? "checked" : ""}> 岛上弹出</label>
+      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="mute" ${cfg.mute ? "checked" : ""}> 静音</label>
+      ${a.source === "toast" ? `<label title="关掉 Windows 自己右下角的弹窗，只在岛上显示（随时可以还原）"><input type="checkbox" data-ntake="${esc(a.key)}" ${a.takeover ? "checked" : ""}> 接管弹窗</label>` : "<span></span>"}</div>`;
+  }).join("");
+  return `<div class="s-sec"><div class="s-title">通知<span class="s-note">其他程序的提醒在岛上弹出，收进「通知」页；内容只在内存里</span></div>
+    ${sToggle("notify.on", "在岛上显示通知")}
+    ${sNumber("notify.duration", "　每次停留", 2, 30, 1, "秒", "鼠标放在通知上时一直停着；同时来几条会叠起来，放上去就展开")}
+    ${sSelect("notify.privacy", "　显示内容", [["smart", "平时全文；全屏、录屏时只显示来源"], ["source", "只显示是哪个程序、谁发的"], ["full", "始终显示全文"]])}
+    ${sToggle("notify.followDnd", "　跟随 Windows 勿扰", "Windows 开着勿扰 / 专注时，通知只收进通知页，不在岛上弹出")}
+    ${sToggle("notify.quiet.on", "　免打扰时段")}
+    ${sget("notify.quiet.on", false) ? `${sSelect("notify.quiet.from", "　　从", HOURS)}${sSelect("notify.quiet.to", "　　到", HOURS)}` : ""}
+    ${sToggle("notify.toast", "　读取系统通知", "Telegram、邮件、浏览器等弹出 Windows 通知的程序，能显示发送人和内容")}
+    ${sToggle("notify.flash", "　任务栏闪烁提醒", "微信 4.x 来消息只闪任务栏、不发系统通知，所以只能显示「微信 · N 条新消息」，看不到内容")}
+    <div class="m-actions end"><button class="ghost" data-do="notify-test">发一条测试通知</button></div>
+    <div class="s-sub">AI 完成提醒<span class="s-note">往工具自己的配置里加一个钩子，任务完成或等你批准时通知本机 127.0.0.1:${notifyInfo?.port ?? 47900}（带随机口令）</span></div>
+    ${hooks || `<div class="s-note">正在读取…</div>`}
+    <div class="s-sub">各个程序<span class="s-note">发过通知的程序会出现在这里</span></div>
+    ${apps ? `<div class="na-list">${apps}</div>` : `<div class="s-note">还没有收到过通知</div>`}
+  </div>`;
+}
 const PAGE_LABEL = Object.fromEntries(Object.entries(PAGE_DEFS).map(([k, v]) => [k, v[0]]));
 const RING_MODES = [["both", "两圈：外圈短周期，内圈长周期"], ["first", "只看短周期（如 5 小时）"], ["second", "只看长周期（如每周）"], ["max", "用得最多的那个"]];
 
@@ -1954,6 +2255,7 @@ function settingsHtml() {
     ${sColor("ai.ring.colors.crit", "　警告")}
     <div class="m-actions end"><button class="ghost" data-do="ring-reset">恢复默认颜色和阈值</button></div>
   </div>
+  ${notifySettingsHtml()}
   <div class="s-sec"><div class="s-title">展开后的页面<span class="s-note">岛顶部的图标切换；勾选显示，箭头调顺序，会记住上次停在哪一页</span></div>
     ${sOrderList("panel.pages", PAGE_LABEL)}
   </div>
@@ -2083,6 +2385,13 @@ $("list").addEventListener("change", (e) => {
   } else if (el.dataset.ol) {
     const list = (sget(el.dataset.ol, []) || []).map((i) => (i.id === el.dataset.id ? { ...i, on: el.checked } : i));
     setPath(el.dataset.ol, list);
+  } else if (el.dataset.napp) {
+    // app keys can contain dots (toast ids): patch the object directly
+    invoke("settings_set", { patch: { notify: { apps: { [el.dataset.napp]: { [el.dataset.f]: el.checked } } } } }).catch((err) => toast(String(err), true));
+  } else if (el.dataset.ntake) {
+    invoke("notify_takeover", { key: el.dataset.ntake, on: el.checked })
+      .then(() => { toast(el.checked ? "已关掉这个程序的 Windows 弹窗，只在岛上显示" : "已还原这个程序的 Windows 弹窗"); loadNotifyInfo(); })
+      .catch((err) => { toast(String(err), true); loadNotifyInfo(); });
   } else if (el.dataset.grp != null) {
     const cur = new Set(sget("exit.groups", []) || []);
     if (el.checked) cur.add(el.dataset.grp);
@@ -2293,9 +2602,9 @@ function renderList(force = false) {
   if (list.contains(document.activeElement) && ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
   const rows = [];
   refs = [];
-  if (tab === "speed" || tab === "traffic" || tab === "nodes" || tab === "home" || tab === "ai") {
+  if (tab === "speed" || tab === "traffic" || tab === "nodes" || tab === "home" || tab === "ai" || tab === "notes") {
     const scroll = list.scrollTop;
-    const html = { speed: speedTabHtml, traffic: trafficTabHtml, nodes: nodesTabHtml, home: homeHtml, ai: aiTabHtml }[tab]();
+    const html = { speed: speedTabHtml, traffic: trafficTabHtml, nodes: nodesTabHtml, home: homeHtml, ai: aiTabHtml, notes: notesPageHtml }[tab]();
     list.innerHTML = `<div id="list-inner">${html}</div>`;
     list.scrollTop = scroll;
     Charts.restore(list);
@@ -2373,6 +2682,11 @@ function renderPanel() {
   setCount("rules", ctrl().rules.length);
   setCount("guard", snap?.guard?.unacked || 0);
   $("tab-guard")?.parentElement.classList.toggle("hot", !!snap?.guard?.unacked);
+  if ($("tab-notes")) {
+    const u = unreadCount();
+    setCount("notes", u ? u : "");
+    $("tab-notes").parentElement.classList.toggle("has", u > 0);
+  }
   $("gear").classList.toggle("active", tab === "settings");
   $("total-speed").innerHTML = snap && (snap.speedOk || snap.up || snap.down) ? speedHtml(snap.up, snap.down) : "";
   renderList();
@@ -2428,6 +2742,35 @@ async function runAction(el) {
         await invoke("control_disable");
         toast("出口控制已停用（规则保留，重新启用即可恢复）");
       }
+    } else if (act === "notify-test") {
+      await invoke("notify_test");
+      if (MANAGER || expanded) toast("测试通知已发出：收起面板时会在岛上弹出，也在通知页里");
+      return;
+    } else if (act === "hook") {
+      // changes the tool's own config file: one more click to confirm
+      const tool = el.dataset.tool;
+      const on = el.dataset.on === "1";
+      if (on && hookConfirm !== tool) {
+        hookConfirm = tool;
+        setTimeout(() => { if (hookConfirm === tool) { hookConfirm = null; renderList(true); } }, 6000);
+        renderList(true);
+        return;
+      }
+      hookConfirm = null;
+      toast(await invoke("notify_hook", { tool, on }));
+      loadNotifyInfo();
+      return;
+    } else if (act === "notes-clear") {
+      notes = [];
+      ncOpen.clear();
+      await invoke("notify_dismiss", { ids: [] });
+      hideNotes();
+      afterNotesChange();
+      return;
+    } else if (act === "notes-read") {
+      readNotes(notes.map((n) => n.id));
+      afterNotesChange();
+      return;
     } else if (act === "update-check") {
       toast("正在检查更新…");
       updateInfo = await invoke("update_check");
@@ -2562,6 +2905,7 @@ async function applyRule(spec) {
 }
 
 $("panel").addEventListener("click", (e) => {
+  if (tab === "notes" && !e.target.closest("[data-do]") && notesClick(e)) return;
   const inMenu = e.target.closest("#menu");
   const go = e.target.closest("#list [data-tab]");
   if (go && !e.target.closest("[data-do]")) {
@@ -2759,6 +3103,7 @@ const NAV = [
   ["nodes", "节点", "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 8v4l3 2"],
   ["sys", "系统监控", "M6 20V12M10 20V6M14 20V10M18 20V4"],
   ["ai", "AI 额度", "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"],
+  ["notes", "通知", "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
   ["settings", "设置", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4L7 17M17 17l1.4 1.4M5.6 5.6L7 7"],
 ];
 
@@ -2773,7 +3118,7 @@ function renderTabs() {
   const tabs = visibleTabs();
   if (MANAGER) {
     if (!tabs.includes(tab)) tab = "home";
-    const counts = { conns: true, guard: true };
+    const counts = { conns: true, guard: true, notes: true };
     $("tabs").innerHTML = NAV.map(([id, label, d]) => `<button class="tab nav ${id === tab ? "active" : ""}" data-tab="${id}">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>
       <span>${label}</span>${counts[id] ? `<span id="tab-${id}" class="mono nav-count">0</span>` : ""}</button>`).join("");
@@ -3324,7 +3669,11 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
   }
 });
-listen("game", (e) => island.classList.toggle("game", !!e.payload));
+listen("game", (e) => {
+  gameOn = !!e.payload;
+  island.classList.toggle("game", gameOn);
+  if (nst.on) renderNote(); // privacy: hide / show the text
+});
 // cursor resting on the collapsed (click-through) pill: let the window below show through
 listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded));
 

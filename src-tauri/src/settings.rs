@@ -64,7 +64,8 @@ pub fn defaults() -> Value {
                 { "id": "mem", "on": false },
                 { "id": "clock", "on": false },
                 { "id": "exit", "on": false },
-                { "id": "rotate", "on": false }
+                { "id": "rotate", "on": false },
+                { "id": "notes", "on": true }
             ],
             // simple | digital | serif
             "clockStyle": "simple",
@@ -145,14 +146,33 @@ pub fn defaults() -> Value {
                 { "id": "net", "on": true },
                 { "id": "sys", "on": true },
                 { "id": "music", "on": true },
-                { "id": "ai", "on": true }
+                { "id": "ai", "on": true },
+                { "id": "notes", "on": true }
             ]
+        },
+        "notify": {
+            "on": true,
+            // sources: Windows toasts (notification database), taskbar flashes (WeChat…)
+            "toast": true,
+            "flash": true,
+            // seconds a card stays in the island (longer while the cursor is on it)
+            "duration": 5,
+            // smart (text hidden while fullscreen / recording) | source (app + sender only) | full
+            "privacy": "smart",
+            "followDnd": true,
+            "quiet": { "on": false, "from": 23, "to": 8 },
+            // local endpoint for the Claude Code / Codex hooks
+            "port": 47900,
+            // per app key: { "island": bool, "mute": bool }
+            "apps": {}
         },
         "meta": {
             // 2 = big pill with items side by side (0.2.4)
             "pillV": 2,
             // 1 = Antigravity ring shows 5 h + weekly of its busier model group (0.2.6)
-            "ringV": 1
+            "ringV": 1,
+            // 1 = notifications: the page and the pill's unread count switched on once
+            "notifyV": 1
         },
         "appearance": {
             // auto | glass-dark | glass-light | <preset id> | custom
@@ -229,7 +249,22 @@ fn store() -> &'static Mutex<Value> {
         let fresh = v.as_object().map(|o| o.is_empty()).unwrap_or(true);
         let old_pill = v.pointer("/meta/pillV").and_then(|x| x.as_u64()).unwrap_or(0) < 2;
         let old_ring = v.pointer("/meta/ringV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
+        let old_notify = v.pointer("/meta/notifyV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
         fill(&mut v, &defaults());
+        if old_notify && !fresh {
+            // new lists items arrive switched off; the notification page and count start on
+            for (list, id) in [("/panel/pages", "notes"), ("/pill/items", "notes")] {
+                if let Some(a) = v.pointer_mut(list).and_then(|x| x.as_array_mut()) {
+                    for i in a.iter_mut().filter(|i| i.get("id").and_then(|x| x.as_str()) == Some(id)) {
+                        i["on"] = json!(true);
+                    }
+                }
+            }
+            v["meta"]["notifyV"] = json!(1);
+            if let Ok(t) = serde_json::to_string_pretty(&v) {
+                let _ = std::fs::write(path(), t);
+            }
+        }
         if old_ring && !fresh {
             // 0.2.6: Antigravity now reports 5-hour + weekly pools; "max" was the old default
             if v.pointer("/ai/ring/mode/antigravity").and_then(|x| x.as_str()) == Some("max") {

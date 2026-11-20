@@ -56,6 +56,9 @@ pub struct WinState {
     pub grab: AtomicBool,
     /// After a grab: don't reopen until the cursor has left the pill.
     pub disarm: AtomicBool,
+    /// A notification card is showing: the cursor on it holds it (and clicks reach it) instead
+    /// of opening the panel.
+    pub noting: AtomicBool,
     pub hwnd: AtomicIsize,
 }
 
@@ -484,6 +487,13 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             if expanded {
                 set_expanded(&mut h, false, "esc");
             }
+        } else if !expanded && ws.noting.load(Ordering::SeqCst) {
+            // a notification card: the page handles hover / clicks on it; it never opens the panel,
+            // and after it the cursor has to leave before the pill opens
+            h.dwell = None;
+            if inside {
+                h.armed = false;
+            }
         } else if !expanded {
             if passthrough {
                 // only the hotkey opens the island
@@ -533,7 +543,8 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         // Collapsed in hover mode the pill is "hollow": opening only needs the cursor position
         // (polled above), so clicks always go to whatever is under it (a browser tab…).
         // Click-to-open needs the press itself; game / pass-through never capture.
-        if !expanded && (game || passthrough || !click_mode) {
+        let noting = !expanded && ws.noting.load(Ordering::SeqCst);
+        if !expanded && (game || passthrough || !click_mode) && !(noting && !game) {
             capture = false;
         }
         // Alt over the collapsed pill makes it solid, so a long press grabs it (not the window below)
@@ -541,7 +552,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             capture = true;
         }
         // see-through while the cursor rests on the collapsed pill (hover mode)
-        let peek = !expanded && inside && !alt && !click_mode && !passthrough && !game && crate::settings::bool_at("interaction.peek", true);
+        let peek = !expanded && !noting && inside && !alt && !click_mode && !passthrough && !game && crate::settings::bool_at("interaction.peek", true);
         if peek != h.peek {
             h.peek = peek;
             let _ = app.emit("peek", peek);

@@ -12,7 +12,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["time"] }
@@ -20,6 +20,7 @@ tauri-winrt-notification = "0.8"
 tauri-plugin-updater = "2"
 ferrisetw = "1.2"
 maxminddb = "0.24"
+rusqlite = { version = "0.32", features = ["bundled"] }
 png = "0.17"
 base64 = "0.22"
 winreg = "0.55"

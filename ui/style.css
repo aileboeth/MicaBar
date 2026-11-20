@@ -1045,3 +1045,100 @@ body[data-mode="manager"] .su-list { max-height: none; overflow: visible; }
 .t-pick { margin-top: 2px; }
 .t-apphead { flex-wrap: wrap; margin-top: 8px; }
 .t-apphead .segctl button { font-size: 11.5px; padding: 2px 8px; }
+
+/* ---------- notifications ---------- */
+/* card in the island: the pill springs into it; the island's glass is its background */
+#note { position: absolute; left: 0; top: 0; width: 400px; z-index: 2; opacity: 0; pointer-events: none; transition: opacity 0.16s ease; }
+#island.noting:not(.expanded) #note { opacity: 1; pointer-events: auto; transition-delay: 0.07s; }
+#island.noting:not(.expanded) #pill { opacity: 0; pointer-events: none; }
+#island.noting { opacity: 1 !important; }
+#island.n-pop { animation: n-pop 0.5s var(--spring); }
+@keyframes n-pop { 0% { transform: scale(0.97); } 55% { transform: scale(1.012); } 100% { transform: none; } }
+html.no-anim #island.n-pop { animation: none; }
+
+.ncard {
+  position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr); column-gap: 11px; align-items: start;
+  padding: 11px 16px 12px 12px; font-family: var(--font-ui);
+}
+.n-ico { position: relative; width: 40px; height: 40px; }
+.n-ico > .app-icon, .n-ico > .n-appimg { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; }
+.n-ico > .app-icon.letter, .n-badge > .app-icon.letter { display: grid; place-items: center; font-size: 17px; font-weight: 600; color: #fff; background: linear-gradient(160deg, #8e8e93, #5a5a60); }
+.n-glyph.g-claude { background: linear-gradient(160deg, #e8875f, #c4562f) !important; font-size: 20px !important; }
+.n-glyph.g-codex { background: linear-gradient(160deg, #3a3a40, #121214) !important; }
+.n-glyph.g-test-0 { background: linear-gradient(160deg, #3fd26b, #13a84a) !important; }
+.n-glyph.g-test-1 { background: linear-gradient(160deg, #e8875f, #c4562f) !important; }
+.n-glyph.g-test-2 { background: linear-gradient(160deg, #3fb6f2, #1c8fd6) !important; }
+/* sender picture, the app as a small badge at its corner (like iOS message notifications) */
+.n-av { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; display: block; }
+.n-badge { position: absolute; right: -4px; bottom: -4px; width: 19px; height: 19px; border-radius: 6px; overflow: hidden; box-shadow: 0 0 0 2px rgba(var(--tint-rgb), 0.9); }
+.n-badge > * { width: 19px !important; height: 19px !important; border-radius: 6px !important; font-size: 10px !important; }
+.n-main { min-width: 0; }
+.n-top { display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 1.3; }
+.n-app { font-size: 11.5px; color: var(--dim); flex: none; letter-spacing: 0.01em; }
+.n-app::after { content: "·"; margin-left: 6px; color: var(--dimmer); }
+.n-title { font-size: 13.5px; font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.n-cnt { flex: none; font-size: 10.5px; font-weight: 600; color: var(--dim); background: var(--ov2); border-radius: 8px; padding: 0 6px; line-height: 16px; }
+.n-time { margin-left: auto; flex: none; padding-left: 8px; font-size: 11px; color: var(--dimmer); }
+.n-body {
+  margin-top: 2px; font-size: 13px; line-height: 1.38; color: var(--text); opacity: 0.88;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere;
+}
+.n-sub { margin-top: 3px; font-size: 11.5px; color: var(--dim); }
+.ncard.k-done .n-sub { color: var(--green); }
+.ncard.k-ask .n-sub { color: var(--amber); }
+.n-x {
+  position: absolute; top: 9px; right: 9px; width: 20px; height: 20px; border-radius: 50%; border: none; padding: 0;
+  background: var(--ov3); color: var(--dim); font-size: 10px; line-height: 20px; cursor: pointer; opacity: 0; transition: opacity 0.15s ease;
+}
+.ncard:hover .n-x { opacity: 1; }
+.ncard:hover .n-time { visibility: hidden; }
+#note .ncard { cursor: pointer; }
+.nfan .ncard + .ncard { border-top: 1px solid var(--line); }
+.n-more { padding: 6px 16px 10px 63px; font-size: 11.5px; color: var(--dim); }
+/* the cards behind the front one: thin edges just outside the island */
+#note-tail { position: absolute; display: none; pointer-events: none; z-index: 0;
+  transition: left 0.42s var(--spring), top 0.42s var(--spring), width 0.42s var(--spring); }
+#note-tail i { display: block; height: 7px; margin: 0 auto; border-radius: 0 0 13px 13px;
+  background: rgba(var(--tint-rgb), 0.78); box-shadow: 0 6px 14px var(--shadow), inset 0 -1px 0 var(--rim); }
+#note-tail i:nth-child(1) { width: calc(100% - 22px); }
+#note-tail i:nth-child(2) { width: calc(100% - 48px); opacity: 0.75; }
+#note-tail.n1 i:nth-child(2) { display: none; }
+#note-tail.up { display: flex; flex-direction: column-reverse; }
+#note-tail.up i { border-radius: 13px 13px 0 0; }
+
+/* pill: unread count; page bar: a dot on the bell */
+.pill-bell { display: inline-flex; align-items: center; gap: 4px; color: var(--text); }
+.pill-bell svg { color: var(--dim); }
+.pg { position: relative; }
+.pg-dot { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 1.5px rgba(var(--tint-rgb), 0.9); }
+
+/* notification centre: one group per app, stacked like iOS until opened */
+.nc .ng { margin-top: 10px; }
+.ng-head { display: flex; align-items: center; gap: 8px; padding: 0 6px 6px; font-size: 12.5px; color: var(--dim); }
+.ng-app { font-weight: 600; color: var(--text); }
+.ng-n { font-size: 11px; color: var(--dim); background: var(--ov2); border-radius: 8px; padding: 0 6px; line-height: 16px; }
+.ng-x { border: none; background: var(--ov2); color: var(--dim); width: 20px; height: 20px; border-radius: 50%; font-size: 10px; cursor: pointer; padding: 0; }
+.ng-x:hover { color: var(--text); background: var(--ov3); }
+.ng-cards .ncard { background: var(--card); border-radius: 16px; margin-bottom: 6px; cursor: pointer; transition: background 0.15s ease; }
+.ng-cards .ncard:hover { background: var(--card-2); }
+.ng-cards .ncard.read .n-title, .ng-cards .ncard.read .n-body { opacity: 0.6; }
+.ng.stacked .ng-cards { cursor: pointer; }
+.ng.stacked .ng-cards .ncard { margin-bottom: 0; position: relative; z-index: 1; }
+.ng-edges i { display: block; height: 7px; margin: 0 auto; border-radius: 0 0 12px 12px; background: var(--card); }
+.ng-edges i:nth-child(1) { width: calc(100% - 20px); }
+.ng-edges i:nth-child(2) { width: calc(100% - 44px); opacity: 0.7; }
+.ng-edges.n1 i:nth-child(2) { display: none; }
+.nc-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 20px 30px; color: var(--dimmer); text-align: center; }
+.nc-e1 { font-size: 15px; font-weight: 600; color: var(--dim); }
+
+/* settings: AI hooks, per-app list */
+.s-sub { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 600; margin: 12px 0 2px; }
+.s-sub .s-note { font-weight: 400; }
+.na-list { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
+.na-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto auto auto auto; align-items: center; gap: 10px; font-size: 12.5px; padding: 4px 2px; border-top: 1px solid var(--line); }
+.na-row:first-child { border-top: none; }
+.na-row .app-icon { width: 20px; height: 20px; }
+.na-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.na-src { color: var(--dimmer); font-size: 11.5px; white-space: nowrap; }
+.na-row label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--dim); }
+.tab.nav.has .nav-count { color: var(--blue); font-weight: 600; }

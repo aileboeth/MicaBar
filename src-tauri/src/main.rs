@@ -12,6 +12,7 @@ mod guard;
 mod icon;
 mod media;
 mod mihomo;
+mod notify;
 mod procinfo;
 mod proxy;
 mod settings;
@@ -1633,6 +1634,76 @@ async fn update_install(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) ->
     app.restart();
 }
 
+// ---------- notifications ----------
+
+#[tauri::command]
+fn notify_list() -> Vec<notify::Note> {
+    notify::list()
+}
+
+#[tauri::command]
+fn notify_open(id: u64) -> Result<(), String> {
+    notify::open(id)
+}
+
+/// Removes notes from the centre (all when `ids` is empty).
+#[tauri::command]
+fn notify_dismiss(ids: Vec<u64>) {
+    notify::dismiss(&ids);
+}
+
+#[tauri::command]
+fn notify_read(ids: Vec<u64>) {
+    notify::mark_read(&ids);
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotifyApp {
+    #[serde(flatten)]
+    seen: notify::AppSeen,
+    takeover: bool,
+}
+
+#[tauri::command]
+fn notify_apps() -> Vec<NotifyApp> {
+    notify::apps().into_iter().map(|a| NotifyApp { takeover: a.source == "toast" && notify::takeover_on(&a.key), seen: a }).collect()
+}
+
+#[tauri::command]
+fn notify_takeover(key: String, on: bool) -> Result<(), String> {
+    notify::set_takeover(&key, on)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotifyHooks {
+    port: u16,
+    quiet: bool,
+    hooks: Vec<notify::HookStatus>,
+}
+
+#[tauri::command]
+fn notify_hooks() -> NotifyHooks {
+    NotifyHooks { port: notify::port(), quiet: notify::quiet_now(), hooks: notify::hooks_status() }
+}
+
+#[tauri::command]
+fn notify_hook(tool: String, on: bool) -> Result<String, String> {
+    notify::set_hook(&tool, on)
+}
+
+#[tauri::command]
+fn notify_test() {
+    notify::test();
+}
+
+/// The page shows (true) or hid (false) a notification card in the collapsed island.
+#[tauri::command]
+fn note_mode(state: tauri::State<'_, Arc<Shared>>, on: bool) {
+    state.ws.noting.store(on, Ordering::SeqCst);
+}
+
 #[tauri::command]
 fn open_url(url: String) {
     if url.starts_with("https://") || std::path::Path::new(&url).is_dir() {
@@ -2377,6 +2448,16 @@ fn main() {
             media_get,
             media_control,
             open_manager,
+            notify_list,
+            notify_open,
+            notify_dismiss,
+            notify_read,
+            notify_apps,
+            notify_takeover,
+            notify_hooks,
+            notify_hook,
+            notify_test,
+            note_mode,
             layout_edit,
             grab_start,
             grab_end,
@@ -2457,6 +2538,7 @@ fn main() {
                 log(format!("tray sweep: {} toolbar(s)", system::sweep_tray()));
             });
             ai_loop(handle.clone(), shared.clone());
+            notify::start(handle.clone());
             let h_media = handle.clone();
             media::start(shared.media.clone(), move |np| {
                 let _ = h_media.emit("media", np);
