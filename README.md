@@ -12,9 +12,13 @@ node — and decide right there whether it goes through the proxy or direct.
   what rotates and how fast is configurable.
 - **AI quota**: subscription usage (5-hour / weekly windows…) and reset times for Claude Code, Codex, Antigravity
   and Grok.
+- **Notifications**: new messages from WeChat, Telegram, mail and other apps, and Claude Code / Codex finishing a
+  task or waiting for approval show on the island — a small app icon at the pill's end, one line inside the pill, or
+  a card, your choice; a notes page groups them by app. Message text is hidden by default (app + sender only);
+  do-not-disturb, quiet hours, per-app mute and taking over an app's own popups.
 - **Desktop window**: normally only the island and a tray icon; click the tray icon for a desktop window whose home
-  page is an overview (exits, speed, traffic, latency, alerts, now playing, AI quota, busiest programs), with every
-  page and all settings.
+  page is an overview (exits, speed, traffic, latency, alerts, AI quota, busiest programs), with every page and all
+  settings.
 - **Any size**: width and height of the pill and the panel via sliders, or by dragging their edges on screen.
 - **Per-program connections**: icon, process count, live up/down speed, proxied programs first; for every connection the local port →
   domain / IP, country, ISP, node and the rule that matched.
@@ -24,8 +28,8 @@ node — and decide right there whether it goes through the proxy or direct.
 - **Leak alerts**: when a site that should go through the proxy goes direct, the pill turns red and a Windows
   notification appears. Prevention: rule leaks are forced through the proxy; programs that bypass the proxy can be
   blocked from direct connections with one click (Windows Firewall).
-- **Speed / traffic / nodes**: live speed graph, per-program proxy-vs-direct traffic (today, 7 days), node latency
-  and loss.
+- **Speed / traffic / nodes**: live speed graph, per-program proxy-vs-direct traffic (today, 7 or 30 days, click a
+  day for its details), node latency and loss.
 - **Looks and feel**: live frosted glass (white / black, follows the system), colour presets and custom themes;
   capsule / notch / line shapes docked to any screen edge; hover or click to open, pass-through mode, custom
   hotkey, keyboard navigation; stays out of the way of fullscreen games.
@@ -72,6 +76,21 @@ proxy" work together. The override can be removed from the bottom of the "出口
 
 In system-proxy mode only programs that honour the system proxy can be controlled; enable TUN to cover all of them.
 
+### Notifications
+
+Notes come from three places, all read locally:
+
+- **Taskbar flashes**: WeChat 4.x signals a new message only by flashing its taskbar button (no Windows
+  notification, no readable window), so the island can only say "WeChat · N new messages"; clicking opens WeChat.
+  Other apps that flash work the same way.
+- **App-drawn popups / Windows notifications**: with Windows notifications off, Telegram shows its own corner
+  popups; when one appears MicaBar reads Telegram's chat list once (Windows UI Automation) and picks the chats whose
+  new-message count went up. Apps using Windows notifications are read from the system's notification database.
+  "Take over" hides the app's (or Windows') own popup so only the island shows it.
+- **AI tools**: "接入" in the settings adds a hook to Claude Code's `~/.claude/settings.json` or Codex's
+  `~/.codex/config.toml` (backed up first, removable with one click); when a task finishes or needs approval it
+  notifies `127.0.0.1:47900` with `curl` (with a random token).
+
 ### Leak alerts
 
 The "should go through the proxy" library = a built-in list of common services (~140 domains) + the gfw list
@@ -101,8 +120,10 @@ requests MicaBar makes itself:
 Country / ASN lookups use the offline databases shipped with the proxy client (`country.mmdb`, `ASN.mmdb`);
 connection IPs are never sent anywhere. AI quota uses the sign-in each tool keeps on this PC and sends it only to
 that tool's own service; it is never stored, logged or renewed. Now playing reads the Windows media controls and
-makes no network request. The mihomo controller secret is read from its config at runtime and never
-stored or sent.
+makes no network request. Notifications make no network request either: today's notes are kept in memory only,
+message text is never written to disk or the log (and is not shown on the island by default); the loopback port
+`127.0.0.1:47900` only accepts the AI hooks' calls carrying the token. The mihomo controller secret is read from
+its config at runtime and never stored or sent.
 
 ## Build from source
 
