@@ -96,7 +96,7 @@ requests MicaBar makes itself:
 | Node latency | measured by the mihomo core against `www.gstatic.com/generate_204` | every 15–60 s (resource profile) |
 | gfw list | cdn.jsdelivr.net / raw.githubusercontent.com (Loyalsoldier/v2ray-rules-dat) | daily, when enabled |
 | Update check | latest.json of github.com/aileboeth/MicaBar | daily, when enabled |
-| AI quota | api.anthropic.com (Claude Code), chatgpt.com (Codex), cli-chat-proxy.grok.com (Grok), the local Antigravity language server | every 5 min (configurable), when enabled |
+| AI quota | api.anthropic.com (Claude Code), chatgpt.com (Codex), cli-chat-proxy.grok.com (Grok), the local Antigravity language server | every 10 min (configurable), when enabled; always through the proxy client's local port, never direct (no port found = no query) |
 
 Country / ASN lookups use the offline databases shipped with the proxy client (`country.mmdb`, `ASN.mmdb`);
 connection IPs are never sent anywhere. AI quota uses the sign-in each tool keeps on this PC and sends it only to

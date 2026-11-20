@@ -73,7 +73,7 @@ pub fn image_path(pid: u32) -> Option<String> {
     }
 }
 
-fn file_description(path: &str) -> Option<String> {
+pub fn file_description(path: &str) -> Option<String> {
     unsafe {
         let wpath = wide(path);
         let mut dummy = 0u32;

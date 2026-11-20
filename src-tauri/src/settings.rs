@@ -92,6 +92,9 @@ pub fn defaults() -> Value {
             "on": true,
             // minutes between queries (Claude: at least 10)
             "interval": 10,
+            // proxy port the quota queries go through (0 = the proxy client's own port, found
+            // automatically); there is no direct fallback
+            "proxyPort": 0,
             "claude": true,
             "codex": true,
             "antigravity": true,

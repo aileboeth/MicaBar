@@ -943,7 +943,13 @@ body[data-mode="manager"] #gear { display: none; }
 body[data-mode="manager"] .music { max-width: 760px; }
 body[data-mode="manager"] .mu-cover { width: 180px; height: 180px; }
 .sm-meter[hidden], .sm-stat[hidden] { display: none; }
-#pill .pill-speed { font-size: 0.86em; }
+#pill .pill-speed { font-size: 0.86em; white-space: nowrap; }
+/* numbers in the pill keep a fixed slot so changing values never resize the island */
+#pill .sv { display: inline-block; width: 4ch; text-align: right; }
+#pill .pn { display: inline-block; text-align: right; }
+#pill .pn3 { min-width: 3ch; }
+#pill .pn4 { min-width: 4ch; }
+#pill .pn6 { min-width: 6ch; }
 
 /* toolbar never grows taller: tabs stay on one line (scroll sideways if the island is very narrow),
    the search box keeps a usable width; the total speed sits in the page bar with a steady width */
@@ -1001,3 +1007,23 @@ body[data-mode="manager"] .mu-cover { width: 180px; height: 180px; }
 .sm-end { border: none; background: transparent; color: var(--dimmer); width: 22px; height: 22px; border-radius: 6px; cursor: pointer; font-size: 11px; opacity: 0; }
 .sm-app:hover .sm-end, .sm-end:focus-visible { opacity: 1; }
 .sm-end:hover { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+
+/* startup apps: icon, name + where it comes from, on/off switch; the list scrolls on its own */
+.su-list { max-height: 268px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; }
+body[data-mode="manager"] .su-list { max-height: none; overflow: visible; }
+.sm-app.su-row { grid-template-columns: 22px minmax(0, 1fr) 34px; }
+.su-row.off .sm-app-name, .su-row.off .app-icon { opacity: .5; }
+.su-miss { color: var(--amber); }
+.su-sw {
+  appearance: none; width: 30px; height: 17px; margin: 0; border-radius: 9px; position: relative; cursor: pointer;
+  background: var(--ov3); transition: background .15s; justify-self: end;
+}
+.su-sw::after {
+  content: ""; position: absolute; left: 2px; top: 2px; width: 13px; height: 13px; border-radius: 50%;
+  background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+}
+.su-sw:checked { background: var(--blue); }
+.su-sw:checked::after { transform: translateX(13px); }
+.su-sw:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.sm-apps .viz-head .sp { flex: 1; }
+.sm-apps .m-hint { margin-top: 8px; }

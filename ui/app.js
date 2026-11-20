@@ -356,11 +356,19 @@ function collapse() {
 
 // ---------- pill ----------
 
+// At most 4 characters ("0", "999B", "9.9K", "512K", "12M"…) so the pill keeps one width: each
+// number sits in a fixed 4-character slot (see .sv), a jumping speed never resizes the island.
 function shortRate(b) {
   if (!b || b < 1) return "0";
-  if (b < 1024) return `${b.toFixed(0)}B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(b < 10240 ? 1 : 0)}K`;
-  return `${(b / 1024 / 1024).toFixed(1)}M`;
+  if (b < 1000) return `${Math.round(b)}B`;
+  const units = ["K", "M", "G"];
+  let v = b / 1024;
+  for (const u of units) {
+    if (v < 9.95) return `${v.toFixed(1)}${u}`;
+    if (v < 999.5) return `${Math.round(v)}${u}`;
+    v /= 1024;
+  }
+  return "999G";
 }
 
 function clockText() {
@@ -377,24 +385,24 @@ function pillItem(id, target) {
     case "exit":
       return `${target?.cc ? flagImg(target.cc) : ""}<span class="mono ip-text">${esc(target?.ip || (target?.error ? "出口检测失败" : "检测中…"))}</span>`;
     case "conns":
-      return `<span class="mono">${snap ? snap.connCount : 0}</span><span class="pill-unit">连接</span>`;
+      return `<span class="mono pn pn3">${snap ? snap.connCount : 0}</span><span class="pill-unit">连接</span>`;
     case "speed":
-      return `<span class="mono pill-speed"><span class="u">↑</span>${shortRate(snap?.up)} <span class="d">↓</span>${shortRate(snap?.down)}</span>`;
+      return `<span class="mono pill-speed"><span class="u">↑</span><span class="sv">${shortRate(snap?.up)}</span> <span class="d">↓</span><span class="sv">${shortRate(snap?.down)}</span></span>`;
     case "latency": {
       const L = snap?.latency;
       if (!L?.at) return "";
       if (L.ms == null) return `<span class="lat bad">节点${esc(L.error || "无响应")}</span>`;
       const c = L.ms < 200 ? "good" : L.ms < 500 ? "mid" : "bad";
-      return `<span class="lat ${c} mono">${L.ms}ms</span>`;
+      return `<span class="lat ${c} mono pn pn6">${Math.min(L.ms, 9999)}ms</span>`;
     }
     case "leaks": {
       const n = snap?.guard?.unacked || 0;
       return n ? `<span class="pill-alert">⚠ 泄漏 ${n}</span>` : "";
     }
     case "cpu":
-      return snap?.sys?.cpu != null ? `<span class="pill-unit">CPU</span><span class="mono">${Math.round(snap.sys.cpu)}%</span>` : "";
+      return snap?.sys?.cpu != null ? `<span class="pill-unit">CPU</span><span class="mono pn pn4">${Math.round(snap.sys.cpu)}%</span>` : "";
     case "mem":
-      return snap?.sys?.memTotal ? `<span class="pill-unit">内存</span><span class="mono">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
+      return snap?.sys?.memTotal ? `<span class="pill-unit">内存</span><span class="mono pn pn4">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
     case "clock":
       return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
     case "exits": {
@@ -1311,11 +1319,13 @@ function aiTabHtml() {
   if (!sget("ai.on", true)) return `<div class="empty">AI 额度已关闭（设置 → AI 额度）</div>`;
   const list = aiState.length ? aiState.map((q) => aiCard(q, false)).join("") : `<div class="empty">正在查询…</div>`;
   const last = aiState.reduce((m, q) => Math.max(m, q.at || 0), 0);
+  const via = [...new Set(aiState.filter((q) => q.via).map((q) => q.via))];
   return `<div class="viz">
-    <div class="viz-head"><span class="viz-sel">订阅额度：用了多少、什么时候重置${last ? ` · 更新于 ${ago(last)}` : ""}</span>
+    <div class="viz-head"><span class="viz-sel">订阅额度：用了多少、什么时候重置${last ? ` · 更新于 ${ago(last)}` : ""}${via.length ? ` · 经代理 127.0.0.1:${via.join("/")}` : ""}</span>
       <button class="ghost" data-do="ai-refresh">立即刷新</button></div>
     <div class="ai-grid">${list}</div>
     <div class="m-hint">用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方；
+      查询一律经代理软件的本地端口发出，找不到端口就先不查，不会直连；
       登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 10)} 分钟查一次（Claude 至少 10 分钟一次，点「立即刷新」也一样：官方接口限流很严，可能还和 Claude Code 自己共用）；结果会保存，重启 MicaBar 不会重新查。</div>
   </div>`;
 }
@@ -1381,11 +1391,70 @@ function sysPageHtml() {
       </div>
     </div>
     <div class="sm-apps">
-      <div class="viz-head"><span class="viz-sel">占用最多的程序<span id="sm-name" class="sm-name"></span></span>${segmented("sys-sort", sysSort, [["cpu", "CPU"], ["mem", "内存"]])}</div>
-      <div id="sm-list" class="sm-list"><div class="empty">正在读取…</div></div>
+      <div class="viz-head">${segmented("sys-view", sysView, [["apps", "占用最多的程序"], ["startup", "开机自启"]])}${sysView === "apps"
+        ? `<span id="sm-name" class="sm-name"></span><span class="sp"></span>${segmented("sys-sort", sysSort, [["cpu", "CPU"], ["mem", "内存"]])}`
+        : `<span id="su-count" class="sm-name"></span><span class="sp"></span><button data-do="startup-refresh">刷新</button>`}</div>
+      <div id="sm-list" class="sm-list ${sysView === "startup" ? "su-list" : ""}"><div class="empty">正在读取…</div></div>
+      ${sysView === "startup" ? `<div class="m-hint">关掉 = 下次开机不自动启动它，和任务管理器「启动应用」是同一个开关，随时能再打开，不删除任何东西。计划任务和系统服务的自启不在这里。</div>` : ""}
     </div>
   </div>`;
 }
+
+// ---------- startup apps (Run keys + Startup folders, plus MicaBar's own task) ----------
+
+let sysView = "apps";
+try { sysView = localStorage.getItem("mb-sys-view") === "startup" ? "startup" : "apps"; } catch { /* ignore */ }
+let startupItems = null;
+let startupLoading = false;
+
+function loadStartup() {
+  if (startupLoading) return;
+  startupLoading = true;
+  if (!appInfo) refreshAppInfo(); // MicaBar's own row takes its icon from the exe path
+  invoke("startup_list").then((l) => { startupItems = l; }).catch(() => { startupItems = startupItems || []; })
+    .finally(() => { startupLoading = false; renderStartup(); });
+}
+
+function renderStartup() {
+  const list = $("sm-list");
+  if (!list || sysView !== "startup") return;
+  if (!startupItems) { loadStartup(); return; }
+  const self = sget("general.autostart", false);
+  const n = startupItems.filter((i) => i.enabled).length + (self ? 1 : 0);
+  const c = $("su-count");
+  if (c) c.textContent = ` · ${n} 个会开机启动`;
+  // rows hold still under the pointer (the switch just clicked already shows its new state)
+  if (list.matches(":hover") && !list.querySelector(".empty")) return measurePanel();
+  const row = (i) => `<div class="sm-app su-row ${i.enabled ? "" : "off"}">
+      ${iconHtml({ name: i.name, path: i.path })}
+      <span class="sm-app-name" title="${esc(i.command)}">${esc(i.name)}<span class="sub">${i.desc ? esc(i.desc) + " · " : ""}${esc(i.source)}${i.missing ? ` · <span class="su-miss">程序文件已不存在</span>` : ""}</span></span>
+      <input type="checkbox" class="su-sw" data-su="${esc(i.id)}" ${i.enabled ? "checked" : ""} title="${i.enabled ? "开机自启：开" : "开机自启：关"}">
+    </div>`;
+  const mine = row({ id: "self", name: "MicaBar", desc: null, source: "计划任务 · 登录 10 秒后以管理员权限启动", command: "设置 → 常规 → 开机自启", path: appInfo?.exe || null, enabled: self, missing: false });
+  list.innerHTML = mine + startupItems.map(row).join("");
+  measurePanel();
+}
+
+document.addEventListener("change", async (e) => {
+  const el = e.target.closest?.("[data-su]");
+  if (!el) return;
+  const id = el.dataset.su, on = el.checked;
+  try {
+    if (id === "self") {
+      await invoke("settings_set", { patch: { general: { autostart: on } } });
+    } else {
+      await invoke("startup_set", { id, on });
+      const it = startupItems?.find((i) => i.id === id);
+      if (it) it.enabled = on;
+    }
+    el.closest(".su-row")?.classList.toggle("off", !on);
+    toast(on ? "已设为开机自启" : "已关闭开机自启（随时能再打开）");
+  } catch (err) {
+    el.checked = !on;
+    toast(String(err), true);
+  }
+  renderStartup();
+});
 
 function updateSys() {
   const d = sysData;
@@ -1438,6 +1507,11 @@ function updateSys() {
   // the list holds still while the pointer is on it or a confirm card is open (rows would move
   // away under the click)
   const list = $("sm-list");
+  if (sysView === "startup") {
+    // the startup list changes only on a toggle or 刷新, not with every sample
+    if (list.querySelector(".empty")) renderStartup();
+    return measurePanel();
+  }
   if (list.matches(":hover") || !$("menu").hidden) return measurePanel();
   const rows = [...d.apps].sort((a, b) => (sysSort === "mem" ? b.mem - a.mem : b.cpu - a.cpu || b.mem - a.mem)).slice(0, MANAGER ? 16 : 8);
   list.innerHTML = rows.map((a) => `<div class="sm-app">
@@ -1797,6 +1871,7 @@ function settingsHtml() {
     ${sToggle("ai.antigravity", "　Antigravity", "Antigravity 打开并进入工作区时才能读到")}
     ${sToggle("ai.grok", "　Grok", "需要用 grok CLI 登录过")}
     ${sNumber("ai.interval", "　每隔多久查一次", 1, 120, 1, "分钟", "Claude 最少 10 分钟一次，设得更短也按 10 分钟")}
+    ${sNumber("ai.proxyPort", "　走哪个代理端口", 0, 65535, 1, "", "0 = 自动用代理软件的端口（Clash 的 mixed/http 端口或系统代理）。额度只经代理查询，找不到端口就不查，绝不直连；Antigravity 只问本机，不出网")}
   </div>
   <div class="s-sec"><div class="s-title">额度环<span class="s-note">胶囊和「AI 额度」页里的圆环</span></div>
     ${sSelect("ai.ring.mode.claude", "Claude 显示", RING_MODES)}
@@ -1916,7 +1991,11 @@ listen("update-progress", (e) => {
 });
 
 function refreshAppInfo() {
-  invoke("app_info").then((i) => { appInfo = i; if (tab === "settings") renderList(true); }).catch(() => {});
+  invoke("app_info").then((i) => {
+    appInfo = i;
+    if (tab === "settings") renderList(true);
+    else if (tab === "sys" && sysView === "startup" && startupItems) { const l = $("sm-list"); if (l) l.innerHTML = `<div class="empty"></div>`; renderStartup(); }
+  }).catch(() => {});
 }
 const REPO = "https://github.com/aileboeth/MicaBar";
 
@@ -2131,7 +2210,7 @@ function renderList(force = false) {
     const key = m ? `${m.title}|${m.artist}|${m.playing}|${m.cover ? m.cover.length : 0}|${m.duration > 0}` : "";
     if (!force && (tab === "sys" ? $("sysmon") : list.querySelector(".music") && key === musicKey)) return;
     list.innerHTML = `<div id="list-inner">${tab === "sys" ? sysPageHtml() : musicPageHtml()}</div>`;
-    if (tab === "sys") { updateSys(); ensureSysPoll(); }
+    if (tab === "sys") { updateSys(); renderStartup(); ensureSysPoll(); }
     updateViz();
     measurePanel();
     return;
@@ -2304,6 +2383,10 @@ async function runAction(el) {
         <div class="m-warn">会强制结束它的 ${n > 1 ? `全部 ${n} 个进程` : "进程"}，<b>没保存的内容会丢失</b>。Windows 自己的核心进程和 MicaBar 不会被结束。</div>
         <div class="m-actions"><button class="ghost" data-do="menu-close">取消</button><button class="danger" data-do="proc-end-go" data-name="${esc(name)}">结束</button></div>`);
       return;
+    } else if (act === "startup-refresh") {
+      startupItems = null;
+      renderStartup();
+      return;
     } else if (act === "proc-end-go") {
       closeMenu();
       const [ok, bad] = await invoke("sysmon_end", { name: el.dataset.name });
@@ -2452,6 +2535,13 @@ $("panel").addEventListener("click", (e) => {
     const t = aiMore.dataset.aiMore;
     if (aiExpanded.has(t)) aiExpanded.delete(t);
     else aiExpanded.add(t);
+    renderList(true);
+    return;
+  }
+  if (seg?.dataset.seg === "sys-view") {
+    sysView = seg.dataset.val;
+    try { localStorage.setItem("mb-sys-view", sysView); } catch { /* ignore */ }
+    if (sysView === "startup") { startupItems = null; if (!appInfo) refreshAppInfo(); }
     renderList(true);
     return;
   }

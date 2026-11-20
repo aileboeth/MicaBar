@@ -36,6 +36,8 @@ pub struct Quota {
     /// where the numbers came from (shown as a hint)
     pub source: Option<String>,
     pub at: u64,
+    /// proxy port the last query went through (none for Antigravity, which is asked locally)
+    pub via: Option<u16>,
 }
 
 pub const TOOLS: [(&str, &str); 4] = [("claude", "Claude"), ("codex", "Codex"), ("antigravity", "Antigravity"), ("grok", "Grok")];
@@ -44,13 +46,20 @@ fn home() -> PathBuf {
     PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into()))
 }
 
+pub const NO_PROXY: &str = "连不上：没找到代理软件的本地端口，额度只经代理查询，不会直连（代理软件开着就会自动接上，也可以在设置 → AI 额度里填端口）";
+
+/// The account services are only ever asked through the proxy client's local port: never
+/// directly (direct requests from China fail or get the account flagged).
 fn client(proxy_port: Option<u16>) -> Result<reqwest::Client, String> {
+    let p = proxy_port.ok_or(NO_PROXY)?;
     // HTTP/1.1 only: these account endpoints are known to be picky about HTTP/2 clients
-    let mut b = reqwest::Client::builder().http1_only().timeout(Duration::from_secs(15)).connect_timeout(Duration::from_secs(8));
-    if let Some(p) = proxy_port {
-        b = b.proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{p}")).map_err(|e| e.to_string())?);
-    }
-    b.build().map_err(|e| e.to_string())
+    reqwest::Client::builder()
+        .http1_only()
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(8))
+        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{p}")).map_err(|e| e.to_string())?)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 fn iso_ms(s: &str) -> Option<u64> {
@@ -628,14 +637,25 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
     let r = if at < until {
         Err(format!("官方接口限流，{} 后再查", crate::fmt_time(until).get(..5).unwrap_or("")))
     } else {
-        last_sent().lock().unwrap().insert(tool.to_string(), at);
-        match tool {
+        let before = last_sent().lock().unwrap().insert(tool.to_string(), at);
+        // without a proxy port client() refuses before anything is sent (after the local sign-in
+        // checks, so a tool that isn't installed still says so)
+        let r = match tool {
             "claude" => claude(proxy).await,
             "codex" => codex(proxy).await,
             "antigravity" => antigravity().await,
             "grok" => grok(proxy).await,
             _ => Err("absent:未知工具".into()),
+        };
+        if matches!(&r, Err(e) if e == NO_PROXY) {
+            // nothing went out: don't count it as a request (Claude's 10-minute spacing)
+            let mut m = last_sent().lock().unwrap();
+            match before {
+                Some(b) => m.insert(tool.to_string(), b),
+                None => m.remove(tool),
+            };
         }
+        r
     };
     // 429 -> pause: the service's Retry-After, else 10, 20, 40 then 60 minutes
     let r = match r {
@@ -668,6 +688,7 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
             q.name = name;
             q.status = "ok".into();
             q.at = at;
+            q.via = if tool == "antigravity" { None } else { proxy };
             q
         }
         Err(e) if e.starts_with("absent:") => Quota { tool: tool.into(), name, status: "absent".into(), message: Some(e[7..].to_string()), at, ..Default::default() },

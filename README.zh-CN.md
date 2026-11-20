@@ -37,7 +37,7 @@ Windows 上的「灵动岛」式网络监视器。屏幕顶部一颗磨砂玻璃
 - 鼠标停在胶囊上 0.3 秒展开（可改成点击）；快捷键默认 `Ctrl+Alt+N`。
 - 左键点托盘图标打开桌面窗口；右键菜单：打开、设置、调整岛的大小、重新检测出口 IP、外观、打开日志、退出。
 - 面板右上角的齿轮打开桌面窗口的设置页：胶囊里显示什么、轮换内容、大小、提示阈值、外形、停靠位置、主题、
-  AI 额度、正在播放、开机自启、资源档位等，每一项都能开关。
+  AI 额度、正在播放、开机自启（系统页还能开关其他程序的开机自启）、资源档位等，每一项都能开关。
 
 ### 分组出口
 
@@ -75,7 +75,7 @@ v2fly、Clash 规则格式）。两种泄漏：
 | 节点延迟 | 由 mihomo 内核测 `www.gstatic.com/generate_204` | 15~60 秒一次（资源档位） |
 | gfw 列表 | cdn.jsdelivr.net / raw.githubusercontent.com（Loyalsoldier/v2ray-rules-dat） | 开启时每天一次 |
 | 检查更新 | github.com/aileboeth/MicaBar 的 latest.json | 开启时每天一次 |
-| AI 额度 | api.anthropic.com（Claude Code）、chatgpt.com（Codex）、cli-chat-proxy.grok.com（Grok）、本机的 Antigravity 语言服务器 | 开启时每 5 分钟（可改） |
+| AI 额度 | api.anthropic.com（Claude Code）、chatgpt.com（Codex）、cli-chat-proxy.grok.com（Grok）、本机的 Antigravity 语言服务器 | 开启时每 10 分钟（可改）；一律经代理软件的本地端口发出，绝不直连（找不到端口就不查） |
 
 国家 / ASN 用的是代理客户端自带的离线库（`country.mmdb`、`ASN.mmdb`），不会把连接的 IP 发给任何服务。
 AI 额度用各工具在本机已登录的凭据，只发给那个工具自己的服务，不保存、不写日志、不续期。

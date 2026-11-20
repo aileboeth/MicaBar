@@ -16,6 +16,7 @@ mod procinfo;
 mod proxy;
 mod settings;
 mod speed;
+mod startup;
 mod sysinfo;
 mod sysmon;
 mod system;
@@ -1874,14 +1875,14 @@ fn alert_clear(state: tauri::State<'_, Arc<Shared>>) {
 
 // ---------- AI quota / now playing ----------
 
-/// Proxy for the AI services: the proxy client's local port when one runs, else none (direct).
+/// Proxy port for the AI services: the one set in the settings, else the proxy client's local port
+/// (mixed / http port, or the system proxy's). None = no query at all, never a direct one.
 fn ai_proxy(sh: &Shared) -> Option<u16> {
-    let p = sh.proxy.lock().unwrap();
-    if p.detected {
-        p.local_port
-    } else {
-        None
+    let fixed = settings::num_at("ai.proxyPort", 0.0);
+    if (1.0..=65535.0).contains(&fixed) {
+        return Some(fixed as u16);
     }
+    sh.proxy.lock().unwrap().local_port
 }
 
 fn ai_every_ms() -> u64 {
@@ -1891,6 +1892,18 @@ fn ai_every_ms() -> u64 {
 /// Asks only the tools that are due (each has its own clock); the others keep their last numbers.
 async fn ai_round(app: &AppHandle, sh: &Arc<Shared>, manual: bool) {
     let proxy = ai_proxy(sh);
+    {
+        // say once which port the quota queries go through
+        static LAST: Mutex<Option<Option<u16>>> = Mutex::new(None);
+        let mut l = LAST.lock().unwrap();
+        if *l != Some(proxy) {
+            *l = Some(proxy);
+            log(match proxy {
+                Some(p) => format!("ai: queries go through the proxy at 127.0.0.1:{p}"),
+                None => "ai: no proxy port found; online quota queries paused (never direct)".to_string(),
+            });
+        }
+    }
     let prev = sh.ai.lock().unwrap().clone();
     let every = ai_every_ms();
     let mut out = Vec::new();
@@ -1973,6 +1986,18 @@ fn audio_viz(app: AppHandle, window: tauri::Window, on: bool) {
 #[tauri::command]
 async fn sysmon_end(name: String) -> (u32, u32) {
     tauri::async_runtime::spawn_blocking(move || sysmon::end_app(&name)).await.unwrap_or((0, 0))
+}
+
+/// Programs that start with Windows (Run keys + Startup folders) for the system monitor page.
+#[tauri::command]
+async fn startup_list() -> Vec<startup::Item> {
+    tauri::async_runtime::spawn_blocking(startup::list).await.unwrap_or_default()
+}
+
+/// Turns one startup entry on or off (Task Manager's StartupApproved flag; nothing is deleted).
+#[tauri::command]
+async fn startup_set(id: String, on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || startup::set(&id, on)).await.map_err(|e| e.to_string())?
 }
 
 /// One sample for the system monitor page (the page polls this while it is open).
@@ -2277,6 +2302,8 @@ fn main() {
             ai_refresh,
             sysmon_sample,
             sysmon_end,
+            startup_list,
+            startup_set,
             audio_viz,
             media_get,
             media_control,
