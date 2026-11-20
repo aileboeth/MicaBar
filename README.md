@@ -76,6 +76,16 @@ proxy" work together. The override can be removed from the bottom of the "出口
 
 In system-proxy mode only programs that honour the system proxy can be controlled; enable TUN to cover all of them.
 
+### Supported proxy clients
+
+| Client | Proxy exit / local port | Nodes, groups, matched rules | Exit control / leak prevention |
+|---|---|---|---|
+| Clash Party / Mihomo Party | ✓ | ✓ | ✓ |
+| Clash Verge Rev | ✓ | ✓ (through its controller) | — |
+| v2rayN, Throne (NekoRay), Hiddify, FlClash, Karing | ✓ (system proxy port or their usual local port) | — | — |
+
+System proxy, TUN adapter and per-program connections are shown whatever the client.
+
 ### Notifications
 
 Notes come from three places, all read locally:
@@ -87,6 +97,10 @@ Notes come from three places, all read locally:
   popups; when one appears MicaBar reads Telegram's chat list once (Windows UI Automation) and picks the chats whose
   new-message count went up. Apps using Windows notifications are read from the system's notification database.
   "Take over" hides the app's (or Windows') own popup so only the island shows it.
+- Apps using Windows notifications (WhatsApp, Teams, Slack, Discord, Signal, Zoom, LINE…) show with their own name
+  and icon; a message that both flashes the taskbar and raises a notification counts once.
+- Opening the app marks its notes read and clears the red dot; a note that arrives while you are using that app
+  is not announced.
 - **AI tools**: "接入" in the settings adds a hook to Claude Code's `~/.claude/settings.json` or Codex's
   `~/.codex/config.toml` (backed up first, removable with one click); when a task finishes or needs approval it
   notifies `127.0.0.1:47900` with `curl` (with a random token).
