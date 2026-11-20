@@ -410,7 +410,14 @@ function pillItem(id, target) {
       // one entry per exit IP; the tag names its main group (+N more) only when the IPs differ
       const exits = exitsByIp((exitState?.groups || []).filter((g) => g.ip));
       if (!snap?.proxy?.detected || !exits.length) return pillItem("exit", target);
-      return exits.map((x) => `<span class="px-exit">${exits.length > 1 ? `<span class="rot-tag">${esc(exitTag(x))}</span>` : ""}${flagImg(x.cc)}<span class="mono ip-text">${esc(x.ip)}</span></span>`).join("");
+      if (exits.length === 1) return `<span class="px-exit">${flagImg(exits[0].cc)}<span class="mono ip-text">${esc(exits[0].ip)}</span></span>`;
+      // several exits: stacked on top of each other in small type (at most three lines; the rest
+      // are counted, the panel lists them all) - group tag | flag | IP, IPs lined up
+      const shown = exits.slice(0, 3);
+      const more = exits.length - shown.length;
+      return `<span class="px-stack n${shown.length}">${shown.map((x) =>
+        `<span class="px-tag">${esc(exitTag(x))}</span>${flagImg(x.cc)}<span class="mono px-ip">${esc(x.ip)}</span>`).join("")}</span>` +
+        (more ? `<span class="rot-tag">+${more}</span>` : "");
     }
     case "media": {
       if (!sget("media.on", true) || !media?.title || !media.playing) return "";
@@ -811,7 +818,7 @@ function renderExit() {
   }
   const spin = ex.checking ? "spin" : "";
   const when = ex.lastCheck ? ago(ex.lastCheck) : "";
-  html = `<div style="display:flex;gap:8px;flex:1;position:relative">${html}
+  html = `<div class="exit-wrap">${html}
     <button id="refresh" class="${spin}" title="重新检测出口 IP${when ? "（上次 " + when + "）" : ""}">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
     </button></div>`;
@@ -1914,6 +1921,7 @@ function settingsHtml() {
     ${sSelect("interaction.expand", "怎么展开", [["hover", "鼠标停留（收起时不挡点击）"], ["click", "点击（收起时胶囊会挡住下面的点击）"]])}
     ${sToggle("interaction.peek", "　鼠标停在胶囊上时变透明", "能看见被挡住的标签页等；点一下下面的东西就不会展开")}
     ${sNumber("interaction.hoverDelay", "　鼠标停留多久展开", 0, 2000, 50, "ms")}
+    ${sNumber("interaction.holdMs", "　长按多久抓起岛", 150, 1000, 10, "ms", "按住面板或胶囊这么久就能拖着甩到左右；太短的话普通点击也可能被当成长按")}
     ${sToggle("interaction.passthrough", "穿透模式", "鼠标完全不触发，点击穿透到下面的窗口；只能用快捷键打开")}
     <div class="s-row"><span class="s-label">快捷键（展开 / 收起）${snap && !snap.hotkeyOk ? `<span class="s-note bad">没注册成功：可能被别的程序占用了</span>` : ""}</span>
       <button class="hk ${hotkeyRec ? "rec" : ""}" data-do="hotkey-rec">${hotkeyRec ? "请按下新的组合键…（Esc 取消）" : esc(sget("interaction.hotkey", "Ctrl+Alt+N"))}</button></div>
@@ -2932,7 +2940,8 @@ island.addEventListener("pointerdown", (e) => {
   if (MANAGER || editing || fling.active || e.button !== 0) return;
   if (e.target.closest("input, select, textarea, #menu")) return;
   const ev = { pointerId: e.pointerId, screenX: e.screenX, screenY: e.screenY };
-  press = { sx: e.screenX, sy: e.screenY, timer: setTimeout(() => startGrab(ev), 420) };
+  const hold = Math.min(1000, Math.max(150, Number(sget("interaction.holdMs", 260)) || 260));
+  press = { sx: e.screenX, sy: e.screenY, timer: setTimeout(() => startGrab(ev), hold) };
 });
 
 document.addEventListener("pointermove", (e) => {

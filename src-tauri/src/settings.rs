@@ -28,6 +28,8 @@ pub fn defaults() -> Value {
             // hover | click
             "expand": "hover",
             "hoverDelay": 500,
+            // how long a press has to be held before the island is grabbed (fling it along the edge)
+            "holdMs": 260,
             // mouse never opens the island; only the hotkey does, clicks pass through
             "passthrough": false,
             // hover mode: the collapsed pill turns see-through while the cursor rests on it
