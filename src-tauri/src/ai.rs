@@ -43,7 +43,8 @@ fn home() -> PathBuf {
 }
 
 fn client(proxy_port: Option<u16>) -> Result<reqwest::Client, String> {
-    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).connect_timeout(Duration::from_secs(8));
+    // HTTP/1.1 only: these account endpoints are known to be picky about HTTP/2 clients
+    let mut b = reqwest::Client::builder().http1_only().timeout(Duration::from_secs(15)).connect_timeout(Duration::from_secs(8));
     if let Some(p) = proxy_port {
         b = b.proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{p}")).map_err(|e| e.to_string())?);
     }
@@ -105,9 +106,26 @@ fn window_label(secs: f64) -> String {
     }
 }
 
-/// Retry-After (seconds) of a response, when the service sends one.
+/// Retry-After of a response in seconds (capped at an hour), when the service sends one: either a
+/// number of seconds or an HTTP date ("Wed, 21 Oct 2015 07:28:00 GMT").
 fn retry_after(r: &reqwest::Response) -> Option<u64> {
-    r.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse::<u64>().ok())
+    let s = r.headers().get("retry-after")?.to_str().ok()?.trim().to_string();
+    retry_after_secs(&s, crate::now_ms()).map(|x| x.min(3600))
+}
+
+fn retry_after_secs(s: &str, now_ms: u64) -> Option<u64> {
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    let p: Vec<&str> = s.split_whitespace().collect();
+    if p.len() < 5 {
+        return None;
+    }
+    const MON: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let mo = MON.iter().position(|m| m.eq_ignore_ascii_case(p[2]))? + 1;
+    let d: u32 = p[1].parse().ok()?;
+    let at = iso_ms(&format!("{}-{:02}-{:02}T{}Z", p[3], mo, d, p[4]))?;
+    Some(at.saturating_sub(now_ms) / 1000)
 }
 
 /// 429 comes back as "429:<retry-after seconds or 0>" so query can back off.
@@ -140,6 +158,7 @@ async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
         .get("https://api.anthropic.com/api/oauth/usage")
         .bearer_auth(token)
         .header("anthropic-beta", "oauth-2025-04-20")
+        .header("anthropic-version", "2023-06-01")
         .header("User-Agent", "MicaBar")
         .send()
         .await
