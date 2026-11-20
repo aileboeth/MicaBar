@@ -129,6 +129,10 @@ pub fn push(mut n: Note) {
     let mute = cfg.get("mute").and_then(|x| x.as_bool()).unwrap_or(false);
     let island = cfg.get("island").and_then(|x| x.as_bool()).unwrap_or(true);
     n.silent = mute || !island || quiet_now();
+    // a muted program only fills the notes page: nothing to catch up on, so no red dot
+    if mute {
+        n.read = true;
+    }
     n.capturing = capturing();
     n.at = now_ms();
     n.count = n.count.max(1);

@@ -1058,14 +1058,48 @@ function notesPageHtml() {
     const cards = open
       ? list.slice(0, 40).map((n) => noteCardHtml(n)).join("")
       : noteCardHtml(list[0]) + `<div class="ng-edges n${Math.min(2, list.length - 1)}"><i></i><i></i></div>`;
+    const muted = !!(sget("notify.apps", {})?.[key] || {}).mute;
     return `<div class="ng ${open ? "open" : "stacked"}">
-      <div class="ng-head"><span class="ng-app">${esc(list[0].app)}</span>${list.length > 1 ? `<span class="ng-n mono">${list.length}</span>` : ""}<span class="sp"></span>
+      <div class="ng-head" data-ngkey="${esc(key)}"><span class="ng-app">${esc(list[0].app)}</span>${list.length > 1 ? `<span class="ng-n mono">${list.length}</span>` : ""}${muted ? `<span class="tag">已静音</span>` : ""}<span class="sp"></span>
         ${list.length > 1 ? `<button class="link" data-ngtoggle="${esc(key)}">${open ? "收起" : "展开"}</button>` : ""}
+        <button class="link" data-ngmute="${esc(key)}" title="${muted ? "恢复这个程序的提醒" : "这个程序的通知只收进这里：不弹出、不亮红点"}">${muted ? "取消静音" : "静音"}</button>
         <button class="ng-x" data-ngclear="${esc(key)}" title="清除这一组" aria-label="清除这一组">✕</button></div>
       <div class="ng-cards" ${open ? "" : `data-ngtoggle="${esc(key)}"`}>${cards}</div></div>`;
   }).join("");
   return `<div class="viz nc">${head}${body}
     <div class="m-hint">点一条打开对应的程序。通知只在内存里，重启 MicaBar 后清空；消息内容不写硬盘、不写日志。</div></div>`;
+}
+
+// mute / unmute a program's notes; muting also marks what is already there read (no red dot)
+function toggleAppMute(key) {
+  const on = !(sget("notify.apps", {})?.[key] || {}).mute;
+  const name = notes.find((n) => n.key === key)?.app || key;
+  invoke("settings_set", { patch: { notify: { apps: { [key]: { mute: on } } } } })
+    .then(() => {
+      if (on) {
+        const ids = notes.filter((n) => n.key === key && !n.read).map((n) => n.id);
+        if (ids.length) readNotes(ids);
+      }
+      toast(on ? `已静音 ${name}：以后它的通知只收进通知页，不弹出、不亮红点` : `已恢复 ${name} 的提醒`);
+      afterNotesChange();
+      renderList(true);
+    })
+    .catch((err) => toast(String(err), true));
+}
+
+// right-click on a note or a group header: mute / unmute that program
+function notesContext(e) {
+  const el = e.target.closest("#list [data-nid], #list [data-ngkey]");
+  if (!el) return false;
+  e.preventDefault();
+  const key = el.dataset.ngkey || noteById(Number(el.dataset.nid))?.key;
+  if (!key) return true;
+  const name = notes.find((n) => n.key === key)?.app || key;
+  const muted = !!(sget("notify.apps", {})?.[key] || {}).mute;
+  openMenu(el, `<div class="m-title">${esc(name)}</div>
+    <button class="m-item" data-do="note-mute" data-key="${esc(key)}">${muted ? "取消静音" : "静音这个程序（不弹出、不亮红点）"}</button>
+    <button class="m-item" data-do="note-clear" data-key="${esc(key)}">清除这一组</button>`);
+  return true;
 }
 
 function notesClick(e) {
@@ -1075,6 +1109,11 @@ function notesClick(e) {
     if (ncOpen.has(k)) ncOpen.delete(k);
     else ncOpen.add(k);
     renderList(true);
+    return true;
+  }
+  const mu = e.target.closest("[data-ngmute]");
+  if (mu) {
+    toggleAppMute(mu.dataset.ngmute);
     return true;
   }
   const cl = e.target.closest("[data-ngclear]");
@@ -2854,6 +2893,17 @@ async function runAction(el) {
       readNotes(notes.map((n) => n.id));
       afterNotesChange();
       return;
+    } else if (act === "note-mute") {
+      closeMenu();
+      toggleAppMute(el.dataset.key);
+      return;
+    } else if (act === "note-clear") {
+      closeMenu();
+      const ids = notes.filter((n) => n.key === el.dataset.key).map((n) => n.id);
+      notes = notes.filter((n) => !ids.includes(n.id));
+      invoke("notify_dismiss", { ids }).catch(() => {});
+      afterNotesChange();
+      return;
     } else if (act === "update-check") {
       toast("正在检查更新…");
       updateInfo = await invoke("update_check");
@@ -2987,6 +3037,9 @@ async function applyRule(spec) {
   }
 }
 
+$("panel").addEventListener("contextmenu", (e) => {
+  if (tab === "notes" && notesContext(e)) return;
+});
 $("panel").addEventListener("click", (e) => {
   if (tab === "notes" && !e.target.closest("[data-do]") && notesClick(e)) return;
   const inMenu = e.target.closest("#menu");

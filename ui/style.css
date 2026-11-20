@@ -414,6 +414,11 @@ html, body {
 .mt.on { background: color-mix(in srgb, var(--tc) 22%, transparent); border-color: var(--tc); color: var(--tc); }
 .m-hint { color: var(--dimmer); font-size: 11px; margin-top: 6px; }
 .m-note { font-size: 12px; color: var(--dim); line-height: 1.5; }
+.m-item {
+  display: block; width: 100%; text-align: left; border: none; background: none; color: var(--text);
+  font: inherit; font-size: 12.5px; padding: 7px 8px; border-radius: 8px; cursor: pointer;
+}
+.m-item:hover { background: var(--ov2); }
 .m-err { color: var(--red); margin-top: 4px; word-break: break-all; }
 .m-actions { display: flex; gap: 8px; margin-top: 10px; }
 .m-actions.end { justify-content: flex-end; }
