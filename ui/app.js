@@ -1002,6 +1002,16 @@ listen("note", (e) => {
   if (!n.silent) announceNote(n);
   afterNotesChange();
 });
+// a taskbar flash superseded by the toast of the same message
+listen("note-gone", (e) => {
+  const id = e.payload;
+  notes = notes.filter((x) => x.id !== id);
+  if (nst.on) {
+    nst.active = nst.active.filter((i) => i !== id);
+    renderNote();
+  }
+  afterNotesChange();
+});
 listen("notes-read", (e) => {
   const key = e.payload;
   notes.forEach((n) => { if (n.key === key) n.read = true; });

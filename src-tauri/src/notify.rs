@@ -56,6 +56,11 @@ pub struct Note {
     /// body for a merged note: "{n}" = count
     #[serde(skip)]
     pub tpl: Option<String>,
+    /// exe stem of the program behind the note (a toast's AUMID belongs to it): bringing that
+    /// program to the front marks the note read, and its taskbar flash for the same message is
+    /// dropped
+    #[serde(skip)]
+    pub owner: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -175,14 +180,17 @@ pub fn push(mut n: Note) {
 /// The app was brought to the front: its notes count as read.
 fn mark_read_key(key: &str) {
     let mut b = book().lock().unwrap();
-    let mut any = false;
-    for n in b.notes.iter_mut().filter(|n| n.key == key && !n.read) {
+    // the page groups by key: a toast app's notes carry its AUMID as key, so tell it each key
+    let mut keys: Vec<String> = Vec::new();
+    for n in b.notes.iter_mut().filter(|n| (n.key == key || n.owner == key) && !n.read) {
         n.read = true;
-        any = true;
+        if !keys.contains(&n.key) {
+            keys.push(n.key.clone());
+        }
     }
     drop(b);
-    if any {
-        emit("notes-read", key.to_string());
+    for k in keys {
+        emit("notes-read", k);
     }
 }
 
@@ -484,12 +492,17 @@ fn on_flash(hwnd: isize) {
     if TERMINALS.contains(&key.as_str()) && LAST_AI.lock().unwrap().map(|t| t.elapsed() < Duration::from_secs(8)).unwrap_or(false) {
         return;
     }
-    // Telegram flashes its taskbar button AND shows its own popup: the popup's note (with the
-    // chat and text) wins; the flash only counts when no popup came
-    if key == "telegram" {
+    // Telegram flashes its taskbar button AND shows its own popup, and chat apps that use toasts
+    // (Slack, Discord, WhatsApp, Teams, Signal…) flash AND toast for the same message: the richer
+    // note (chat + text) wins; the flash only counts when nothing else came
+    let toasts = key == "telegram" || TOAST_OWNERS.lock().unwrap().as_ref().map(|m| m.contains_key(&key)).unwrap_or(false);
+    if toasts {
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1500));
-            if TG_LAST.lock().unwrap().map(|t| t.elapsed() < Duration::from_secs(4)).unwrap_or(false) {
+            std::thread::sleep(Duration::from_millis(1800));
+            if key == "telegram" && TG_LAST.lock().unwrap().map(|t| t.elapsed() < Duration::from_secs(4)).unwrap_or(false) {
+                return;
+            }
+            if recent_toast(&key, Duration::from_secs(6)) {
                 return;
             }
             flash_note(hwnd, key, path);
@@ -499,12 +512,48 @@ fn on_flash(hwnd: isize) {
     flash_note(hwnd, key, path);
 }
 
+/// Programs (exe stems) whose toasts were seen, with the time of the latest one.
+static TOAST_OWNERS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+fn recent_toast(owner: &str, within: Duration) -> bool {
+    TOAST_OWNERS.lock().unwrap().as_ref().and_then(|m| m.get(owner)).map(|t| t.elapsed() < within).unwrap_or(false)
+}
+
+/// A toast arrived for `owner`: remember it, and drop the program's flash note that the same
+/// message caused a moment earlier (flash and toast come within a second or two of each other).
+fn toast_seen(owner: &str) {
+    if owner.is_empty() {
+        return;
+    }
+    TOAST_OWNERS.lock().unwrap().get_or_insert_with(HashMap::new).insert(owner.to_string(), Instant::now());
+    let now = now_ms();
+    let mut b = book().lock().unwrap();
+    let before = b.notes.len();
+    let mut dropped = Vec::new();
+    b.notes.retain(|n| {
+        // read or not (the app may have come to the front in between): it is the same message
+        let dup = n.source == "flash" && n.key == owner && n.count <= 1 && now.saturating_sub(n.at) < 8_000;
+        if dup {
+            dropped.push(n.id);
+        }
+        !dup
+    });
+    let changed = b.notes.len() != before;
+    drop(b);
+    if changed {
+        log(format!("notify: toast from {owner} replaced its taskbar flash"));
+        for id in dropped {
+            emit("note-gone", id);
+        }
+    }
+}
+
 fn flash_note(hwnd: isize, key: String, path: Option<String>) {
     let wechat = key == "weixin" || key == "wechat";
     let app = if wechat {
         "微信".to_string()
     } else {
-        path.as_deref().and_then(procinfo::file_description).unwrap_or_else(|| key.clone())
+        path.as_deref().and_then(procinfo::file_description).map(|n| tidy_app_name(&n)).unwrap_or_else(|| key.clone())
     };
     let title_now = window_text(hwnd);
     let body = if wechat {
@@ -515,6 +564,7 @@ fn flash_note(hwnd: isize, key: String, path: Option<String>) {
         "需要你注意".to_string()
     };
     push(Note {
+        owner: key.clone(),
         key: key.clone(),
         app: app.clone(),
         icon: path.clone(),
@@ -849,6 +899,10 @@ fn read_toasts(db: &std::path::Path, last_id: &mut Option<i64>) -> Result<Vec<No
             continue; // our own leak alerts
         }
         if let Some(n) = toast_note(&aumid, &payload) {
+            if n.owner.is_empty() {
+                log(format!("notify: toast from {aumid}: program not found"));
+            }
+            toast_seen(&n.owner);
             out.push(n);
         }
     }
@@ -972,6 +1026,122 @@ struct ToastApp {
 
 static TOAST_APPS: Mutex<Option<HashMap<String, (String, Option<String>, Option<String>)>>> = Mutex::new(None);
 
+/// "KakaoTalk(32-bit)" -> "KakaoTalk"
+fn tidy_app_name(n: &str) -> String {
+    let mut s = n.trim().to_string();
+    for suf in ["(32-bit)", "(64-bit)", "(32 bit)", "(64 bit)", "(x86)", "(x64)"] {
+        if s.to_ascii_lowercase().ends_with(suf) {
+            s.truncate(s.len() - suf.len());
+            s = s.trim_end().to_string();
+        }
+    }
+    s
+}
+
+fn xml_attr(s: &str, name: &str) -> Option<String> {
+    let pat = format!(" {name}=\"");
+    let i = s.find(&pat)? + pat.len();
+    let j = s[i..].find('"')? + i;
+    Some(unescape(&s[i..j]))
+}
+
+/// "@{Pkg?ms-resource://…}" / "ms-resource:AppName" -> the text, through the shell.
+fn indirect_string(src: &str, full: &str, pkg_name: &str) -> Option<String> {
+    let s = if src.starts_with('@') {
+        src.to_string()
+    } else if let Some(r) = src.strip_prefix("ms-resource:") {
+        let r = if r.starts_with("//") { r.to_string() } else if r.starts_with('/') { format!("//{pkg_name}{r}") } else { format!("//{pkg_name}/resources/{r}") };
+        format!("@{{{full}?ms-resource:{r}}}")
+    } else {
+        return Some(src.to_string()).filter(|x| !x.trim().is_empty());
+    };
+    let w = wide(&s);
+    let mut buf = vec![0u16; 512];
+    let hr = unsafe { windows_sys::Win32::UI::Shell::SHLoadIndirectString(w.as_ptr(), buf.as_mut_ptr(), buf.len() as u32, std::ptr::null()) };
+    if hr != 0 {
+        return None;
+    }
+    let n = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..n])).filter(|x| !x.trim().is_empty())
+}
+
+/// The best file for a manifest logo "Assets\AppList.png": the shell keeps scale / target-size
+/// variants next to it (AppList.targetsize-48_altform-unplated.png, AppList.scale-200.png…).
+fn package_logo(root: &std::path::Path, rel: &str) -> Option<String> {
+    let p = root.join(rel.replace('/', "\\"));
+    let dir = p.parent()?;
+    let stem = p.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    let mut best: Option<(i32, PathBuf)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+        if !n.ends_with(".png") || !(n == format!("{stem}.png") || n.starts_with(&format!("{stem}."))) {
+            continue;
+        }
+        let mut score = 0;
+        for (k, v) in [("targetsize-48", 60), ("targetsize-64", 55), ("targetsize-32", 50), ("targetsize-96", 45), ("scale-200", 40), ("scale-150", 35), ("scale-100", 30)] {
+            if n.contains(k) {
+                score = v;
+                break;
+            }
+        }
+        if n.contains("altform-unplated") || n.contains("altform-lightunplated") {
+            score += 5;
+        }
+        if n.contains("contrast-") {
+            score -= 100;
+        }
+        if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+            best = Some((score, e.path()));
+        }
+    }
+    best.and_then(|(_, p)| file_data_url(&p.to_string_lossy()))
+}
+
+/// A packaged (Store / MSIX) app behind "Family!AppId": display name, main exe and logo from its
+/// AppxManifest.xml (the package registry says where it is installed).
+fn packaged_app(aumid: &str) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    let (family, app_id) = aumid.split_once('!')?;
+    let (pkg_name, publisher) = family.rsplit_once('_')?;
+    let repo = winreg::RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages")
+        .ok()?;
+    let (pre, post) = (format!("{}_", pkg_name.to_ascii_lowercase()), format!("_{}", publisher.to_ascii_lowercase()));
+    let full = repo.enum_keys().flatten().filter(|k| {
+        let l = k.to_ascii_lowercase();
+        l.starts_with(&pre) && l.ends_with(&post) && !l.contains("_neutral_~_") // not a resource pack
+    }).max()?;
+    let k = repo.open_subkey(&full).ok()?;
+    let root: String = k.get_value("PackageRootFolder").ok()?;
+    let root = PathBuf::from(root);
+    // a sparse package (LINE): its files live in the app's own folder (PackageRootFolder), the
+    // manifest and logos in WindowsApps\<full name>
+    let store = PathBuf::from(std::env::var("ProgramW6432").or_else(|_| std::env::var("ProgramFiles")).unwrap_or_default()).join("WindowsApps").join(&full);
+    let bases: Vec<PathBuf> = [root.clone(), store].into_iter().filter(|b| b.join("AppxManifest.xml").is_file()).collect();
+    let manifest = std::fs::read_to_string(bases.first()?.join("AppxManifest.xml")).ok()?;
+    let bases: Vec<PathBuf> = std::iter::once(root.clone()).chain(bases).collect();
+    // the <Application Id="…"> element of this app
+    let tag = manifest.match_indices("<Application ").map(|(i, _)| i).find(|&i| {
+        let end = manifest[i..].find('>').map(|e| i + e).unwrap_or(manifest.len());
+        xml_attr(&manifest[i..end], "Id").as_deref() == Some(app_id)
+    })?;
+    let rest = &manifest[tag..];
+    let body = &rest[..rest.find("</Application>").unwrap_or(rest.len())];
+    let head = &body[..body.find('>').unwrap_or(body.len())];
+    let exe = xml_attr(head, "Executable")
+        .and_then(|e| bases.iter().map(|b| b.join(e.replace('/', "\\"))).find(|p| p.is_file()))
+        .map(|p| p.to_string_lossy().to_string());
+    let ve = body.find("VisualElements").map(|i| &body[i..body[i..].find('>').map(|e| i + e).unwrap_or(body.len())]).unwrap_or("");
+    let reg_name: Option<String> = k.get_value("DisplayName").ok();
+    let name = [xml_attr(ve, "DisplayName"), reg_name]
+        .into_iter()
+        .flatten()
+        .filter_map(|n| indirect_string(&n, &full, pkg_name))
+        .find(|n| !n.starts_with('@') && !n.starts_with("ms-resource"));
+    let logo = xml_attr(ve, "Square44x44Logo").and_then(|l| bases.iter().find_map(|b| package_logo(b, &l)));
+    Some((name, exe, logo))
+}
+
 /// Display name + icon for a toast AppUserModelID.
 fn toast_app(aumid: &str) -> ToastApp {
     if let Some((n, e, i)) = TOAST_APPS.lock().unwrap().as_ref().and_then(|m| m.get(aumid)).cloned() {
@@ -980,6 +1150,14 @@ fn toast_app(aumid: &str) -> ToastApp {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     let mut name = None;
     let mut icon_url = None;
+    let mut exe = None;
+    if aumid.contains('!') {
+        if let Some((n, e, l)) = packaged_app(aumid) {
+            name = n;
+            exe = e;
+            icon_url = l;
+        }
+    }
     for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
         if let Ok(k) = winreg::RegKey::predef(root).open_subkey(format!(r"Software\Classes\AppUserModelId\{aumid}")) {
             if let Ok(n) = k.get_value::<String, _>("DisplayName") {
@@ -994,7 +1172,6 @@ fn toast_app(aumid: &str) -> ToastApp {
         }
     }
     // "{KnownFolder GUID}\path\app.exe"
-    let mut exe = None;
     let lower = aumid.to_ascii_lowercase();
     for (guid, var) in [
         ("{6d809377-6af0-444b-8957-a3773f02200e}", "ProgramW6432"),
@@ -1012,19 +1189,26 @@ fn toast_app(aumid: &str) -> ToastApp {
     if exe.as_deref().map(|p| !std::path::Path::new(p).is_file()).unwrap_or(false) {
         exe = None;
     }
-    // a running program whose name is part of the id ("Telegram.TelegramDesktop" -> Telegram.exe)
+    // a running program named like a whole word of the id ("Telegram.TelegramDesktop" ->
+    // Telegram.exe, "org.whispersystems.signal-desktop" -> Signal.exe — not "System", which only
+    // sits inside "whispersystems")
     if exe.is_none() {
-        let mut best: Option<(usize, u32)> = None;
-        for (pid, n) in procinfo::list_processes() {
-            let s = stem_of(&n);
-            if s.len() >= 4 && lower.contains(&s) && best.map(|(l, _)| s.len() > l).unwrap_or(true) {
-                best = Some((s.len(), pid));
-            }
-        }
-        exe = best.and_then(|(_, pid)| procinfo::image_path(pid));
+        let words: Vec<&str> = lower.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let mut cands: Vec<(usize, u32)> = procinfo::list_processes()
+            .into_iter()
+            .filter_map(|(pid, n)| {
+                let s = stem_of(&n);
+                let hit = s.len() >= 3 && (words.contains(&s.as_str()) || (s.len() >= 6 && words.iter().any(|w| w.starts_with(&s))));
+                hit.then_some((s.len(), pid))
+            })
+            .collect();
+        cands.sort_by(|a, b| b.0.cmp(&a.0));
+        exe = cands.into_iter().find_map(|(_, pid)| procinfo::image_path(pid));
     }
+    let known = name.is_some() || exe.is_some();
     let name = name
         .or_else(|| exe.as_deref().and_then(procinfo::file_description))
+        .map(|n| tidy_app_name(&n))
         .unwrap_or_else(|| {
             // "Microsoft.WindowsStore_8wekyb3d8bbwe!App" -> "WindowsStore"
             let a = aumid.split('!').next().unwrap_or(aumid);
@@ -1032,7 +1216,10 @@ fn toast_app(aumid: &str) -> ToastApp {
             let a = a.rsplit('\\').next().unwrap_or(a);
             a.trim_end_matches(".exe").rsplit('.').next().unwrap_or(a).to_string()
         });
-    TOAST_APPS.lock().unwrap().get_or_insert_with(HashMap::new).insert(aumid.to_string(), (name.clone(), exe.clone(), icon_url.clone()));
+    // a guess from the id alone is not kept: the app may be running (and found) next time
+    if known {
+        TOAST_APPS.lock().unwrap().get_or_insert_with(HashMap::new).insert(aumid.to_string(), (name.clone(), exe.clone(), icon_url.clone()));
+    }
     ToastApp { name, exe, icon_url }
 }
 
@@ -1043,7 +1230,9 @@ fn toast_note(aumid: &str, xml: &str) -> Option<Note> {
     }
     let a = toast_app(aumid);
     let (title, body) = if texts.len() == 1 { (a.name.clone(), texts[0].clone()) } else { (texts[0].clone(), texts[1..].join("\n")) };
+    let owner = a.exe.as_deref().map(stem_of).unwrap_or_default();
     Some(Note {
+        owner,
         key: aumid.to_string(),
         app: a.name.clone(),
         icon: a.exe.clone(),
