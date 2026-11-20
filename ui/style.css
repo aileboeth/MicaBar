@@ -963,3 +963,10 @@ body[data-mode="manager"] .mu-cover { width: 180px; height: 180px; }
 .q-cnt, .q-where { flex: none; white-space: nowrap; }
 .q-cnt { font-size: 11px; color: var(--dim); background: var(--ov2); border-radius: 5px; padding: 0 5px; }
 .qrow:not(.compact) { grid-template-columns: minmax(96px, 168px) minmax(0, 1fr) 44px; }
+/* proxy exits merged by IP: the IP leads, its groups follow as chips */
+.gx-sum { color: var(--dimmer); margin-left: 6px; }
+.gx-row { display: block; padding: 6px 0; }
+.gx-row .gx-ip { text-align: left; font-size: 15px; display: flex; align-items: center; gap: 6px; }
+.gx-groups { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.gx-chip { font-size: 11.5px; background: var(--ov2); border-radius: 6px; padding: 1px 7px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+.gx-chip .tag { margin-left: 2px; }

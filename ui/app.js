@@ -397,9 +397,10 @@ function pillItem(id, target) {
       return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
     case "exits": {
       // every measured group's exit side by side (just the main exit without a proxy client)
-      const groups = (exitState?.groups || []).filter((g) => g.ip);
-      if (!snap?.proxy?.detected || !groups.length) return pillItem("exit", target);
-      return groups.map((g) => `<span class="px-exit">${groups.length > 1 ? `<span class="rot-tag">${esc(shortGroup(g.group, g.isDefault))}</span>` : ""}${flagImg(g.cc)}<span class="mono ip-text">${esc(g.ip)}</span></span>`).join("");
+      // one entry per exit IP; the tag names its main group (+N more) only when the IPs differ
+      const exits = exitsByIp((exitState?.groups || []).filter((g) => g.ip));
+      if (!snap?.proxy?.detected || !exits.length) return pillItem("exit", target);
+      return exits.map((x) => `<span class="px-exit">${exits.length > 1 ? `<span class="rot-tag">${esc(exitTag(x))}</span>` : ""}${flagImg(x.cc)}<span class="mono ip-text">${esc(x.ip)}</span></span>`).join("");
     }
     case "media": {
       if (!sget("media.on", true) || !media?.title || !media.playing) return "";
@@ -487,10 +488,10 @@ function rotCards(target) {
   for (const it of items) {
     if (!it.on) continue;
     if (it.id === "exits") {
-      const groups = (exitState?.groups || []).filter((g) => g.ip);
-      if (detected && groups.length) {
-        for (const g of groups) {
-          cards.push({ key: "x:" + g.group, html: `<span class="rot-tag">${esc(shortGroup(g.group, g.isDefault))}</span>${flagImg(g.cc)}<span class="mono ip-text">${esc(g.ip)}</span>` });
+      const exits = exitsByIp((exitState?.groups || []).filter((g) => g.ip));
+      if (detected && exits.length) {
+        for (const x of exits) {
+          cards.push({ key: "x:" + x.ip, html: `${exits.length > 1 ? `<span class="rot-tag">${esc(exitTag(x))}</span>` : ""}${flagImg(x.cc)}<span class="mono ip-text">${esc(x.ip)}</span>` });
         }
       } else {
         cards.push({ key: "x:main", html: pillItem("exit", target) });
@@ -697,17 +698,43 @@ function exitCard(title, r, opts = {}) {
   </div>`;
 }
 
-// One row per measured proxy group: group · node · exit IP · ISP
+// Measured proxy groups merged by exit IP: several groups often leave through the same node.
+// [{ ip, cc, org, nodes, groups: [g…], isDefault, error }], the default group's exit first.
+function exitsByIp(groups) {
+  const out = [];
+  for (const g of groups || []) {
+    const hit = g.ip && out.find((x) => x.ip === g.ip);
+    if (hit) {
+      hit.groups.push(g);
+      if (g.node && !hit.nodes.includes(g.node)) hit.nodes.push(g.node);
+      hit.isDefault ||= !!g.isDefault;
+    } else {
+      out.push({ ip: g.ip, cc: g.cc, org: g.org, error: g.error, nodes: g.node ? [g.node] : [], groups: [g], isDefault: !!g.isDefault });
+    }
+  }
+  return out.sort((a, b) => (b.isDefault - a.isDefault) || (b.groups.length - a.groups.length) || (!!b.ip - !!a.ip));
+}
+
+// short tag for one exit in the pill: its default (or first) group, "+2" for the others
+function exitTag(x) {
+  const main = x.groups.find((g) => g.isDefault) || x.groups[0];
+  return shortGroup(main.group, main.isDefault) + (x.groups.length > 1 ? ` +${x.groups.length - 1}` : "");
+}
+
+// One row per exit IP: IP · node · ISP, then the groups that use it
 function groupExitCard(groups) {
-  const rows = groups.map((g) => {
-    const geo = [g.cc ? country(g.cc) : "", g.org || ""].filter(Boolean).join(" · ");
+  const exits = exitsByIp(groups);
+  const rows = exits.map((x) => {
+    const geo = [x.cc ? country(x.cc) : "", x.org || ""].filter(Boolean).join(" · ");
+    const chips = x.groups.map((g) => `<span class="gx-chip">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</span>`).join("");
     return `<div class="gx-row">
-      <div class="gx-name">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</div>
-      <div class="gx-ip mono">${g.ip ? `${flagImg(g.cc, "sm")} ${esc(g.ip)}` : `<span class="crit">${esc(g.error ? "检测失败" : "—")}</span>`}</div>
-      <div class="gx-meta">${g.node ? decorate(g.node) : ""}${geo ? ` · ${esc(geo)}` : ""}</div>
+      <div class="gx-ip mono">${x.ip ? `${flagImg(x.cc)} ${esc(x.ip)}` : `<span class="crit">${esc(x.error ? "检测失败" : "—")}</span>`}</div>
+      <div class="gx-meta">${x.nodes.map(decorate).join("、")}${geo ? `${x.nodes.length ? " · " : ""}${esc(geo)}` : ""}</div>
+      <div class="gx-groups">${chips}</div>
     </div>`;
   }).join("");
-  return `<div class="exit-card gx"><div class="label">代理出口（按分组）</div>${rows}</div>`;
+  const n = (groups || []).length;
+  return `<div class="exit-card gx"><div class="label">代理出口<span class="gx-sum">${exits.length} 个 IP · ${n} 个分组</span></div>${rows}</div>`;
 }
 
 // The exit shown in the pill: the default (fallback) group, else the old single proxy check.
