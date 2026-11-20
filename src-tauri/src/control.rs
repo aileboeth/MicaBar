@@ -264,6 +264,31 @@ pub fn match_group(config_file: &Path) -> Option<String> {
     })
 }
 
+/// Targets of the running config's rules, in rule order, each once ("DOMAIN-SUFFIX,x,G",
+/// "RULE-SET,x,G,no-resolve", "AND,((…),(…)),G", "MATCH,G"); built-in policies are left out.
+pub fn rule_groups(config_file: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(config_file) else { return Vec::new() };
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for r in doc.get("rules").and_then(|r| r.as_sequence()).into_iter().flatten() {
+        let Some(s) = r.as_str() else { continue };
+        let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+        let target = if parts.first() == Some(&"MATCH") {
+            parts.get(1).copied()
+        } else {
+            parts.iter().rev().copied().find(|p| !matches!(*p, "no-resolve" | "src" | "dst") && !p.is_empty())
+        };
+        let Some(t) = target else { continue };
+        if matches!(t, "DIRECT" | "REJECT" | "REJECT-DROP" | "PASS" | "COMPATIBLE") || t.ends_with(')') {
+            continue;
+        }
+        if !out.iter().any(|g| g == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
 pub const GUARD_PROVIDERS: [(&str, &str, &str); 3] = [
     ("micabar-guard-domain", "domain", "guard-domain"),
     ("micabar-guard-kw", "classical", "guard-kw"),

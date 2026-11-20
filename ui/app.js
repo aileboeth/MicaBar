@@ -1867,8 +1867,8 @@ function settingsHtml() {
     ${sNumber("rotate.interval", "每项显示", 2, 60, 1, "秒")}
   </div>
   <div class="s-sec"><div class="s-title">分组出口<span class="s-note">每个分组单独测一次出口 IP（经覆写里只监听本机的专用端口）</span></div>
-    ${sSelect("exit.mode", "显示哪些分组", [["auto", "自动：兜底分组 + 最近有流量的分组"], ["manual", "手动勾选"]])}
-    ${sNumber("exit.max", "　最多", 1, 12, 1, "个")}
+    ${sSelect("exit.mode", "显示哪些分组", [["auto", "自动：每个不同的出口节点测一次（兜底分组和有流量的分组优先）"], ["manual", "手动勾选"]])}
+    ${sNumber("exit.max", "　最多测", 1, 12, 1, "个出口", "用同一个节点的分组共用一次检测，不占名额")}
     ${sget("exit.mode") === "manual" ? groupPickerHtml() : ""}
   </div>
   <div class="s-sec"><div class="s-title">AI 额度<span class="s-note">用本机已登录的凭据向各家官方查询，只读，不保存、不外传</span></div>

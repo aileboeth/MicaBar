@@ -680,12 +680,18 @@ impl Collector {
                     *score.entry(g.clone()).or_insert(0.0) += u + d;
                 }
             }
-            // a group that just became busy and isn't measured yet: measure soon (at most once a minute)
+            // traffic through a node that isn't measured yet (a group just switched, a speed test on
+            // another node): measure soon, at most once a minute
             static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             if settings::str_at("exit.mode", "auto") == "auto" {
-                let measured: HashSet<String> = sh.exit.lock().unwrap().groups.iter().filter_map(|g| g.r.group.clone()).collect();
+                let nodes: HashSet<String> = sh.exit.lock().unwrap().groups.iter().filter_map(|g| g.r.node.clone()).collect();
                 let max = settings::num_at("exit.max", 4.0).clamp(1.0, 12.0) as usize;
-                let new_busy = !measured.is_empty() && measured.len() < max && score.iter().any(|(g, v)| *v > 512.0 && !measured.contains(g));
+                let new_busy = !nodes.is_empty()
+                    && nodes.len() < max
+                    && mconns.iter().any(|c| {
+                        let n = c.chains.first().map(|s| s.as_str()).unwrap_or("DIRECT");
+                        n != "DIRECT" && !n.starts_with("REJECT") && !nodes.contains(n) && conn_rate.get(&c.id).map(|(u, d)| u + d > 2048.0).unwrap_or(false)
+                    });
                 let now = now_ms();
                 if new_busy && now - LAST.load(Ordering::Relaxed) > 60_000 {
                     LAST.store(now, Ordering::Relaxed);
@@ -1031,24 +1037,9 @@ async fn check_one(sh: Arc<Shared>, kind: Check) -> ExitResult {
     r
 }
 
-/// Follows a group's current choice down to a real node (groups can point at groups).
-fn leaf_node(ctl: &Controller, secret: Option<&str>, group: &str) -> Option<String> {
-    let mut name = group.to_string();
-    for _ in 0..5 {
-        let b = mihomo::get(ctl, &format!("/proxies/{}", pct(&name)), secret).ok()?;
-        let v: serde_json::Value = serde_json::from_slice(&b).ok()?;
-        match v.get("now").and_then(|n| n.as_str()) {
-            Some(now) if !now.is_empty() => name = now.to_string(),
-            _ => return Some(name),
-        }
-    }
-    Some(name)
-}
-
-/// Which groups to measure: settings `exit.mode` = auto (fallback group + busiest groups) or
+/// The groups that matter most: settings `exit.mode` = auto (fallback group + busiest groups) or
 /// manual (`exit.groups`); only groups that have an inbound in the running config.
 fn groups_to_measure(sh: &Shared, listeners: &[(String, u16)], default_group: Option<&str>) -> Vec<(String, u16)> {
-    let max = settings::num_at("exit.max", 4.0).clamp(1.0, 12.0) as usize;
     let port_of = |g: &str| listeners.iter().find(|(n, _)| n == g).map(|(_, p)| *p);
     let mut picked: Vec<String> = Vec::new();
     if settings::str_at("exit.mode", "auto") == "manual" {
@@ -1068,9 +1059,43 @@ fn groups_to_measure(sh: &Shared, listeners: &[(String, u16)], default_group: Op
             }
         }
     }
-    picked.into_iter().filter_map(|g| port_of(&g).map(|p| (g, p))).take(max).collect()
+    picked.into_iter().filter_map(|g| port_of(&g).map(|p| (g, p))).collect()
 }
 
+/// Every group's current choice followed down to a real node, from one /proxies call, plus the
+/// selector groups someone switched by hand (their choice isn't the subscription's first entry).
+fn leaf_nodes(sh: &Shared) -> (HashMap<String, String>, HashSet<String>) {
+    let mut out = HashMap::new();
+    let mut switched = HashSet::new();
+    let Ok((ctl, secret)) = ctl_link(sh) else { return (out, switched) };
+    let Some(v) = mihomo::get(&ctl, "/proxies", secret.as_deref()).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else {
+        return (out, switched);
+    };
+    let Some(all) = v.get("proxies").and_then(|p| p.as_object()) else { return (out, switched) };
+    let now = |n: &str| all.get(n).and_then(|p| p.get("now")).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    for (name, p) in all {
+        let Some(first) = now(name) else { continue };
+        let is_selector = p.get("type").and_then(|t| t.as_str()) == Some("Selector");
+        let head = p.get("all").and_then(|a| a.as_array()).and_then(|a| a.first()).and_then(|x| x.as_str());
+        if is_selector && head.map(|h| h != first).unwrap_or(false) {
+            switched.insert(name.clone());
+        }
+        let mut cur = first;
+        for _ in 0..6 {
+            match now(&cur) {
+                Some(next) => cur = next,
+                None => break,
+            }
+        }
+        out.insert(name.clone(), cur);
+    }
+    (out, switched)
+}
+
+/// One exit probe per distinct node. Groups that leave through the same node share one IP, so
+/// the fallback group and the busiest groups come first, then every other group a rule points at
+/// whose node differs (e.g. the speed-test group switched to Singapore): each different exit is
+/// measured once, up to `exit.max` of them. Groups on a measured node are listed with it.
 async fn measure_groups(sh: Arc<Shared>) -> Vec<GroupExit> {
     let Some(file) = mihomo::read_config().file else { return Vec::new() };
     let path = std::path::PathBuf::from(file);
@@ -1079,11 +1104,57 @@ async fn measure_groups(sh: Arc<Shared>) -> Vec<GroupExit> {
         return Vec::new();
     }
     let default_group = control::match_group(&path);
-    let todo = groups_to_measure(&sh, &listeners, default_group.as_deref());
+    let picked = groups_to_measure(&sh, &listeners, default_group.as_deref());
+    let max = settings::num_at("exit.max", 4.0).clamp(1.0, 12.0) as usize;
+    let manual = settings::str_at("exit.mode", "auto") == "manual";
+    let sh2 = sh.clone();
+    let (leaf, switched) = tauri::async_runtime::spawn_blocking(move || leaf_nodes(&sh2)).await.unwrap_or_default();
+    let port_of = |g: &str| listeners.iter().find(|(n, _)| n == g).map(|(_, p)| *p);
+    let picked_names: Vec<String> = picked.iter().map(|(g, _)| g.clone()).collect();
+    // candidates: the important groups, then (auto mode, nodes known) the other rule targets that
+    // are in use or were chosen on purpose: switched by hand first (the speed-test group moved to
+    // Singapore), then ones that carried some traffic lately; untouched idle groups are left out
+    let mut cands: Vec<(String, u16)> = picked.clone();
+    if !manual && !leaf.is_empty() {
+        let score = sh.group_score.lock().unwrap().clone();
+        let mut rest: Vec<(usize, String, u16)> = control::rule_groups(&path)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, g)| !cands.iter().any(|(c, _)| c == g))
+            .filter_map(|(i, g)| port_of(&g).map(|p| (i, g, p)))
+            .collect();
+        let rank = |g: &str| if switched.contains(g) { 0 } else if score.get(g).copied().unwrap_or(0.0) > 1.0 { 1 } else { 2 };
+        rest.retain(|(_, g, _)| rank(g) < 2);
+        rest.sort_by_key(|(i, g, _)| (rank(g), *i));
+        cands.extend(rest.into_iter().map(|(_, g, p)| (g, p)));
+    }
+    // node key: the leaf node, or the group itself when the node isn't known
+    let key = |g: &str| leaf.get(g).cloned().unwrap_or_else(|| format!("group:{g}"));
+    let mut probes: Vec<(String, String, u16)> = Vec::new(); // (node key, group probed, port)
+    let mut members: HashMap<String, Vec<String>> = HashMap::new();
+    for (g, p) in &cands {
+        let k = key(g);
+        let important = picked_names.contains(g);
+        // blocked groups never leave; groups going DIRECT only matter when they carry traffic
+        if k.starts_with("REJECT") || k == "PASS" || (k == "DIRECT" && !important) {
+            continue;
+        }
+        if !probes.iter().any(|(pk, _, _)| *pk == k) {
+            if probes.len() >= max {
+                continue;
+            }
+            probes.push((k.clone(), g.clone(), *p));
+        }
+        // the main exit lists only the groups that matter (dozens of rule groups follow it);
+        // another exit lists every group that uses it
+        let main_key = default_group.as_deref().map(|d| key(d));
+        if important || main_key.as_deref() != Some(k.as_str()) {
+            members.entry(k).or_default().push(g.clone());
+        }
+    }
     let mut handles = Vec::new();
-    for (group, port) in todo {
+    for (k, group, port) in probes {
         let sh2 = sh.clone();
-        let is_default = default_group.as_deref() == Some(group.as_str());
         handles.push(tauri::async_runtime::spawn(async move {
             let mut r = ExitResult { at: now_ms(), ..Default::default() };
             match exitip::client(Some(port)) {
@@ -1100,23 +1171,21 @@ async fn measure_groups(sh: Arc<Shared>) -> Vec<GroupExit> {
                 },
                 Err(e) => r.error = Some(e),
             }
-            let g2 = group.clone();
-            let node = tauri::async_runtime::spawn_blocking(move || {
-                let (ctl, secret) = ctl_link(&sh2).ok()?;
-                leaf_node(&ctl, secret.as_deref(), &g2)
-            })
-            .await
-            .ok()
-            .flatten();
-            r.group = Some(group);
-            r.node = node;
-            GroupExit { is_default, r }
+            (k, group, r)
         }));
     }
     let mut out = Vec::new();
     for h in handles {
-        if let Ok(g) = h.await {
-            out.push(g);
+        let Ok((k, probed, mut r)) = h.await else { continue };
+        if !k.starts_with("group:") {
+            r.node = Some(k.clone());
+        }
+        let groups = members.get(&k).cloned().unwrap_or_else(|| vec![probed]);
+        for g in groups {
+            let mut r2 = r.clone();
+            let is_default = default_group.as_deref() == Some(g.as_str());
+            r2.group = Some(g);
+            out.push(GroupExit { is_default, r: r2 });
         }
     }
     out

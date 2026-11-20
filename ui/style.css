@@ -1031,8 +1031,8 @@ body[data-mode="manager"] .su-list { max-height: none; overflow: visible; }
 .sm-apps .m-hint { margin-top: 8px; }
 
 /* several exit IPs in the pill: stacked in small type (max 3), group tag | flag | IP lined up */
-.px-stack { display: inline-grid; grid-template-columns: auto auto auto; column-gap: 5px; row-gap: 0; align-items: center; line-height: 1.15; }
-.px-stack .px-tag { font-size: 9.5px; color: var(--dim); justify-self: end; max-width: 8em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.px-stack { flex: none; display: inline-grid; grid-template-columns: auto auto auto; column-gap: 5px; row-gap: 0; align-items: center; line-height: 1.15; }
+.px-stack .px-tag { font-size: 9.5px; color: var(--dim); justify-self: end; white-space: nowrap; }
 .px-stack .flag { width: 12px; height: 9px; }
 .px-stack .px-ip { font-size: 11.5px; white-space: nowrap; }
 .px-stack.n3 { line-height: 1.08; }
