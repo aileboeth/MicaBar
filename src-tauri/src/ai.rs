@@ -6,11 +6,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Serialize, Clone, Default, Debug)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Window {
     /// "5 小时", "每周", a model name…
     pub label: String,
@@ -20,8 +20,8 @@ pub struct Window {
     pub resets_at: Option<u64>,
 }
 
-#[derive(Serialize, Clone, Default, Debug)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Quota {
     /// claude | codex | antigravity | grok
     pub tool: String,
@@ -463,10 +463,66 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
     Ok(Quota { plan, windows, source: Some("Grok 账户用量".into()), ..Default::default() })
 }
 
+type Map<T> = std::sync::Mutex<std::collections::HashMap<String, T>>;
+
 /// Per tool: (429s in a row, no request before this epoch ms).
-fn backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, (u32, u64)>> {
-    static B: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u32, u64)>>> = std::sync::OnceLock::new();
+fn backoff() -> &'static Map<(u32, u64)> {
+    static B: std::sync::OnceLock<Map<(u32, u64)>> = std::sync::OnceLock::new();
     B.get_or_init(Default::default)
+}
+
+/// Per tool: epoch ms of the last request actually sent to its service.
+fn last_sent() -> &'static Map<u64> {
+    static L: std::sync::OnceLock<Map<u64>> = std::sync::OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// Shortest gap between two scheduled queries of one tool. Anthropic's usage endpoint answers 429
+/// quickly (and the limit is shared with Claude Code itself), so Claude never goes below 10 minutes.
+pub fn floor_ms(tool: &str) -> u64 {
+    if tool == "claude" { 10 * 60_000 } else { 60_000 }
+}
+
+/// Whether `tool` should be asked again now. A manual refresh still waits a minute per tool.
+pub fn due(tool: &str, every_ms: u64, manual: bool, have_prev: bool) -> bool {
+    let last = last_sent().lock().unwrap().get(tool).copied().unwrap_or(0);
+    let gap = if manual { 60_000 } else { every_ms.max(floor_ms(tool)) };
+    !have_prev || crate::now_ms().saturating_sub(last) >= gap
+}
+
+/// Results, backoff and request times survive restarts (an update or a restart used to fire a
+/// fresh round at once, which is what ran into Anthropic's 429). Only percentages, plan names and
+/// times are kept here, never credentials.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Cache {
+    quotas: Vec<Quota>,
+    backoff: std::collections::HashMap<String, (u32, u64)>,
+    last_sent: std::collections::HashMap<String, u64>,
+}
+
+fn cache_path() -> PathBuf {
+    crate::log_path().with_file_name("ai-cache.json")
+}
+
+pub fn load_cache() -> Vec<Quota> {
+    let Some(c) = std::fs::read_to_string(cache_path()).ok().and_then(|t| serde_json::from_str::<Cache>(&t).ok()) else {
+        return Vec::new();
+    };
+    *backoff().lock().unwrap() = c.backoff;
+    *last_sent().lock().unwrap() = c.last_sent;
+    c.quotas
+}
+
+pub fn save_cache(quotas: &[Quota]) {
+    let c = Cache {
+        quotas: quotas.to_vec(),
+        backoff: backoff().lock().unwrap().clone(),
+        last_sent: last_sent().lock().unwrap().clone(),
+    };
+    if let Ok(t) = serde_json::to_string(&c) {
+        let _ = std::fs::write(cache_path(), t);
+    }
 }
 
 /// Queries one tool. `prev` keeps the last good numbers when a query fails.
@@ -478,6 +534,7 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
     let r = if at < until {
         Err(format!("官方接口限流，{} 后再查", crate::fmt_time(until).get(..5).unwrap_or("")))
     } else {
+        last_sent().lock().unwrap().insert(tool.to_string(), at);
         match tool {
             "claude" => claude(proxy).await,
             "codex" => codex(proxy).await,

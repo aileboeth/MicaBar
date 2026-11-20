@@ -1047,7 +1047,7 @@ function aiTabHtml() {
       <button class="ghost" data-do="ai-refresh">立即刷新</button></div>
     <div class="ai-grid">${list}</div>
     <div class="m-hint">用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方；
-      登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 5)} 分钟查一次。</div>
+      登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 10)} 分钟查一次（Claude 至少 10 分钟一次：官方接口限流很严，而且和 Claude Code 自己共用额度）；结果会保存，重启 MicaBar 不会重新查。</div>
   </div>`;
 }
 
@@ -1305,7 +1305,7 @@ function settingsHtml() {
     ${sToggle("ai.codex", "　Codex", "需要用 ChatGPT 账号登录的 Codex")}
     ${sToggle("ai.antigravity", "　Antigravity", "Antigravity 打开并进入工作区时才能读到")}
     ${sToggle("ai.grok", "　Grok", "需要用 grok CLI 登录过")}
-    ${sNumber("ai.interval", "　每隔多久查一次", 1, 120, 1, "分钟")}
+    ${sNumber("ai.interval", "　每隔多久查一次", 1, 120, 1, "分钟", "Claude 最少 10 分钟一次，设得更短也按 10 分钟")}
   </div>
   <div class="s-sec"><div class="s-title">正在播放</div>
     ${sToggle("media.on", "显示正在播放的歌", "读取 Windows 媒体控制（网易云、QQ 音乐、Spotify、浏览器等）")}
@@ -1371,15 +1371,43 @@ function updateCardHtml() {
       <span class="upd-badge">新版本</span>
       <span class="upd-ver"><b>MicaBar ${esc(u.version)}</b><span class="upd-cur">当前 ${esc(appInfo?.version || u.current || "")}</span></span>
       <span class="upd-btns">
-        ${installed ? `<button class="primary" data-do="update-install">下载并更新</button>` : `<button class="primary" data-do="open-releases">去下载</button>`}
+        ${!installed ? `<button class="primary" data-do="open-releases">去下载</button>`
+          : updProgress ? `<button class="primary" disabled>${updProgress.phase === "install" ? "正在安装…" : "下载中…"}</button>`
+          : `<button class="primary" data-do="update-install">${updFailed ? "重试" : "下载并更新"}</button>`}
       </span>
     </div>
+    ${updProgress ? updProgressHtml() : ""}
     ${notes.length ? `<ul class="upd-notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
     <div class="upd-foot">${installed
       ? "下载后会校验签名并自动安装，MicaBar 会重启一次"
       : `便携版不能自动更新：下载新的 <span class="mono">MicaBar_${esc(u.version)}_portable.exe</span> 换掉现在这个即可，设置和记录都会保留；也可以改用安装版，以后自动更新`}</div>
   </div>`;
 }
+// download / install progress of the update, from the backend's "update-progress" events
+let updProgress = null;
+let updFailed = false;
+const fmtMB = (b) => (b / 1048576).toFixed(1);
+function updProgressParts() {
+  const p = updProgress;
+  if (p.phase === "install") return { pct: 100, text: "已下载并校验签名，正在安装；MicaBar 会关掉再自己打开（可能弹一次 UAC）" };
+  const pct = p.total ? Math.min(100, Math.round((p.got / p.total) * 100)) : null;
+  return { pct, text: p.total ? `下载中 ${pct}% · ${fmtMB(p.got)} / ${fmtMB(p.total)} MB` : `下载中 · ${fmtMB(p.got || 0)} MB` };
+}
+function updProgressHtml() {
+  const { pct, text } = updProgressParts();
+  return `<div class="upd-prog"><div class="upd-bar ${pct == null ? "busy" : ""}"><i style="width:${pct ?? 30}%"></i></div><div class="upd-ptext">${esc(text)}</div></div>`;
+}
+listen("update-progress", (e) => {
+  const first = !updProgress || updProgress.phase !== e.payload.phase;
+  updProgress = e.payload;
+  const bar = document.querySelector(".upd-bar i");
+  if (first || !bar) { renderList(true); return; }
+  const { pct, text } = updProgressParts();
+  bar.style.width = `${pct ?? 30}%`;
+  const pt = document.querySelector(".upd-ptext");
+  if (pt) pt.textContent = text;
+});
+
 function refreshAppInfo() {
   invoke("app_info").then((i) => { appInfo = i; if (tab === "settings") renderList(true); }).catch(() => {});
 }
@@ -1740,8 +1768,17 @@ async function runAction(el) {
       renderList(true);
       return;
     } else if (act === "update-install") {
-      toast("正在下载更新，完成后会自动重启…");
-      await invoke("update_install");
+      updFailed = false;
+      updProgress = { phase: "download", got: 0, total: null };
+      renderList(true);
+      try {
+        await invoke("update_install");
+      } catch (err) {
+        updProgress = null;
+        updFailed = true;
+        renderList(true);
+        throw err;
+      }
       return;
     } else if (act === "open-releases") {
       invoke("open_url", { url: REPO + "/releases/latest" });

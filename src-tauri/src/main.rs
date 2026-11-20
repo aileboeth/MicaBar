@@ -1501,9 +1501,41 @@ async fn update_install(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) ->
     }
     let u = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?.ok_or("已经是最新版本")?;
     log(format!("update: installing {}", u.version));
+    // progress for the update card: {phase: download|install, got, total}
+    let _ = app.emit("update-progress", serde_json::json!({ "phase": "download", "got": 0, "total": null }));
+    let bytes = u
+        .download(
+            {
+                let app = app.clone();
+                let mut got = 0u64;
+                let mut sent = 0u64;
+                move |n, total| {
+                    got += n as u64;
+                    // at most ~100 events: every 1 % (or every 256 KB when the size is unknown)
+                    let step = total.map(|t| (t / 100).max(1)).unwrap_or(256 * 1024);
+                    if got - sent >= step || total == Some(got) {
+                        sent = got;
+                        let _ = app.emit("update-progress", serde_json::json!({ "phase": "download", "got": got, "total": total }));
+                    }
+                }
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| {
+            log(format!("update: download failed: {e}"));
+            format!("下载失败：{e}")
+        })?;
+    log(format!("update: downloaded {} bytes, signature ok, installing", bytes.len()));
+    let _ = app.emit("update-progress", serde_json::json!({ "phase": "install" }));
+    // give the page a moment to show "正在安装" before the installer closes us
+    tokio::time::sleep(Duration::from_millis(600)).await;
     state.traffic.lock().unwrap().flush();
     speed::stop();
-    u.download_and_install(|_, _| {}, || {}).await.map_err(|e| format!("更新失败：{e}"))?;
+    u.install(bytes).map_err(|e| {
+        log(format!("update: install failed: {e}"));
+        format!("安装失败：{e}")
+    })?;
     app.restart();
 }
 
@@ -1828,27 +1860,45 @@ fn ai_proxy(sh: &Shared) -> Option<u16> {
     }
 }
 
-async fn ai_round(app: &AppHandle, sh: &Arc<Shared>) {
+fn ai_every_ms() -> u64 {
+    (settings::num_at("ai.interval", 10.0).clamp(1.0, 120.0) * 60_000.0) as u64
+}
+
+/// Asks only the tools that are due (each has its own clock); the others keep their last numbers.
+async fn ai_round(app: &AppHandle, sh: &Arc<Shared>, manual: bool) {
     let proxy = ai_proxy(sh);
     let prev = sh.ai.lock().unwrap().clone();
+    let every = ai_every_ms();
     let mut out = Vec::new();
+    let mut asked = false;
     for (tool, _) in ai::TOOLS {
         if !settings::bool_at(&format!("ai.{tool}"), true) {
             continue;
         }
-        let q = ai::query(tool, proxy, prev.iter().find(|p| p.tool == tool)).await;
+        let p = prev.iter().find(|p| p.tool == tool);
+        if !ai::due(tool, every, manual, p.is_some()) {
+            out.extend(p.cloned());
+            continue;
+        }
+        asked = true;
+        let q = ai::query(tool, proxy, p).await;
         if q.status != "ok" {
             log(format!("ai {tool}: {} {}", q.status, q.message.clone().unwrap_or_default()));
         }
         out.push(q);
     }
+    let changed = asked || out.len() != prev.len();
     *sh.ai.lock().unwrap() = out.clone();
-    let _ = app.emit("ai", out);
+    if asked {
+        ai::save_cache(&out);
+    }
+    if changed {
+        let _ = app.emit("ai", out);
+    }
 }
 
 fn ai_loop(app: AppHandle, sh: Arc<Shared>) {
     tauri::async_runtime::spawn(async move {
-        let mut last: Option<Instant> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if !settings::bool_at("ai.on", true) {
@@ -1858,12 +1908,8 @@ fn ai_loop(app: AppHandle, sh: Arc<Shared>) {
                 }
                 continue;
             }
-            let every = Duration::from_secs((settings::num_at("ai.interval", 5.0).clamp(1.0, 120.0) * 60.0) as u64);
-            let due = last.map(|t| t.elapsed() >= every).unwrap_or(true);
-            if sh.ai_trigger.swap(false, Ordering::SeqCst) || due {
-                last = Some(Instant::now());
-                ai_round(&app, &sh).await;
-            }
+            let manual = sh.ai_trigger.swap(false, Ordering::SeqCst);
+            ai_round(&app, &sh, manual).await;
         }
     });
 }
@@ -2110,8 +2156,8 @@ fn main() {
         latency_history: Mutex::new(std::collections::VecDeque::new()),
         traffic: Mutex::new(traffic::Book::new()),
         group_score: Mutex::new(HashMap::new()),
-        ai: Mutex::new(Vec::new()),
-        ai_trigger: AtomicBool::new(true),
+        ai: Mutex::new(ai::load_cache()),
+        ai_trigger: AtomicBool::new(false),
         media: Arc::new(Mutex::new(None)),
         exit_trigger: AtomicBool::new(false),
         admin,

@@ -27,7 +27,7 @@ pub fn defaults() -> Value {
         "interaction": {
             // hover | click
             "expand": "hover",
-            "hoverDelay": 300,
+            "hoverDelay": 500,
             // mouse never opens the island; only the hotkey does, clicks pass through
             "passthrough": false,
             // hover mode: the collapsed pill turns see-through while the cursor rests on it
@@ -83,8 +83,8 @@ pub fn defaults() -> Value {
         },
         "ai": {
             "on": true,
-            // minutes between queries
-            "interval": 5,
+            // minutes between queries (Claude: at least 10)
+            "interval": 10,
             "claude": true,
             "codex": true,
             "antigravity": true,

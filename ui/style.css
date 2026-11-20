@@ -827,6 +827,13 @@ body[data-mode="manager"] #gear { display: none; }
 .upd-btns button { white-space: nowrap; }
 .upd-notes { margin: 10px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12.5px; line-height: 1.5; color: var(--text); }
 .upd-notes li::marker { color: var(--blue); }
+.upd-prog { margin-top: 10px; }
+.upd-bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--blue) 18%, transparent); overflow: hidden; }
+.upd-bar i { display: block; height: 100%; border-radius: 3px; background: var(--blue); transition: width .25s ease; }
+.upd-bar.busy i { animation: upd-busy 1.2s ease-in-out infinite; }
+@keyframes upd-busy { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.upd-ptext { margin-top: 6px; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.upd-btns button:disabled { opacity: .7; cursor: default; }
 .upd-foot { margin-top: 8px; font-size: 11.5px; color: var(--dim); line-height: 1.5; }
 
 /* collapsed pill: user opacity (text included) */

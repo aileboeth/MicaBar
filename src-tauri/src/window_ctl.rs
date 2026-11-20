@@ -419,7 +419,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
                 let _ = app.emit("maximized", max);
             }
         }
-        let dwell = Duration::from_millis(crate::settings::num_at("interaction.hoverDelay", 300.0).clamp(0.0, 3000.0) as u64);
+        let dwell = Duration::from_millis(crate::settings::num_at("interaction.hoverDelay", 500.0).clamp(0.0, 3000.0) as u64);
         let click_mode = crate::settings::str_at("interaction.expand", "hover") == "click";
         let passthrough = crate::settings::bool_at("interaction.passthrough", false);
         if !click_mode || passthrough {
