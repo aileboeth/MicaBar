@@ -18,6 +18,8 @@ pub struct Window {
     pub used: f64,
     /// epoch ms
     pub resets_at: Option<u64>,
+    /// pool the window belongs to when a tool has several (Antigravity: "Gemini", "Claude / GPT")
+    pub group: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -174,7 +176,7 @@ async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
     for (key, label) in [("five_hour", "5 小时"), ("seven_day", "每周"), ("seven_day_opus", "每周 · Opus"), ("seven_day_sonnet", "每周 · Sonnet")] {
         if let Some(w) = u.get(key).filter(|w| w.is_object()) {
             if let Some(used) = w.get("utilization").and_then(|x| x.as_f64()) {
-                windows.push(Window { label: label.into(), used, resets_at: w.get("resets_at").and_then(time_ms) });
+                windows.push(Window { label: label.into(), used, resets_at: w.get("resets_at").and_then(time_ms), group: None });
             }
         }
     }
@@ -199,7 +201,7 @@ fn codex_window(w: &Value, now: u64) -> Option<Window> {
         .or_else(|| w.get("resets_at"))
         .and_then(time_ms)
         .or_else(|| w.get("reset_after_seconds").or_else(|| w.get("resets_in_seconds")).and_then(|x| x.as_f64()).map(|s| now + (s * 1000.0) as u64));
-    Some(Window { label: if secs > 0.0 { window_label(secs) } else { "额度".into() }, used, resets_at })
+    Some(Window { label: if secs > 0.0 { window_label(secs) } else { "额度".into() }, used, resets_at, group: None })
 }
 
 /// Newest rate-limit snapshot Codex wrote into its session logs (offline fallback).
@@ -353,7 +355,7 @@ fn ag_windows(v: &Value, out: &mut Vec<Window>) {
                 if let Some(rem) = q.get("remainingFraction").and_then(|x| x.as_f64()) {
                     let reset = q.get("resetTime").or_else(|| m.get("resetTime")).and_then(time_ms);
                     if !out.iter().any(|w| w.label == label) {
-                        out.push(Window { label: label.to_string(), used: ((1.0 - rem) * 100.0).clamp(0.0, 100.0), resets_at: reset });
+                        out.push(Window { label: label.to_string(), used: ((1.0 - rem) * 100.0).clamp(0.0, 100.0), resets_at: reset, group: None });
                     }
                     return;
                 }
@@ -363,6 +365,39 @@ fn ag_windows(v: &Value, out: &mut Vec<Window>) {
         Value::Array(a) => a.iter().for_each(|x| ag_windows(x, out)),
         _ => {}
     }
+}
+
+/// RetrieveUserQuotaSummary: {response: {groups: [{displayName: "Gemini Models", buckets: [{window:
+/// "5h" | "weekly", remainingFraction, resetTime}]}]}} -> "Gemini · 5 小时", "Gemini · 每周", …
+fn ag_summary(v: &Value) -> Vec<Window> {
+    let mut out = Vec::new();
+    let Some(groups) = find_key(v, "groups").and_then(|g| g.as_array()) else { return out };
+    for g in groups {
+        let name = g.get("displayName").and_then(|x| x.as_str()).unwrap_or("模型");
+        let short = match name.trim_end_matches(" models").trim_end_matches(" Models") {
+            "Claude and GPT" => "Claude / GPT".to_string(),
+            s => s.to_string(),
+        };
+        let mut buckets: Vec<&Value> = g.get("buckets").and_then(|b| b.as_array()).map(|b| b.iter().collect()).unwrap_or_default();
+        // 5-hour first, then weekly
+        buckets.sort_by_key(|b| if b.get("window").and_then(|w| w.as_str()) == Some("5h") { 0 } else { 1 });
+        for b in buckets {
+            let Some(rem) = b.get("remainingFraction").and_then(|x| x.as_f64()) else { continue };
+            let kind = match b.get("window").and_then(|w| w.as_str()) {
+                Some("5h") => "5 小时".to_string(),
+                Some("weekly") => "每周".to_string(),
+                Some(o) => o.to_string(),
+                None => b.get("displayName").and_then(|x| x.as_str()).unwrap_or("额度").to_string(),
+            };
+            out.push(Window {
+                label: format!("{short} · {kind}"),
+                used: ((1.0 - rem) * 100.0).clamp(0.0, 100.0),
+                resets_at: b.get("resetTime").and_then(time_ms),
+                group: Some(short.clone()),
+            });
+        }
+    }
+    out
 }
 
 async fn antigravity() -> Result<Quota, String> {
@@ -410,8 +445,12 @@ async fn antigravity() -> Result<Quota, String> {
                     continue;
                 }
                 let Ok(v) = r.json::<Value>().await else { continue };
-                let mut windows = Vec::new();
-                ag_windows(&v, &mut windows);
+                // the quota summary: per model group a 5-hour and a weekly bucket (what the IDE
+                // itself shows); older servers only list every model's own fraction
+                let mut windows = ag_summary(&v);
+                if windows.is_empty() {
+                    ag_windows(&v, &mut windows);
+                }
                 if windows.is_empty() {
                     continue;
                 }
@@ -463,12 +502,12 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
     let end = cfg.pointer("/currentPeriod/end").or_else(|| cfg.get("billingPeriodEnd")).and_then(time_ms);
     let mut windows = Vec::new();
     if let Some(p) = cfg.get("creditUsagePercent").and_then(|x| x.as_f64()) {
-        windows.push(Window { label: "本期额度".into(), used: p, resets_at: end });
+        windows.push(Window { label: "本期额度".into(), used: p, resets_at: end, group: None });
     }
     if let Some(list) = cfg.get("productUsage").and_then(|x| x.as_array()) {
         for p in list {
             if let (Some(name), Some(u)) = (p.get("product").and_then(|x| x.as_str()), p.get("usagePercent").and_then(|x| x.as_f64())) {
-                windows.push(Window { label: name.to_string(), used: u, resets_at: end });
+                windows.push(Window { label: name.to_string(), used: u, resets_at: end, group: None });
             }
         }
     }

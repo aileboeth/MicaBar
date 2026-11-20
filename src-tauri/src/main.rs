@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ai;
+mod audio;
 mod conn;
 mod control;
 mod dns;
@@ -1382,25 +1383,47 @@ fn latency_wanted() -> bool {
         || settings::item_on("panel.tabs", "nodes")
 }
 
-/// Asks mihomo for the delay of the node the proxy exit currently uses.
+/// Asks mihomo for the delay of every node the exits currently use: the main one (default group,
+/// shown in the pill and used by the flashes) first, then the other groups' nodes. One round of
+/// samples shares one timestamp so the page can draw a line per node.
 fn probe_latency(sh: &Shared) {
-    let Some(node) = sh.exit.lock().unwrap().proxy.as_ref().and_then(|e| e.node.clone()) else { return };
+    let nodes: Vec<String> = {
+        let ex = sh.exit.lock().unwrap();
+        let main = ex.groups.iter().find(|g| g.is_default).and_then(|g| g.r.node.clone()).or_else(|| ex.proxy.as_ref().and_then(|e| e.node.clone()));
+        let mut v: Vec<String> = main.into_iter().collect();
+        for g in &ex.groups {
+            if let Some(n) = &g.r.node {
+                if !v.contains(n) && !n.eq_ignore_ascii_case("DIRECT") && !n.eq_ignore_ascii_case("REJECT") {
+                    v.push(n.clone());
+                }
+            }
+        }
+        v.truncate(4); // the chart has four series colours
+        v
+    };
+    if nodes.is_empty() {
+        return;
+    }
     let Ok((ctl, secret)) = ctl_link(sh) else { return };
     let url = "https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204";
-    let r = mihomo::get(&ctl, &format!("/proxies/{}/delay?url={url}&timeout=3000", pct(&node)), secret.as_deref());
-    let (ms, error) = match r {
-        Ok(b) => {
-            let d = serde_json::from_slice::<serde_json::Value>(&b).ok().and_then(|v| v.get("delay").and_then(|d| d.as_u64()));
-            (d.map(|d| d as u32), None)
-        }
-        Err(e) => (None, Some(if e.contains("504") || e.to_lowercase().contains("timeout") { "超时".to_string() } else { e })),
-    };
     let now = now_ms();
-    *sh.latency.lock().unwrap() = Latency { node: Some(node.clone()), ms, error, at: now };
-    let mut h = sh.latency_history.lock().unwrap();
-    h.push_back(LatencySample { at: now, node, ms });
-    while h.len() > 1440 {
-        h.pop_front();
+    for (i, node) in nodes.into_iter().enumerate() {
+        let r = mihomo::get(&ctl, &format!("/proxies/{}/delay?url={url}&timeout=3000", pct(&node)), secret.as_deref());
+        let (ms, error) = match r {
+            Ok(b) => {
+                let d = serde_json::from_slice::<serde_json::Value>(&b).ok().and_then(|v| v.get("delay").and_then(|d| d.as_u64()));
+                (d.map(|d| d as u32), None)
+            }
+            Err(e) => (None, Some(if e.contains("504") || e.to_lowercase().contains("timeout") { "超时".to_string() } else { e })),
+        };
+        if i == 0 {
+            *sh.latency.lock().unwrap() = Latency { node: Some(node.clone()), ms, error, at: now };
+        }
+        let mut h = sh.latency_history.lock().unwrap();
+        h.push_back(LatencySample { at: now, node, ms });
+        while h.len() > 1440 * 4 {
+            h.pop_front();
+        }
     }
 }
 
@@ -1928,6 +1951,30 @@ fn ai_get(state: tauri::State<'_, Arc<Shared>>) -> Vec<ai::Quota> {
     state.ai.lock().unwrap().clone()
 }
 
+/// Music bars on or off (a page shows them while a song plays); bands arrive as "viz" events.
+#[tauri::command]
+fn audio_viz(app: AppHandle, window: tauri::Window, on: bool) {
+    // the island and the desktop window each say whether they show bars; on while either does
+    static WANT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let any = {
+        let mut w = WANT.lock().unwrap();
+        w.retain(|l| l != window.label());
+        if on {
+            w.push(window.label().to_string());
+        }
+        !w.is_empty()
+    };
+    audio::set_wanted(any, move |b| {
+        let _ = app.emit("viz", b);
+    });
+}
+
+/// Ends all processes of one app listed on the system monitor page: (ended, failed).
+#[tauri::command]
+async fn sysmon_end(name: String) -> (u32, u32) {
+    tauri::async_runtime::spawn_blocking(move || sysmon::end_app(&name)).await.unwrap_or((0, 0))
+}
+
 /// One sample for the system monitor page (the page polls this while it is open).
 #[tauri::command]
 async fn sysmon_sample() -> sysmon::Sample {
@@ -2229,6 +2276,8 @@ fn main() {
             ai_get,
             ai_refresh,
             sysmon_sample,
+            sysmon_end,
+            audio_viz,
             media_get,
             media_control,
             open_manager,

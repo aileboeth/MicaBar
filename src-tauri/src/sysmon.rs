@@ -88,6 +88,60 @@ pub struct AppUse {
     /// private working set, bytes
     pub mem: u64,
     pub procs: u32,
+    /// false for Windows' own core processes and MicaBar itself (no "end" button)
+    pub killable: bool,
+}
+
+/// Processes that keep Windows itself running: ending them crashes or logs off the session.
+const PROTECTED: [&str; 16] = [
+    "system", "idle", "registry", "memory compression", "secure system", "smss.exe", "csrss.exe", "wininit.exe",
+    "winlogon.exe", "services.exe", "lsass.exe", "lsaiso.exe", "svchost.exe", "dwm.exe", "fontdrvhost.exe", "micabar.exe",
+];
+
+/// (pid, parent pid, exe) of every process.
+fn process_tree() -> Vec<(u32, u32, String)> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let mut out = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut e) != 0 {
+            loop {
+                let end = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                out.push((e.th32ProcessID, e.th32ParentProcessID, String::from_utf16_lossy(&e.szExeFile[..end])));
+                if Process32NextW(snap, &mut e) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+/// MicaBar and everything it started (its WebView2 processes): never ended from the list.
+fn own_tree(tree: &[(u32, u32, String)]) -> std::collections::HashSet<u32> {
+    let mut own = std::collections::HashSet::from([std::process::id()]);
+    loop {
+        let before = own.len();
+        for (pid, parent, _) in tree {
+            if own.contains(parent) && *pid != 0 {
+                own.insert(*pid);
+            }
+        }
+        if own.len() == before {
+            return own;
+        }
+    }
+}
+
+fn protected(exe: &str) -> bool {
+    PROTECTED.contains(&exe.to_ascii_lowercase().as_str())
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -132,6 +186,8 @@ pub struct Monitor {
     gpu_tried: bool,
     adapter: Option<(String, u64)>,
     last_used: Option<Instant>,
+    /// app name -> (pid, exe) of its processes that may be ended, from the latest sample
+    kill: HashMap<String, Vec<(u32, String)>>,
 }
 
 // the PDH handles are only touched behind the monitor's mutex
@@ -286,6 +342,7 @@ impl Monitor {
             gpu_tried: false,
             adapter: None,
             last_used: None,
+            kill: HashMap::new(),
         }
     }
 
@@ -365,8 +422,11 @@ impl Monitor {
         }
 
         // --- apps: processes grouped by their friendly name ---
-        let list = procinfo::list_processes();
+        let tree = process_tree();
+        let own = own_tree(&tree);
+        let list: Vec<(u32, String)> = tree.iter().map(|(p, _, e)| (*p, e.clone())).collect();
         self.procs.refresh(&list);
+        let mut kill: HashMap<String, Vec<(u32, String)>> = HashMap::new();
         let elapsed = self.prev_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         self.prev_at = Some(Instant::now());
         let ncpu = s.eff.len().max(1) as f64;
@@ -415,8 +475,13 @@ impl Monitor {
             g.cpu += cpu;
             g.mem += mem;
             g.procs += 1;
+            if !own.contains(pid) && !protected(&info.exe) && *pid != 4 {
+                g.killable = true;
+                kill.entry(info.display.clone()).or_default().push((*pid, info.exe.clone()));
+            }
         }
         self.prev_proc = next;
+        self.kill = kill;
         // the top apps by CPU and by memory (the page sorts by either)
         let mut all: Vec<AppUse> = groups.into_values().collect();
         all.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal));
@@ -430,6 +495,35 @@ impl Monitor {
         s.apps = keep;
         s
     }
+}
+
+/// Ends every process of one app from the last sample (the pid must still run the same exe; never
+/// Windows core processes or MicaBar's own). Returns (ended, failed).
+pub fn end_app(name: &str) -> (u32, u32) {
+    use windows_sys::Win32::System::Threading::{TerminateProcess, PROCESS_TERMINATE};
+    let targets = monitor().lock().unwrap().kill.get(name).cloned().unwrap_or_default();
+    let tree = process_tree();
+    let own = own_tree(&tree);
+    let (mut ok, mut bad) = (0, 0);
+    for (pid, exe) in targets {
+        let still = tree.iter().any(|(p, _, e)| *p == pid && e.eq_ignore_ascii_case(&exe));
+        if !still || own.contains(&pid) || protected(&exe) {
+            continue;
+        }
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !h.is_null() && TerminateProcess(h, 1) != 0 {
+                ok += 1;
+            } else {
+                bad += 1;
+            }
+            if !h.is_null() {
+                CloseHandle(h);
+            }
+        }
+    }
+    crate::log(format!("sysmon: ended {name}: {ok} ok, {bad} failed"));
+    (ok, bad)
 }
 
 pub fn monitor() -> &'static std::sync::Mutex<Monitor> {

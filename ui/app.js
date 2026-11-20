@@ -339,6 +339,7 @@ function expand() {
   renderPanel();
   applySize();
   ensureSysPoll();
+  updateViz();
 }
 
 function collapse() {
@@ -350,6 +351,7 @@ function collapse() {
   island.classList.add("collapsed");
   $("search").blur();
   applySize();
+  updateViz();
 }
 
 // ---------- pill ----------
@@ -405,6 +407,8 @@ function pillItem(id, target) {
     case "media": {
       if (!sget("media.on", true) || !media?.title || !media.playing) return "";
       const cover = media.cover && sget("media.cover", true) ? `<img class="rot-cover" src="${media.cover}" alt="">` : `<span class="rot-note">♪</span>`;
+      // default: just the cover and bars moving with the music; or the title as before
+      if (sget("media.pillStyle", "viz") === "viz") return `${cover}${vizBars(PILL_BANDS.length)}`;
       return `${cover}<span class="rot-text">${esc(media.title)}${media.artist ? `<span class="rot-sub"> · ${esc(media.artist)}</span>` : ""}</span>`;
     }
   }
@@ -416,6 +420,36 @@ function pillItem(id, target) {
   return "";
 }
 
+// ---------- music bars (levels from the backend's loopback reader, 12 bands) ----------
+
+const PILL_BANDS = [1, 3, 5, 7, 10]; // the pill's five bars: low to high
+const vizBars = (n, big) => `<span class="mviz${big ? " big" : ""}" aria-hidden="true">${"<i></i>".repeat(n)}</span>`;
+let vizOn = null;
+
+// bars are wanted while a song plays and some bars are on screen (pill or music page)
+function updateViz() {
+  const playing = sget("media.on", true) && media?.playing;
+  const onPill = !MANAGER && !expanded && !!pill.querySelector(".mviz");
+  const onPage = tab === "music" && (MANAGER ? !document.hidden : expanded) && !!document.querySelector("#music .mviz");
+  const want = !!(playing && (onPill || onPage));
+  if (want === vizOn) return;
+  vizOn = want;
+  invoke("audio_viz", { on: want }).catch(() => {});
+  if (!want) document.querySelectorAll(".mviz i").forEach((b) => (b.style.transform = ""));
+}
+listen("viz", (e) => {
+  const b = e.payload || [];
+  document.querySelectorAll(".mviz").forEach((el) => {
+    const bars = el.children;
+    const pick = el.classList.contains("big") ? null : PILL_BANDS;
+    for (let i = 0; i < bars.length; i++) {
+      const v = b[pick ? pick[i] : i] || 0;
+      bars[i].style.transform = `scaleY(${(0.12 + 0.88 * v).toFixed(3)})`;
+    }
+  });
+});
+document.addEventListener("visibilitychange", () => updateViz());
+
 // ---------- quota rings ----------
 
 const RING_LETTER = { claude: "C", codex: "X", antigravity: "A", grok: "G" };
@@ -426,6 +460,15 @@ function ringWindows(q) {
   const ws = (q.windows || []).filter((w) => w && w.used != null);
   if (!ws.length) return [];
   const mode = sget(`ai.ring.mode.${q.tool}`, "both");
+  if (mode === "max") return [ws.reduce((a, b) => (b.used > a.used ? b : a))];
+  // several pools (Antigravity: Gemini, Claude / GPT, each with 5 h + weekly): the busier pool
+  if (ws.some((w) => w.group)) {
+    const busiest = ws.reduce((a, b) => (b.used > a.used ? b : a)).group;
+    const pool = ws.filter((w) => w.group === busiest);
+    if (mode === "first") return [pool[0]];
+    if (mode === "second") return [pool[1] || pool[0]];
+    return pool.slice(0, 2);
+  }
   if (mode === "first") return [ws[0]];
   if (mode === "second") return [ws[1] || ws[0]];
   if (mode === "max") return [ws.reduce((a, b) => (b.used > a.used ? b : a))];
@@ -622,6 +665,7 @@ function renderPill() {
     pill.innerHTML = full;
   }
   if (!expanded) applySize();
+  updateViz();
 }
 
 const pillSpan = (it) => `<span class="pill-item${it.html.startsWith('<span class="rot-card') ? " rot-slot" : ""}" data-pi="${esc(it.id)}">${it.html}</span>`;
@@ -1105,38 +1149,82 @@ function loadLatency() {
   invoke("latency_history").then((h) => { latHist = h || []; if (tab === "nodes" || tab === "home") renderList(true); }).catch(() => {});
 }
 
+// colour per node, kept for the session (colour follows the node, not its rank); four slots
+const nodeColor = new Map();
+function nodeCls(node) {
+  if (!nodeColor.has(node)) {
+    const used = new Set(nodeColor.values());
+    const free = ["s1", "s2", "s3", "s4"].find((c) => !used.has(c));
+    if (!free) return null;
+    nodeColor.set(node, free);
+  }
+  return nodeColor.get(node);
+}
+
+function latStats(samples) {
+  const ok = samples.filter((s) => s.ms != null).map((s) => s.ms).sort((a, b) => a - b);
+  return {
+    n: samples.length,
+    avg: ok.length ? Math.round(ok.reduce((a, b) => a + b, 0) / ok.length) : null,
+    p95: ok.length ? ok[Math.min(ok.length - 1, Math.floor(ok.length * 0.95))] : null,
+    loss: samples.length ? Math.round(((samples.length - ok.length) / samples.length) * 100) : null,
+  };
+}
+
 function nodesTabHtml() {
   loadLatency();
   const L = snap?.latency;
   const now = Date.now();
-  const hour = latHist.filter((s) => s.at > now - 3600_000);
-  const ok = hour.filter((s) => s.ms != null).map((s) => s.ms).sort((a, b) => a - b);
-  const avg = ok.length ? Math.round(ok.reduce((a, b) => a + b, 0) / ok.length) : null;
-  const p95 = ok.length ? ok[Math.min(ok.length - 1, Math.floor(ok.length * 0.95))] : null;
-  const loss = hour.length ? Math.round(((hour.length - ok.length) / hour.length) * 100) : null;
+  // the nodes of the latest round (main exit first), then any others still in range
+  const lastAt = latHist.reduce((m, s) => Math.max(m, s.at), 0);
+  const current = latHist.filter((s) => s.at === lastAt).map((s) => s.node);
+  const pts = latHist.filter((s) => nodeRange >= 100000 || s.at > now - nodeRange * 60_000);
+  const nodes = [...new Set([...current, ...pts.map((s) => s.node)])].filter((n) => nodeCls(n));
+  const hourOf = (n) => latHist.filter((s) => s.node === n && s.at > now - 3600_000);
+  const main = latStats(hourOf(L?.node));
   const tile = (label, value, note = "") => `<div class="tile"><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
   const tiles = `<div class="tiles">
-    ${tile("当前延迟", L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">✕ ${esc(L.error || "超时")}</span>`) : "—", L?.node ? decorate(L.node) : "")}
-    ${tile("1 小时平均", avg != null ? `${avg} ms` : "—")}
-    ${tile("1 小时 P95", p95 != null ? `${p95} ms` : "—")}
-    ${tile("1 小时丢包", loss != null ? `${loss}%` : "—", hour.length ? `${hour.length} 次测速` : "")}
+    ${tile("主出口当前延迟", L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">✕ ${esc(L.error || "超时")}</span>`) : "—", L?.node ? decorate(L.node) : "")}
+    ${tile("1 小时平均", main.avg != null ? `${main.avg} ms` : "—")}
+    ${tile("1 小时 P95", main.p95 != null ? `${main.p95} ms` : "—")}
+    ${tile("1 小时丢包", main.loss != null ? `${main.loss}%` : "—", main.n ? `${main.n} 次测速` : "")}
   </div>`;
-  const pts = latHist.filter((s) => nodeRange >= 100000 || s.at > now - nodeRange * 60_000);
-  const chart = pts.length >= 2
+  // one line per node over the shared round timestamps
+  const ats = [...new Set(pts.map((s) => s.at))].sort((a, b) => a - b);
+  const byKey = new Map(pts.map((s) => [`${s.node}|${s.at}`, s]));
+  const series = nodes.map((n) => ({ name: noFlags(n), cls: nodeCls(n), values: ats.map((t) => byKey.get(`${n}|${t}`)?.ms ?? null) }));
+  const chart = ats.length >= 2
     ? Charts.line({
-        id: "latency", width: chartW(), height: 170, xs: pts,
-        series: [{ name: "延迟", cls: "s1", values: pts.map((s) => s.ms) }],
-        markers: pts.map((s, i) => (s.ms == null ? { i, label: `${noFlags(s.node)} 无响应` } : null)).filter(Boolean),
+        id: "latency", width: chartW(), height: 170, xs: ats.map((at) => ({ at })),
+        series,
+        markers: ats.map((t, i) => {
+          const down = nodes.filter((n) => byKey.get(`${n}|${t}`)?.ms === null);
+          return down.length ? { i, label: `${down.map(noFlags).join("、")} 无响应` } : null;
+        }).filter(Boolean),
         ref: { value: sget("flash.latencyMs", 800), label: `提示阈值 ${sget("flash.latencyMs", 800)} ms` },
-        fmtY: (v) => `${Math.round(v)} ms`, fmtTick: (v) => `${v}`, fmtX: (s) => `${hm(s.at)} · ${noFlags(s.node)}`,
+        fmtY: (v) => `${Math.round(v)} ms`, fmtTick: (v) => `${v}`, fmtX: (x) => hm(x.at),
       })
     : `<div class="empty">${snap?.proxy?.mihomoOk ? "测速数据还不够，稍等一会儿" : "需要 mihomo 控制接口和代理出口节点才能测速"}</div>`;
+  // per node: which groups use it, now / average / P95 / loss over the last hour
+  const groupsOf = (n) => (exitState?.groups || []).filter((g) => g.node === n).map((g) => shortGroup(g.group, g.isDefault));
+  const table = nodes.length > 1 ? `<div class="lat-table">
+      <div class="lt-row lt-head"><span>节点</span><span>现在</span><span>平均</span><span>P95</span><span>丢包</span></div>
+      ${nodes.map((n) => {
+        const st = latStats(hourOf(n));
+        const cur = byKey.get(`${n}|${lastAt}`) || latHist.filter((s) => s.node === n).pop();
+        const g = groupsOf(n);
+        return `<div class="lt-row"><span class="lt-node"><i class="key ${nodeCls(n)}"></i>${decorate(n)}${g.length ? `<span class="lt-groups">${esc(g.join("、"))}</span>` : ""}</span>
+          <span class="mono">${cur ? (cur.ms != null ? `${cur.ms} ms` : `<span class="crit">✕</span>`) : "—"}</span>
+          <span class="mono">${st.avg != null ? `${st.avg} ms` : "—"}</span><span class="mono">${st.p95 != null ? `${st.p95} ms` : "—"}</span>
+          <span class="mono">${st.loss != null ? `${st.loss}%` : "—"}</span></div>`;
+      }).join("")}
+    </div>` : "";
   return `<div class="viz">
     <div class="viz-head">${segmented("nrange", nodeRange, [[30, "30 分钟"], [120, "2 小时"], [100000, "全部"]])}
-      <span class="viz-sel">代理出口节点的延迟（${{ saver: 60, balanced: 30, smooth: 15 }[sget("general.profile", "balanced")]} 秒测一次）</span>
+      <span class="viz-sel">各出口节点的延迟（${{ saver: 60, balanced: 30, smooth: 15 }[sget("general.profile", "balanced")]} 秒测一次）</span>
       <button class="ghost" data-do="lat-probe">立即测速</button></div>
-    ${tiles}${chart}
-    <div class="m-hint">✕ 表示那次测速没有响应。节点无响应 / 延迟超过阈值时会在胶囊上提示（设置里可改）。</div></div>`;
+    ${tiles}${chart}${table}
+    <div class="m-hint">每个分组正在用的节点都会测（最多 4 个）。✕ 表示那次测速没有响应。主出口（默认分组）无响应 / 延迟超过阈值时会在胶囊上提示（设置里可改）。</div></div>`;
 }
 
 // ---------- AI quota page ----------
@@ -1173,7 +1261,7 @@ function groupWindows(ws) {
 }
 
 const aiExpanded = new Set();
-const GROUP_FROM = 4; // more windows than this: grouped, at most 3 rows until expanded
+const GROUP_FROM = 6; // this many windows or more (Antigravity's per-model list): grouped, 3 rows until expanded
 
 function quotaBars(q, compact, ringed = []) {
   let rows = q.windows.map((w) => ({ ...w, members: [w], title: w.label }));
@@ -1347,10 +1435,15 @@ function updateSys() {
   $("sm-down-line").innerHTML = spark(tail(speedHist.down), "s1", maxNet);
   $("sm-up-line").innerHTML = spark(tail(speedHist.up), "s2", maxNet);
   // apps
+  // the list holds still while the pointer is on it or a confirm card is open (rows would move
+  // away under the click)
+  const list = $("sm-list");
+  if (list.matches(":hover") || !$("menu").hidden) return measurePanel();
   const rows = [...d.apps].sort((a, b) => (sysSort === "mem" ? b.mem - a.mem : b.cpu - a.cpu || b.mem - a.mem)).slice(0, MANAGER ? 16 : 8);
-  $("sm-list").innerHTML = rows.map((a) => `<div class="sm-app">
+  list.innerHTML = rows.map((a) => `<div class="sm-app">
       ${iconHtml(a)}<span class="sm-app-name">${esc(a.name)}${a.procs > 1 ? `<span class="sub">${a.procs} 个进程</span>` : ""}</span>
       <span class="mono sm-num ${sysSort === "cpu" ? "on" : ""}">${a.cpu.toFixed(1)}%</span><span class="mono sm-num ${sysSort === "mem" ? "on" : ""}">${fmtMem(a.mem)}</span>
+      ${a.killable ? `<button class="sm-end" data-do="proc-end" data-name="${esc(a.name)}" data-n="${a.procs}" title="结束 ${esc(a.name)}">✕</button>` : `<span></span>`}
     </div>`).join("") || `<div class="empty">正在读取…</div>`;
   measurePanel();
 }
@@ -1385,6 +1478,7 @@ function musicPageHtml() {
         <button class="main" data-do="media-toggle" title="播放 / 暂停">${m.playing ? ICON.pause : ICON.play}</button>
         <button data-do="media-next" title="下一首">${ICON.next}</button>
       </div>
+      ${m.playing ? vizBars(12, true) : ""}
     </div>
   </div>`;
 }
@@ -1707,7 +1801,7 @@ function settingsHtml() {
   <div class="s-sec"><div class="s-title">额度环<span class="s-note">胶囊和「AI 额度」页里的圆环</span></div>
     ${sSelect("ai.ring.mode.claude", "Claude 显示", RING_MODES)}
     ${sSelect("ai.ring.mode.codex", "Codex 显示", RING_MODES)}
-    ${sSelect("ai.ring.mode.antigravity", "Antigravity 显示", RING_MODES, "Antigravity 按模型分别计额度")}
+    ${sSelect("ai.ring.mode.antigravity", "Antigravity 显示", RING_MODES, "两组模型（Gemini、Claude / GPT）各有 5 小时和每周额度，环显示用得多的那一组")}
     ${sSelect("ai.ring.mode.grok", "Grok 显示", RING_MODES)}
     ${sNumber("ai.ring.warn", "用到多少变成提醒色", 1, 99, 1, "%")}
     ${sNumber("ai.ring.crit", "用到多少变成警告色", 1, 100, 1, "%")}
@@ -1722,6 +1816,7 @@ function settingsHtml() {
   <div class="s-sec"><div class="s-title">正在播放</div>
     ${sToggle("media.on", "显示正在播放的歌", "读取 Windows 媒体控制（网易云、QQ 音乐、Spotify、浏览器等）")}
     ${sToggle("media.cover", "　显示封面")}
+    ${sSelect("media.pillStyle", "　胶囊里的歌显示成", [["viz", "封面 + 随音乐跳动的线条"], ["title", "封面 + 歌名和歌手"]], "跳动的线条读的是正在播放的声音大小（只在本机算音量，不录音、不保存）")}
   </div>
   <div class="s-sec"><div class="s-title">短暂提示<span class="s-note">发生时在胶囊上显示 5 秒，同类 1 分钟内只提示一次</span></div>
     ${sToggle("flash.exitChange", "出口 IP 变了")}
@@ -2037,6 +2132,7 @@ function renderList(force = false) {
     if (!force && (tab === "sys" ? $("sysmon") : list.querySelector(".music") && key === musicKey)) return;
     list.innerHTML = `<div id="list-inner">${tab === "sys" ? sysPageHtml() : musicPageHtml()}</div>`;
     if (tab === "sys") { updateSys(); ensureSysPoll(); }
+    updateViz();
     measurePanel();
     return;
   }
@@ -2201,6 +2297,17 @@ async function runAction(el) {
         renderList(true);
         throw err;
       }
+      return;
+    } else if (act === "proc-end") {
+      const name = el.dataset.name, n = Number(el.dataset.n) || 1;
+      openMenu(el, `<div class="m-title">结束「${esc(name)}」？</div>
+        <div class="m-warn">会强制结束它的 ${n > 1 ? `全部 ${n} 个进程` : "进程"}，<b>没保存的内容会丢失</b>。Windows 自己的核心进程和 MicaBar 不会被结束。</div>
+        <div class="m-actions"><button class="ghost" data-do="menu-close">取消</button><button class="danger" data-do="proc-end-go" data-name="${esc(name)}">结束</button></div>`);
+      return;
+    } else if (act === "proc-end-go") {
+      closeMenu();
+      const [ok, bad] = await invoke("sysmon_end", { name: el.dataset.name });
+      toast(ok ? `已结束 ${el.dataset.name}（${ok} 个进程）${bad ? `，${bad} 个没结束掉（权限不够或已退出）` : ""}` : `没能结束 ${el.dataset.name}${bad ? "：权限不够" : "：它可能已经退出了"}`, !ok);
       return;
     } else if (act === "ring-reset") {
       await invoke("settings_set", { patch: { ai: { ring: { warn: 60, crit: 85, colors: { ok: "#34d399", warn: "#fbbf24", crit: "#f87171" } } } } });
@@ -2535,6 +2642,7 @@ function switchTab(name) {
   if (MANAGER) renderPanel();
   else measurePanel();
   ensureSysPoll();
+  updateViz();
 }
 
 // a very narrow island: the wheel scrolls the tab row sideways
@@ -2650,6 +2758,7 @@ listen("media", (e) => {
   renderPill();
   if (tab === "home") renderList(true);
   else if (tab === "music") renderList();
+  updateViz();
 });
 invoke("ai_get").then((a) => { aiState = a || []; }).catch(() => {});
 invoke("media_get").then((m) => { media = m || null; }).catch(() => {});

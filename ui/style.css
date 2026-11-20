@@ -970,3 +970,34 @@ body[data-mode="manager"] .mu-cover { width: 180px; height: 180px; }
 .gx-groups { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .gx-chip { font-size: 11.5px; background: var(--ov2); border-radius: 6px; padding: 1px 7px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
 .gx-chip .tag { margin-left: 2px; }
+
+/* latency per exit node: series 3 and 4 of the categorical palette (aqua, yellow) */
+:root { --s3: #199e70; --s4: #c98500; }
+:root[data-theme="light"] { --s3: #1baf7a; --s4: #eda100; }
+.key.s3, .tip-key.s3 { background: var(--s3); }
+.key.s4, .tip-key.s4 { background: var(--s4); }
+.c-line.s3 { stroke: var(--s3); }
+.c-line.s4 { stroke: var(--s4); }
+.c-dot.s3, .c-hdot.s3 { fill: var(--s3); }
+.c-dot.s4, .c-hdot.s4 { fill: var(--s4); }
+.lat-table { margin-top: 10px; background: var(--card); border-radius: 12px; padding: 6px 10px; font-size: 12.5px; }
+.lt-row { display: grid; grid-template-columns: minmax(0, 1fr) 64px 64px 64px 48px; gap: 8px; align-items: center; padding: 5px 0; border-top: 1px solid var(--line); }
+.lt-row:first-child { border-top: none; }
+.lt-row > span:not(.lt-node) { text-align: right; }
+.lt-head { color: var(--dimmer); font-size: 11.5px; }
+.lt-node { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lt-node .key { margin-right: 6px; vertical-align: middle; }
+.lt-groups { color: var(--dimmer); font-size: 11px; margin-left: 6px; }
+
+/* music bars: scaled by the loudness of 12 bands (5 of them in the pill) */
+:root { --viz: #d55181; }
+:root[data-theme="light"] { --viz: #e87ba4; }
+.mviz { display: inline-flex; align-items: center; gap: 3px; height: calc(var(--pill-h) * 0.5); flex: none; }
+.mviz i { display: block; width: 3px; height: 100%; border-radius: 2px; background: var(--viz); transform: scaleY(0.12); transform-origin: center; transition: transform 0.08s linear; }
+.mviz.big { height: 46px; gap: 5px; margin-top: 12px; }
+.mviz.big i { width: 6px; border-radius: 3px; }
+/* end a process from the system monitor list */
+.sm-app { grid-template-columns: 22px minmax(0, 1fr) 56px 56px 24px; }
+.sm-end { border: none; background: transparent; color: var(--dimmer); width: 22px; height: 22px; border-radius: 6px; cursor: pointer; font-size: 11px; opacity: 0; }
+.sm-app:hover .sm-end, .sm-end:focus-visible { opacity: 1; }
+.sm-end:hover { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }

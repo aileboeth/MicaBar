@@ -99,7 +99,7 @@ pub fn defaults() -> Value {
             // quota rings: which usage window each tool's ring shows (both | first | second | max),
             // colour steps by share used, and the three colours
             "ring": {
-                "mode": { "claude": "both", "codex": "both", "antigravity": "max", "grok": "first" },
+                "mode": { "claude": "both", "codex": "both", "antigravity": "both", "grok": "first" },
                 "warn": 60,
                 "crit": 85,
                 "colors": { "ok": "#34d399", "warn": "#fbbf24", "crit": "#f87171" }
@@ -107,7 +107,9 @@ pub fn defaults() -> Value {
         },
         "media": {
             "on": true,
-            "cover": true
+            "cover": true,
+            // the song in the pill: viz (cover + bars moving with the music) | title
+            "pillStyle": "viz"
         },
         "exit": {
             // auto = the fallback (MATCH) group + the busiest proxy groups; manual = `groups`
@@ -143,7 +145,9 @@ pub fn defaults() -> Value {
         },
         "meta": {
             // 2 = big pill with items side by side (0.2.4)
-            "pillV": 2
+            "pillV": 2,
+            // 1 = Antigravity ring shows 5 h + weekly of its busier model group (0.2.6)
+            "ringV": 1
         },
         "appearance": {
             // auto | glass-dark | glass-light | <preset id> | custom
@@ -219,7 +223,18 @@ fn store() -> &'static Mutex<Value> {
         }
         let fresh = v.as_object().map(|o| o.is_empty()).unwrap_or(true);
         let old_pill = v.pointer("/meta/pillV").and_then(|x| x.as_u64()).unwrap_or(0) < 2;
+        let old_ring = v.pointer("/meta/ringV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
         fill(&mut v, &defaults());
+        if old_ring && !fresh {
+            // 0.2.6: Antigravity now reports 5-hour + weekly pools; "max" was the old default
+            if v.pointer("/ai/ring/mode/antigravity").and_then(|x| x.as_str()) == Some("max") {
+                v["ai"]["ring"]["mode"]["antigravity"] = json!("both");
+            }
+            v["meta"]["ringV"] = json!(1);
+            if let Ok(t) = serde_json::to_string_pretty(&v) {
+                let _ = std::fs::write(path(), t);
+            }
+        }
         if old_pill && !fresh {
             // 0.2.4: bigger pill, items side by side instead of one rotating slot
             let d = defaults();
