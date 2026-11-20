@@ -879,7 +879,9 @@ function connMenu(app, c) {
 
 function exitChip(app) {
   const st = ctrl().status;
-  if (app.isProxy || st === "unavailable") return "";
+  if (st === "unavailable") return "";
+  // the proxy client itself has no exit to choose: keep its place so the columns line up
+  if (app.isProxy) return `<span class="exit-chip ph" aria-hidden="true">出口</span>`;
   const r = findRule("process", app.exe, null);
   const t = r ? r.target : "";
   return `<button class="exit-chip ${t ? "t-" + t : ""}" data-chip="${esc(app.key)}" title="选择这个程序的出口">${t ? TARGET_LABEL[t] : "出口"}</button>`;
@@ -1125,18 +1127,52 @@ function untilText(ms) {
 }
 
 // one meter per usage window: the share used, coloured only past the warning thresholds
+// Models that share one quota (same share used, same reset) become one row: Antigravity lists
+// every model and variant ("Gemini 4 Neon (High)", "(Low)"…), mostly drawing from a few pools.
+function groupWindows(ws) {
+  const groups = new Map();
+  for (const w of ws) {
+    const key = `${Math.round(w.used)}|${w.resetsAt ? Math.round(w.resetsAt / 60000) : ""}`;
+    if (!groups.has(key)) groups.set(key, { used: w.used, resetsAt: w.resetsAt, members: [] });
+    groups.get(key).members.push(w);
+  }
+  return [...groups.values()].map((g) => {
+    const labels = g.members.map((w) => w.label);
+    const families = [...new Set(labels.map((l) => l.replace(/\s*[(（].*$/, "").trim() || l))];
+    const label = labels.length === 1 ? labels[0] : families.length === 1 ? families[0] : `${families[0]} 等`;
+    const count = labels.length === 1 ? "" : families.length === 1 ? `${labels.length} 档` : `${labels.length} 个模型`;
+    return { label, count, used: g.used, resetsAt: g.resetsAt, members: g.members, title: labels.join("、") };
+  }).sort((a, b) => b.used - a.used);
+}
+
+const aiExpanded = new Set();
+const GROUP_FROM = 4; // more windows than this: grouped, at most 3 rows until expanded
+
 function quotaBars(q, compact, ringed = []) {
-  return q.windows.map((w) => {
+  let rows = q.windows.map((w) => ({ ...w, members: [w], title: w.label }));
+  if (q.windows.length >= GROUP_FROM) rows.sort((a, b) => b.used - a.used); // expanded: busiest first
+  let more = "";
+  if (q.windows.length >= GROUP_FROM && !(aiExpanded.has(q.tool) && !compact)) {
+    const groups = groupWindows(q.windows);
+    rows = groups.slice(0, 3);
+    const hidden = groups.slice(3).reduce((n, g) => n + g.members.length, 0);
+    if (!compact) {
+      more = `<button class="q-more" data-ai-more="${esc(q.tool)}">${hidden ? `还有 ${hidden} 个模型，` : ""}展开全部 ${q.windows.length} 个模型</button>`;
+    }
+  } else if (q.windows.length >= GROUP_FROM && !compact) {
+    more = `<button class="q-more" data-ai-more="${esc(q.tool)}">收起</button>`;
+  }
+  return rows.map((w) => {
     const pct = Math.max(0, Math.min(100, w.used));
-    const pos = ringed.indexOf(w);
+    const pos = ringed.findIndex((r) => w.members.includes(r));
     const where = pos < 0 ? "" : ringed.length > 1 ? (pos ? " · 内圈" : " · 外圈") : " · 环";
     return `<div class="qrow ${compact ? "compact" : ""}">
-      <span class="q-name" title="${esc(w.label + where)}">${esc(w.label)}${where ? `<span class="q-where">${where}</span>` : ""}</span>
+      <span class="q-name" title="${esc(w.title + where)}"><span class="q-lab">${esc(w.label)}</span>${w.count ? `<span class="q-cnt">${esc(w.count)}</span>` : ""}${where ? `<span class="q-where">${where}</span>` : ""}</span>
       <span class="meter" role="meter" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><i class="${quotaClass(pct)}" style="width:${pct}%"></i></span>
       <span class="q-pct mono">${Math.round(pct)}%</span>
       ${compact ? "" : `<span class="q-reset">${esc(untilText(w.resetsAt))}</span>`}
     </div>`;
-  }).join("");
+  }).join("") + more;
 }
 
 function aiCard(q, compact) {
@@ -1165,7 +1201,7 @@ function aiTabHtml() {
       <button class="ghost" data-do="ai-refresh">立即刷新</button></div>
     <div class="ai-grid">${list}</div>
     <div class="m-hint">用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方；
-      登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 10)} 分钟查一次（Claude 至少 10 分钟一次：官方接口限流很严，而且和 Claude Code 自己共用额度）；结果会保存，重启 MicaBar 不会重新查。</div>
+      登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 10)} 分钟查一次（Claude 至少 10 分钟一次，点「立即刷新」也一样：官方接口限流很严，可能还和 Claude Code 自己共用）；结果会保存，重启 MicaBar 不会重新查。</div>
   </div>`;
 }
 
@@ -2173,8 +2209,10 @@ async function runAction(el) {
       toast("到屏幕上的岛那里拖动边缘调整大小，调完点「完成」");
       return;
     } else if (act === "ai-refresh") {
-      await invoke("ai_refresh");
-      toast("正在查询 AI 额度…");
+      const waiting = (await invoke("ai_refresh")) || [];
+      toast(waiting.length
+        ? `正在查询；${waiting.map((w) => w.replace(" ", " 要到 ")).join("、")} 才能再查（官方接口限流很严，查太勤会被暂停）`
+        : "正在查询 AI 额度…");
       return;
     } else if (act === "exit-refresh") {
       await invoke("refresh_exit");
@@ -2275,6 +2313,14 @@ $("panel").addEventListener("click", (e) => {
     return;
   }
   const seg = e.target.closest("[data-seg]");
+  const aiMore = e.target.closest("[data-ai-more]");
+  if (aiMore) {
+    const t = aiMore.dataset.aiMore;
+    if (aiExpanded.has(t)) aiExpanded.delete(t);
+    else aiExpanded.add(t);
+    renderList(true);
+    return;
+  }
   if (seg?.dataset.seg === "sys-sort") {
     sysSort = seg.dataset.val;
     try { localStorage.setItem("mb-sys-sort", sysSort); } catch { /* ignore */ }
@@ -2464,6 +2510,13 @@ function switchTab(name) {
   ensureSysPoll();
 }
 
+// a very narrow island: the wheel scrolls the tab row sideways
+$("tabs").addEventListener("wheel", (e) => {
+  const t = $("tabs");
+  if (MANAGER || t.scrollWidth <= t.clientWidth || !e.deltaY) return;
+  t.scrollLeft += e.deltaY;
+  e.preventDefault();
+}, { passive: false });
 $("tabs").addEventListener("click", (e) => {
   const b = e.target.closest("[data-tab]");
   if (b) switchTab(b.dataset.tab);

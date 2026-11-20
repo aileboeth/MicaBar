@@ -1876,14 +1876,17 @@ async fn ai_round(app: &AppHandle, sh: &Arc<Shared>, manual: bool) {
         if !settings::bool_at(&format!("ai.{tool}"), true) {
             continue;
         }
-        let p = prev.iter().find(|p| p.tool == tool);
-        if !ai::due(tool, every, manual, p.is_some()) {
-            out.extend(p.cloned());
+        // the last result, also when the tool (or the AI section) was switched off for a while
+        let p = prev.iter().find(|p| p.tool == tool).cloned().or_else(|| ai::known_quota(tool));
+        if !ai::due(tool, every, manual) {
+            out.extend(p);
             continue;
         }
         asked = true;
-        let q = ai::query(tool, proxy, p).await;
-        if q.status != "ok" {
+        let q = ai::query(tool, proxy, p.as_ref()).await;
+        // log failures once, not on every retry
+        let same = p.as_ref().map(|p| p.status == q.status && p.message == q.message).unwrap_or(false);
+        if q.status != "ok" && !same {
             log(format!("ai {tool}: {} {}", q.status, q.message.clone().unwrap_or_default()));
         }
         out.push(q);
@@ -1891,7 +1894,7 @@ async fn ai_round(app: &AppHandle, sh: &Arc<Shared>, manual: bool) {
     let changed = asked || out.len() != prev.len();
     *sh.ai.lock().unwrap() = out.clone();
     if asked {
-        ai::save_cache(&out);
+        ai::save_cache();
     }
     if changed {
         let _ = app.emit("ai", out);
@@ -1907,6 +1910,11 @@ fn ai_loop(app: AppHandle, sh: Arc<Shared>) {
                     sh.ai.lock().unwrap().clear();
                     let _ = app.emit("ai", Vec::<ai::Quota>::new());
                 }
+                continue;
+            }
+            // wait for the first snapshot: until then the proxy client isn't detected yet and the
+            // services (blocked here without it) would be asked directly
+            if sh.last.lock().unwrap().is_none() {
                 continue;
             }
             let manual = sh.ai_trigger.swap(false, Ordering::SeqCst);
@@ -1926,9 +1934,18 @@ async fn sysmon_sample() -> sysmon::Sample {
     tauri::async_runtime::spawn_blocking(|| sysmon::monitor().lock().unwrap().sample()).await.unwrap_or_default()
 }
 
+/// Manual refresh; returns the tools that have to wait (Claude: 10 minutes between queries) as
+/// "Claude 10:06" so the page can say so.
 #[tauri::command]
-fn ai_refresh(state: tauri::State<'_, Arc<Shared>>) {
+fn ai_refresh(state: tauri::State<'_, Arc<Shared>>) -> Vec<String> {
     state.ai_trigger.store(true, Ordering::SeqCst);
+    log("ai: manual refresh");
+    let every = ai_every_ms();
+    ai::TOOLS
+        .iter()
+        .filter(|(t, _)| settings::bool_at(&format!("ai.{t}"), true) && !ai::due(t, every, true))
+        .map(|(t, n)| format!("{n} {}", fmt_time(ai::next_at(t, every, true)).get(..5).unwrap_or("")))
+        .collect()
 }
 
 #[tauri::command]

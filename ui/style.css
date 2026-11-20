@@ -944,3 +944,22 @@ body[data-mode="manager"] .music { max-width: 760px; }
 body[data-mode="manager"] .mu-cover { width: 180px; height: 180px; }
 .sm-meter[hidden], .sm-stat[hidden] { display: none; }
 #pill .pill-speed { font-size: 0.86em; }
+
+/* toolbar never grows taller: tabs stay on one line (scroll sideways if the island is very narrow),
+   the search box keeps a usable width; the total speed sits in the page bar with a steady width */
+#toolbar .tabs { flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+#toolbar .tabs::-webkit-scrollbar { display: none; }
+.tab { white-space: nowrap; flex: none; }
+#toolbar #search { flex: 1 1 140px; min-width: 96px; }
+#pagebar #total-speed { flex: none; min-width: 150px; text-align: right; font-variant-numeric: tabular-nums; }
+#page-clock { flex: 1 1 auto; }
+.exit-chip.ph { visibility: hidden; pointer-events: none; }
+.q-more { border: none; background: none; color: var(--blue); font: inherit; font-size: 12px; padding: 4px 0 0; cursor: pointer; }
+.q-more:hover { text-decoration: underline; }
+.ai-body { align-items: flex-start; }
+.ai-body > .ring { margin-top: 4px; }
+.q-name { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+.q-lab { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-cnt, .q-where { flex: none; white-space: nowrap; }
+.q-cnt { font-size: 11px; color: var(--dim); background: var(--ov2); border-radius: 5px; padding: 0 5px; }
+.qrow:not(.compact) { grid-template-columns: minmax(96px, 168px) minmax(0, 1fr) 44px; }

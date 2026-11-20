@@ -162,7 +162,7 @@ async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
         .header("User-Agent", "MicaBar")
         .send()
         .await
-        .map_err(|e| format!("连不上 Anthropic：{e}"))?;
+        .map_err(|e| format!("连不上 Anthropic：{}", err_chain(&e)))?;
     let status = r.status();
     let retry = retry_after(&r);
     let body = r.text().await.unwrap_or_default();
@@ -277,7 +277,7 @@ async fn codex(proxy: Option<u16>) -> Result<Quota, String> {
                 if let Some((windows, at)) = codex_from_sessions() {
                     return Ok(Quota { windows, source: Some(format!("最近一次 Codex 会话（{}）", crate::fmt_time(at))), ..Default::default() });
                 }
-                return Err(format!("连不上 chatgpt.com：{e}"));
+                return Err(format!("连不上 chatgpt.com：{}", err_chain(&e)));
             }
         }
     }
@@ -451,7 +451,7 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
             .header("Accept", "application/json")
             .send()
     };
-    let r = get("/v1/billing?format=credits").await.map_err(|e| format!("连不上 grok.com：{e}"))?;
+    let r = get("/v1/billing?format=credits").await.map_err(|e| format!("连不上 grok.com：{}", err_chain(&e)))?;
     let status = r.status();
     let retry = retry_after(&r);
     let body = r.text().await.unwrap_or_default();
@@ -496,17 +496,49 @@ fn last_sent() -> &'static Map<u64> {
     L.get_or_init(Default::default)
 }
 
-/// Shortest gap between two scheduled queries of one tool. Anthropic's usage endpoint answers 429
-/// quickly (and the limit is shared with Claude Code itself), so Claude never goes below 10 minutes.
-pub fn floor_ms(tool: &str) -> u64 {
-    if tool == "claude" { 10 * 60_000 } else { 60_000 }
+/// Per tool: ask again at this epoch ms regardless of the interval (the last try never reached the
+/// service: no connection yet, sign-in expired) — the usual interval would leave it empty too long.
+fn retry_at() -> &'static Map<u64> {
+    static R: std::sync::OnceLock<Map<u64>> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
 }
 
-/// Whether `tool` should be asked again now. A manual refresh still waits a minute per tool.
-pub fn due(tool: &str, every_ms: u64, manual: bool, have_prev: bool) -> bool {
-    let last = last_sent().lock().unwrap().get(tool).copied().unwrap_or(0);
-    let gap = if manual { 60_000 } else { every_ms.max(floor_ms(tool)) };
-    !have_prev || crate::now_ms().saturating_sub(last) >= gap
+/// Last result per tool, also for tools switched off for a while, so switching one back on (or
+/// the whole AI section) shows its numbers again instead of asking the service at once.
+fn known() -> &'static Map<Quota> {
+    static K: std::sync::OnceLock<Map<Quota>> = std::sync::OnceLock::new();
+    K.get_or_init(Default::default)
+}
+
+pub fn known_quota(tool: &str) -> Option<Quota> {
+    known().lock().unwrap().get(tool).cloned()
+}
+
+/// Shortest gap between two queries of one tool. Anthropic's usage endpoint answers 429 within
+/// minutes (seen 2026-11-20: a manual refresh 5 minutes after a good query), and the limit may be
+/// shared with Claude Code itself, so Claude waits at least 10 minutes even for a manual refresh.
+pub fn floor_ms(tool: &str, manual: bool) -> u64 {
+    match (tool, manual) {
+        ("claude", _) => 10 * 60_000,
+        (_, true) => 60_000,
+        _ => 60_000,
+    }
+}
+
+/// When `tool` may be asked next (epoch ms; 0 = now).
+pub fn next_at(tool: &str, every_ms: u64, manual: bool) -> u64 {
+    if let Some(r) = retry_at().lock().unwrap().get(tool) {
+        return *r;
+    }
+    let Some(last) = last_sent().lock().unwrap().get(tool).copied() else { return 0 };
+    let gap = if manual { floor_ms(tool, true) } else { every_ms.max(floor_ms(tool, false)) };
+    let backoff_until = backoff().lock().unwrap().get(tool).map(|b| b.1).unwrap_or(0);
+    (last + gap).max(backoff_until)
+}
+
+/// Whether `tool` should be asked again now.
+pub fn due(tool: &str, every_ms: u64, manual: bool) -> bool {
+    crate::now_ms() >= next_at(tool, every_ms, manual)
 }
 
 /// Results, backoff and request times survive restarts (an update or a restart used to fire a
@@ -530,12 +562,15 @@ pub fn load_cache() -> Vec<Quota> {
     };
     *backoff().lock().unwrap() = c.backoff;
     *last_sent().lock().unwrap() = c.last_sent;
+    *known().lock().unwrap() = c.quotas.iter().map(|q| (q.tool.clone(), q.clone())).collect();
     c.quotas
 }
 
-pub fn save_cache(quotas: &[Quota]) {
+pub fn save_cache() {
+    let mut quotas: Vec<Quota> = known().lock().unwrap().values().cloned().collect();
+    quotas.sort_by_key(|q| TOOLS.iter().position(|(t, _)| *t == q.tool).unwrap_or(99));
     let c = Cache {
-        quotas: quotas.to_vec(),
+        quotas,
         backoff: backoff().lock().unwrap().clone(),
         last_sent: last_sent().lock().unwrap().clone(),
     };
@@ -550,6 +585,7 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
     let at = crate::now_ms();
     // backing off after a 429: no request until the pause is over
     let until = backoff().lock().unwrap().get(tool).map(|b| b.1).unwrap_or(0);
+    retry_at().lock().unwrap().remove(tool);
     let r = if at < until {
         Err(format!("官方接口限流，{} 后再查", crate::fmt_time(until).get(..5).unwrap_or("")))
     } else {
@@ -580,7 +616,14 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
         }
         other => other,
     };
-    match r {
+    // tries that never reached the service (no connection yet, sign-in expired, tool not running):
+    // look again in a minute instead of waiting the whole interval
+    if let Err(e) = &r {
+        if e.starts_with("连不上") || e.contains("已过期") || e.starts_with("absent:") {
+            retry_at().lock().unwrap().insert(tool.to_string(), at + 60_000);
+        }
+    }
+    let q = match r {
         Ok(mut q) => {
             q.tool = tool.into();
             q.name = name;
@@ -593,5 +636,22 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
             Some(p) => Quota { status: "stale".into(), message: Some(e), ..p.clone() },
             None => Quota { tool: tool.into(), name, status: "error".into(), message: Some(e), at, ..Default::default() },
         },
+    };
+    known().lock().unwrap().insert(tool.to_string(), q.clone());
+    q
+}
+
+/// "error sending request" alone says nothing: add the causes (connect refused, TLS, proxy…).
+pub fn err_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(x) = src {
+        let t = x.to_string();
+        if !s.contains(&t) {
+            s.push_str("：");
+            s.push_str(&t);
+        }
+        src = x.source();
     }
+    s
 }
