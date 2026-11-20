@@ -155,7 +155,10 @@ pub fn defaults() -> Value {
             // sources: Windows toasts (notification database), taskbar flashes (WeChat…)
             "toast": true,
             "flash": true,
-            // seconds a card stays in the island (longer while the cursor is on it)
+            // how a new note shows: icon (small app icon at the pill's right end) | inline (one
+            // line in the pill for a few seconds) | card (the pill springs into a card)
+            "style": "icon",
+            // seconds a note shows (inline / card; longer while the cursor is on a card)
             "duration": 5,
             // smart (text hidden while fullscreen / recording) | source (app + sender only) | full
             "privacy": "smart",

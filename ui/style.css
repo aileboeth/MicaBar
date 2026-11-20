@@ -1142,3 +1142,25 @@ html.no-anim #island.n-pop { animation: none; }
 .na-src { color: var(--dimmer); font-size: 11.5px; white-space: nowrap; }
 .na-row label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--dim); }
 .tab.nav.has .nav-count { color: var(--blue); font-weight: 600; }
+
+/* notes in the pill: app icons at the right end (icon style) */
+.pill-nicons { display: inline-flex; align-items: center; padding-left: 2px; }
+.pni { display: inline-flex; width: 20px; height: 20px; border-radius: 6px; margin-left: -6px; box-shadow: 0 0 0 2px rgba(var(--tint-rgb), 0.95); position: relative; }
+.pni:first-child { margin-left: 0; z-index: 3; }
+.pni:nth-child(2) { z-index: 2; }
+.pni > .app-icon, .pni > img { width: 20px !important; height: 20px !important; border-radius: 6px; object-fit: cover; }
+.pni > .app-icon.letter { display: grid; place-items: center; font-size: 11px; font-weight: 600; color: #fff; background: linear-gradient(160deg, #8e8e93, #5a5a60); }
+.pni.pop { animation: pni-pop 0.7s var(--spring); }
+@keyframes pni-pop { 0% { transform: scale(0.3); opacity: 0; } 55% { transform: scale(1.18); opacity: 1; } 100% { transform: none; } }
+.pni-more { font-size: 11px; color: var(--dim); margin-left: 5px; }
+/* one line in the pill (inline style): the usual content steps aside */
+.pill-note { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.pill-note.in { animation: pn-in 0.42s var(--spring); }
+@keyframes pn-in { from { transform: translateY(80%); opacity: 0; } to { transform: none; opacity: 1; } }
+.pill-note > .app-icon, .pill-note > .nm-av { width: 22px; height: 22px; flex: none; border-radius: 6px; object-fit: cover; }
+.pill-note > .nm-av { border-radius: 50%; }
+.pill-note > .app-icon.letter { display: grid; place-items: center; font-size: 12px; font-weight: 600; color: #fff; background: linear-gradient(160deg, #8e8e93, #5a5a60); }
+.pn-t { font-weight: 600; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+.pn-b { color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pn-more { flex: none; margin-left: auto; font-size: 11px; color: var(--dim); background: var(--ov2); border-radius: 8px; padding: 0 6px; line-height: 16px; }
+html.no-anim .pni.pop, html.no-anim .pill-note.in { animation: none; }

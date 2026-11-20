@@ -484,6 +484,22 @@ fn on_flash(hwnd: isize) {
     if TERMINALS.contains(&key.as_str()) && LAST_AI.lock().unwrap().map(|t| t.elapsed() < Duration::from_secs(8)).unwrap_or(false) {
         return;
     }
+    // Telegram flashes its taskbar button AND shows its own popup: the popup's note (with the
+    // chat and text) wins; the flash only counts when no popup came
+    if key == "telegram" {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            if TG_LAST.lock().unwrap().map(|t| t.elapsed() < Duration::from_secs(4)).unwrap_or(false) {
+                return;
+            }
+            flash_note(hwnd, key, path);
+        });
+        return;
+    }
+    flash_note(hwnd, key, path);
+}
+
+fn flash_note(hwnd: isize, key: String, path: Option<String>) {
     let wechat = key == "weixin" || key == "wechat";
     let app = if wechat {
         "微信".to_string()

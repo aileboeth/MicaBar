@@ -337,6 +337,11 @@ function applySize() {
 function expand() {
   if (expanded) return;
   hideNotes(); // they stay on the notes page
+  // opened while a note shows in the pill: that's what the user wants to see
+  if (nfl.until > Date.now()) {
+    nfl.until = 0;
+    if (visiblePages().includes("notes")) tab = "notes";
+  }
   expanded = true;
   island.classList.remove("peek");
   island.classList.add("expanded");
@@ -413,8 +418,18 @@ function pillItem(id, target) {
     case "clock":
       return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
     case "notes": {
-      const u = sget("notify.on", true) ? unreadCount() : 0;
-      return u ? `<span class="pill-bell"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${BELL}"/></svg><span class="mono">${u > 99 ? "99+" : u}</span></span>` : "";
+      if (!sget("notify.on", true)) return "";
+      const un = notes.filter((n) => !n.read && !n.silent);
+      if (!un.length) return "";
+      if (noteStyle() === "icon") {
+        // one small icon per app with unread notes (newest first, overlapping, at most 3)
+        const apps = [];
+        for (const n of un) if (!apps.some((a) => a.key === n.key)) apps.push(n);
+        return `<span class="pill-nicons" title="${apps.map((a) => esc(a.app)).join("、")}">${apps.slice(0, 3).map((n) =>
+          `<span class="pni${n.id === notePop ? " pop" : ""}">${noteMini(n, false)}</span>`).join("")}${apps.length > 3 ? `<span class="pni-more mono">+${apps.length - 3}</span>` : ""}</span>`;
+      }
+      const u = un.length;
+      return `<span class="pill-bell"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${BELL}"/></svg><span class="mono">${u > 99 ? "99+" : u}</span></span>`;
     }
     case "exits": {
       // every measured group's exit side by side (just the main exit without a proxy client)
@@ -688,6 +703,8 @@ function renderPill() {
   let html;
   if (flash.msg && Date.now() < flash.until) {
     html = `<span class="flash-msg ${flash.msg.level}">${decorate(flash.msg.text)}</span>`;
+  } else if (nfl.until > Date.now() && noteById(nfl.id) && !shape().vertical && shape().style !== "line") {
+    html = inlineNoteHtml();
   } else {
     flash.msg = null;
     const list = (sget("pill.items", null) || [{ id: "exits", on: true }, { id: "speed", on: true }, { id: "leaks", on: true }]).filter((i) => i.on);
@@ -822,6 +839,50 @@ function noteCardHtml(n, close) {
   </div>`;
 }
 
+// how a new note shows: icon (a small app icon at the pill's right end) | inline (the pill's
+// content steps aside for one line: icon, sender, text) | card (the pill springs into a card)
+const noteStyle = () => sget("notify.style", "icon");
+const nfl = { id: 0, until: 0, w: 0, since: 0, anim: false }; // inline note in the pill
+let notePop = 0; // newest note: its icon pops in the pill
+
+// small round icon: the sender's picture (inline only, privacy permitting) or the app's icon
+function noteMini(n, avatar) {
+  if (avatar && n.avatar && !noteHidden(n)) return `<img class="nm-av" src="${n.avatar}" alt="">`;
+  if (n.iconUrl) return `<img class="app-icon" src="${n.iconUrl}" alt="">`;
+  if (n.icon) return iconHtml({ path: n.icon, name: n.app });
+  return `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc(GLYPH[n.key] || [...(n.app || "?")][0])}</div>`;
+}
+
+function inlineNoteHtml() {
+  const n = noteById(nfl.id);
+  const t = noteText(n);
+  const w = Math.max(200, nfl.w - 46);
+  const others = notes.filter((x) => !x.read && !x.silent && x.id !== n.id && x.at >= nfl.since).length;
+  const html = `<span class="pill-note${nfl.anim ? " in" : ""}" style="width:${w}px">${noteMini(n, true)}<b class="pn-t">${esc(t.title)}</b><span class="pn-b">${esc(t.body)}</span>${others ? `<span class="pn-more mono">+${others}</span>` : ""}</span>`;
+  nfl.anim = false;
+  return html;
+}
+
+// a new note arrived (not muted): announce it the chosen way
+function announceNote(n) {
+  if (MANAGER || editing) return;
+  const st = noteStyle();
+  if (st === "card") { showNote(n.id); return; }
+  if (expanded) return; // the notes page / the dot on its icon show it
+  if (st === "inline") {
+    const showing = nfl.until > Date.now();
+    nfl.w = showing ? nfl.w : pill.offsetWidth; // keep the pill's width while it shows notes
+    nfl.since = showing ? nfl.since : n.at;
+    nfl.id = n.id;
+    nfl.anim = true;
+    nfl.until = Date.now() + Math.min(30, Math.max(2, Number(sget("notify.duration", 5)) || 5)) * 1000;
+  } else {
+    notePop = n.id;
+    setTimeout(() => { if (notePop === n.id) { notePop = 0; renderPill(); } }, 900);
+  }
+  renderPill();
+}
+
 function renderNote() {
   if (MANAGER) return;
   const list = nst.active.map(noteById).filter(Boolean);
@@ -933,7 +994,7 @@ listen("note", (e) => {
   const n = e.payload;
   if (!n) return;
   notes = [n, ...notes.filter((x) => x.id !== n.id)].slice(0, 300);
-  if (!n.silent) showNote(n.id);
+  if (!n.silent) announceNote(n);
   afterNotesChange();
 });
 listen("notes-read", (e) => {
@@ -2052,7 +2113,7 @@ const PILL_ITEM_LABEL = {
   media: "正在播放的歌（播放时）", leaks: "泄漏数（有泄漏时才显示）", conns: "连接数", latency: "节点延迟",
   cpu: "CPU 占用", mem: "内存占用", clock: "时钟", exit: "主出口 IP（只显示一个）",
   rotate: "轮换区（下面勾选的内容轮流显示）",
-  notes: "未读通知数（有未读时才显示）",
+  notes: "未读通知（有未读时才显示程序图标 / 数量）",
 };
 
 const HOURS = Array.from({ length: 24 }, (_, h) => [h, `${String(h).padStart(2, "0")}:00`]);
@@ -2080,6 +2141,7 @@ function notifySettingsHtml() {
   }).join("");
   return `<div class="s-sec"><div class="s-title">通知<span class="s-note">其他程序的提醒在岛上弹出，收进「通知」页；内容只在内存里</span></div>
     ${sToggle("notify.on", "在岛上显示通知")}
+    ${sSelect("notify.style", "　提示方式", [["icon", "胶囊右边一格，只显示程序图标"], ["inline", "胶囊里的内容暂时让开，显示一行消息"], ["card", "胶囊展开成卡片"]], "胶囊里有「未读通知」这一项时才显示图标（设置 → 胶囊里显示什么）")}
     ${sNumber("notify.duration", "　每次停留", 2, 30, 1, "秒", "鼠标放在通知上时一直停着；同时来几条会叠起来，放上去就展开")}
     ${sSelect("notify.privacy", "　显示内容", [["smart", "平时全文；全屏、录屏时只显示来源"], ["source", "只显示是哪个程序、谁发的"], ["full", "始终显示全文"]])}
     ${sToggle("notify.followDnd", "　跟随 Windows 勿扰", "Windows 开着勿扰 / 专注时，通知只收进通知页，不在岛上弹出")}
@@ -2610,6 +2672,11 @@ function renderList(force = false) {
     list.scrollTop = scroll;
     Charts.restore(list);
     measurePanel();
+    // the notes page was looked at: everything on it counts as seen (the pill icons go away)
+    if (tab === "notes" && (MANAGER ? !document.hidden : expanded)) {
+      const un = notes.filter((n) => !n.read).map((n) => n.id);
+      if (un.length) setTimeout(() => { readNotes(un); renderPill(); if (!MANAGER) renderPages(); }, 1500);
+    }
     return;
   }
   if (tab === "rules") {
