@@ -407,13 +407,27 @@ impl Collector {
         if local_port.is_none() {
             local_port = sys_proxy.as_deref().and_then(proxy::port_from_proxy_server).filter(|p| listening.contains(p));
         }
+        if local_port.is_none() && (core_running || client.is_some()) {
+            // clients that leave the system proxy alone (v2rayN "清除系统代理", TUN-only setups) and
+            // whose config we don't read: their usual port, if the client or its core listens on it
+            let owners: HashSet<u32> = list
+                .iter()
+                .filter(|(pid, exe)| core_pids.contains(pid) || proxy::client_name(&[(*pid, exe.clone())]).0.is_some())
+                .map(|(pid, _)| *pid)
+                .collect();
+            local_port = proxy::KNOWN_PORTS.iter().copied().find(|p| {
+                sockets.iter().any(|s| s.proto == Proto::Tcp && s.state == "LISTEN" && s.local_port == *p && owners.contains(&s.pid))
+            });
+        }
+        // only mihomo-type cores have a controller worth looking for (xray / sing-box cores don't)
+        let mihomo_core = list.iter().any(|(pid, exe)| core_pids.contains(pid) && proxy::is_mihomo_core(exe));
 
         // --- mihomo controller ---
         let mut mconns: Vec<MConn> = Vec::new();
         let mut mihomo_err = None;
         {
             let mut link = sh.mihomo.lock().unwrap();
-            if !core_running {
+            if !mihomo_core {
                 link.ctl = None;
             } else if link.ctl.is_none() && Self::due(&link.last_try, Duration::from_secs(5)) {
                 link.last_try = Some(Instant::now());
@@ -461,7 +475,7 @@ impl Collector {
             p.local_port = local_port;
             p.detected = p.client.is_some() || core_running || p.system_proxy.is_some() || p.tun.is_some();
             p.mihomo_ok = !mconns.is_empty() || (core_running && mihomo_err.is_none() && sh.mihomo.lock().unwrap().ctl.is_some());
-            p.mihomo_error = if core_running { mihomo_err } else { None };
+            p.mihomo_error = if mihomo_core { mihomo_err } else { None };
             p.controller = sh.mihomo.lock().unwrap().ctl.as_ref().map(|c| c.describe());
             if !core_running {
                 p.core_version = None;

@@ -76,6 +76,10 @@ pub fn find_pipes() -> Vec<String> {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let l = name.to_lowercase();
+            // FlClash's own IPC pipe (FlClashCore_<hash>) is not a controller and may never answer
+            if l.starts_with("flclash") {
+                continue;
+            }
             if l.contains("mihomo") || l.contains("verge-mihomo") || l.contains("clash") {
                 v.push(format!(r"\\.\pipe\{name}"));
             }

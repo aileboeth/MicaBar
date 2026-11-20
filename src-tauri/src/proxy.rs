@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProxyState {
     pub detected: bool,
     /// Friendly client name, e.g. "Clash Party (mihomo)".
@@ -40,13 +41,35 @@ const CLIENTS: &[(&str, &str)] = &[
 const CORES: &[&str] = &[
     "mihomo", "verge-mihomo", "clash-meta", "clash", "xray", "v2ray", "sing-box", "hysteria", "tuic",
     "naive", "trojan-go", "ss-local", "sslocal",
+    // cores that clients ship under their own name
+    "flclashcore", "thronecore", "hiddifycli",
 ];
 
 pub fn is_core_exe(exe: &str) -> bool {
     let l = exe.to_lowercase();
+    // a client's own window process is not its core ("clash-verge.exe" would match "clash-"),
+    // nor are Clash Verge's service / helper exes
+    if CLIENTS.iter().any(|(e, _)| *e == l) {
+        return false;
+    }
     let stem = l.trim_end_matches(".exe");
+    if stem.starts_with("clash-verge") {
+        return false;
+    }
     CORES.iter().any(|c| stem == *c || stem.starts_with(&format!("{c}-")))
 }
+
+/// A core that speaks the mihomo (Clash) controller API; only these are worth looking for one.
+pub fn is_mihomo_core(exe: &str) -> bool {
+    let l = exe.to_lowercase();
+    let stem = l.trim_end_matches(".exe");
+    is_core_exe(exe) && (stem.starts_with("mihomo") || stem.starts_with("verge-mihomo") || stem.starts_with("clash"))
+}
+
+/// Usual local mixed / http ports of the common clients, for when the system proxy is left alone:
+/// Clash 7890, Clash Verge 7897, v2rayN 10808 (+10809 http in old versions), Throne / NekoRay 2080,
+/// Hiddify 12334, plain 1080.
+pub const KNOWN_PORTS: &[u16] = &[7890, 7897, 10808, 10809, 2080, 12334, 1080];
 
 pub fn client_name(procs: &[(u32, String)]) -> (Option<String>, Vec<u32>, Option<String>) {
     let mut client = None;
@@ -85,14 +108,17 @@ pub fn system_proxy() -> Option<String> {
     }
 }
 
-/// Port of an http proxy in a WinINet ProxyServer string ("127.0.0.1:7890" or "http=...;https=...").
+/// Port of an http proxy in a WinINet ProxyServer string ("127.0.0.1:7890", "http=...;https=...",
+/// or with a scheme like Hiddify writes it: "http://127.0.0.1:12334").
 pub fn port_from_proxy_server(s: &str) -> Option<u16> {
     let part = s
         .split(';')
+        .map(str::trim)
         .find(|p| p.starts_with("http=") || !p.contains('='))
         .unwrap_or(s);
     let addr = part.split('=').last().unwrap_or(part);
-    let host = addr.split('/').find(|x| x.contains(':')).unwrap_or(addr);
+    let addr = addr.rsplit("://").next().unwrap_or(addr);
+    let host = addr.split('/').next().unwrap_or(addr);
     let local = host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]");
     if !local {
         return None;
