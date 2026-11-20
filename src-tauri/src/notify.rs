@@ -440,6 +440,11 @@ fn shell_thread() {
         let filt = ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, std::ptr::null_mut());
         let ok = RegisterShellHookWindow(hwnd);
         log(format!("notify: shell hook {} (filter {})", if ok != 0 { "on" } else { "failed" }, filt != 0));
+        // windows appearing anywhere (app-drawn popups such as Telegram's); out of context, so the
+        // callback runs on this thread's message loop
+        use windows_sys::Win32::UI::Accessibility::SetWinEventHook;
+        let hook = SetWinEventHook(0x8002, 0x8002, std::ptr::null_mut(), Some(show_hook), 0, 0, 0x0000 | 0x0002); // OUTOFCONTEXT | SKIPOWNPROCESS
+        log(format!("notify: window-show hook {}", if hook.is_null() { "failed" } else { "on" }));
         let mut m: MSG = std::mem::zeroed();
         while GetMessageW(&mut m, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&m);
@@ -522,6 +527,235 @@ fn on_activate(hwnd: isize) {
             mark_read_key(&key);
         }
     }
+}
+
+// ---------- source 1b: app-drawn popups (Telegram Desktop) ----------
+// With Windows notifications off, Telegram shows its own small Qt tool windows at the screen
+// corner (class "Qt…QWindowToolSaveBits", ~320x80). The popup itself has no readable text, but
+// the main window's chat list is exposed to UI Automation: "会话名, N 个新消息, …, 发送人：预览, 时间".
+// So: popup shown -> read the chat list -> the chats whose count went up become notes.
+
+static TG_LAST: Mutex<Option<Instant>> = Mutex::new(None);
+static TG_CHATS: Mutex<Option<HashMap<String, (u32, String)>>> = Mutex::new(None);
+
+unsafe extern "system" fn show_hook(_: windows_sys::Win32::UI::Accessibility::HWINEVENTHOOK, _ev: u32, hwnd: windows_sys::Win32::Foundation::HWND, obj: i32, _child: i32, _thread: u32, _time: u32) {
+    if obj != 0 || hwnd.is_null() {
+        return;
+    }
+    let mut cls = [0u16; 64];
+    let n = windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, cls.as_mut_ptr(), 64);
+    let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+    if !(cls.starts_with("Qt") && cls.ends_with("ToolSaveBits")) {
+        return;
+    }
+    let pid = window_pid(hwnd as isize);
+    let Some(path) = procinfo::image_path(pid) else { return };
+    if stem_of(&path) != "telegram" {
+        return;
+    }
+    on_tg_popup(hwnd as isize, pid, path);
+}
+
+fn on_tg_popup(popup: isize, pid: u32, path: String) {
+    if !settings::bool_at("notify.on", true) || !settings::bool_at("notify.flash", true) {
+        return;
+    }
+    // "take over": the popup goes away at once, the island shows the message instead
+    if app_cfg("telegram").get("takeover").and_then(|x| x.as_bool()).unwrap_or(false) {
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(popup as _, windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+    }
+    // several popups at once (and the "N more" bar) = one read
+    {
+        let mut g = TG_LAST.lock().unwrap();
+        if g.map(|t| t.elapsed() < Duration::from_millis(1200)).unwrap_or(false) {
+            return;
+        }
+        *g = Some(Instant::now());
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        let main = tg_main_window(pid);
+        let chats = main.map(tg_chats).unwrap_or_default();
+        let mut fresh = Vec::new();
+        {
+            let mut g = TG_CHATS.lock().unwrap();
+            let had = g.is_some();
+            let prev = g.get_or_insert_with(HashMap::new);
+            for c in &chats {
+                let before = prev.get(&c.name);
+                let up = match before {
+                    Some((n, p)) => c.unread > *n || (c.unread > 0 && *p != c.preview),
+                    None => had && c.unread > 0,
+                };
+                if up {
+                    fresh.push((c.clone(), c.unread.saturating_sub(before.map(|b| b.0).unwrap_or(0)).max(1)));
+                }
+            }
+            // no baseline yet: the newest chat with new messages (the list is sorted by time)
+            if !had && fresh.is_empty() {
+                if let Some(c) = chats.iter().find(|c| c.unread > 0 && !c.muted) {
+                    fresh.push((c.clone(), 1));
+                }
+            }
+            for c in &chats {
+                prev.insert(c.name.clone(), (c.unread, c.preview.clone()));
+            }
+        }
+        let target = Target::Hwnd(main.unwrap_or(0), Some(path.clone()));
+        if fresh.is_empty() {
+            push(Note {
+                key: "telegram".into(),
+                app: "Telegram".into(),
+                icon: Some(path.clone()),
+                title: "Telegram".into(),
+                body: "新消息".into(),
+                kind: "msg".into(),
+                source: "popup".into(),
+                target,
+                merge: "tg|?".into(),
+                tpl: Some("{n} 条新消息".into()),
+                ..Default::default()
+            });
+            return;
+        }
+        for (c, n) in fresh.into_iter().take(4) {
+            let (who, text) = match c.preview.split_once('：') {
+                Some((a, b)) if a.chars().count() <= 24 && !a.is_empty() => (Some(a.trim().to_string()), b.trim().to_string()),
+                _ => (None, c.preview.clone()),
+            };
+            push(Note {
+                key: "telegram".into(),
+                app: "Telegram".into(),
+                icon: Some(path.clone()),
+                title: match &who {
+                    Some(w) if *w != c.name => format!("{} · {w}", c.name),
+                    _ => c.name.clone(),
+                },
+                body: if text.is_empty() { "新消息".into() } else { text },
+                kind: "msg".into(),
+                source: "popup".into(),
+                target: target.clone(),
+                merge: format!("tg|{}", c.name),
+                count: n,
+                ..Default::default()
+            });
+        }
+    });
+}
+
+/// Telegram's main window, visible or hidden in the tray (the biggest "Qt…QWindowIcon" window).
+fn tg_main_window(pid: u32) -> Option<isize> {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowRect};
+    struct Find {
+        pid: u32,
+        best: Option<(isize, i64)>,
+    }
+    unsafe extern "system" fn cb(h: HWND, lp: LPARAM) -> BOOL {
+        let f = &mut *(lp as *mut Find);
+        if window_pid(h as isize) != f.pid {
+            return 1;
+        }
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(h, cls.as_mut_ptr(), 64);
+        if !String::from_utf16_lossy(&cls[..n.max(0) as usize]).ends_with("QWindowIcon") {
+            return 1;
+        }
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(h, &mut r);
+        let area = ((r.right - r.left) as i64) * ((r.bottom - r.top) as i64);
+        if f.best.map(|(_, a)| area > a).unwrap_or(true) {
+            f.best = Some((h as isize, area));
+        }
+        1
+    }
+    let mut f = Find { pid, best: None };
+    unsafe { EnumWindows(Some(cb), &mut f as *mut _ as LPARAM) };
+    f.best.map(|(h, _)| h)
+}
+
+#[derive(Clone, Debug, Default)]
+struct TgChat {
+    name: String,
+    unread: u32,
+    muted: bool,
+    preview: String,
+}
+
+/// The chat list items' accessible names (UI Automation), parsed.
+fn tg_chats(main: isize) -> Vec<TgChat> {
+    tg_list_names(main).iter().filter_map(|s| parse_tg_item(s)).collect()
+}
+
+fn tg_list_names(main: isize) -> Vec<String> {
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, TreeScope_Descendants, UIA_ListItemControlTypeId};
+    let mut out = Vec::new();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else { return out };
+        let Ok(el) = uia.ElementFromHandle(windows::Win32::Foundation::HWND(main as _)) else { return out };
+        let Ok(cond) = uia.CreateTrueCondition() else { return out };
+        let Ok(arr) = el.FindAll(TreeScope_Descendants, &cond) else { return out };
+        let n = arr.Length().unwrap_or(0).min(600);
+        for i in 0..n {
+            let Ok(e) = arr.GetElement(i) else { continue };
+            if e.CurrentControlType().map(|t| t == UIA_ListItemControlTypeId).unwrap_or(false) {
+                if let Ok(name) = e.CurrentName() {
+                    out.push(name.to_string());
+                }
+                if out.len() >= 60 {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// "频道, 会话名, 已静音, 12 个新消息, 发送人：预览, 已收到, 昨天 9:30 PM" (fields vary; the
+/// preview itself may contain ", "). English UI words are understood too.
+fn parse_tg_item(s: &str) -> Option<TgChat> {
+    const KIND: [&str; 8] = ["频道", "机器人", "群组", "超级群组", "channel", "bot", "group", "Channel"];
+    const STATUS: [&str; 8] = ["已收到", "已读", "已发送", "图片", "sent", "read", "delivered", "Photo"];
+    let clean = |t: &str| t.chars().filter(|c| !matches!(*c, '\u{200e}' | '\u{200f}' | '\u{2066}'..='\u{2069}')).collect::<String>().trim().to_string();
+    let fields: Vec<String> = s.split(", ").map(clean).collect();
+    let mut i = 0;
+    while i < fields.len() && KIND.contains(&fields[i].as_str()) {
+        i += 1;
+    }
+    let name = fields.get(i)?.clone();
+    if name.is_empty() {
+        return None;
+    }
+    let is_time = |t: &str| {
+        let has_clock = t.split(|c: char| !c.is_ascii_digit() && c != ':').any(|w| w.len() >= 4 && w.contains(':'));
+        has_clock || t.contains('/') && t.chars().filter(|c| c.is_ascii_digit()).count() >= 6
+    };
+    let mut unread = 0;
+    let mut muted = false;
+    let mut rest = Vec::new();
+    for f in &fields[i + 1..] {
+        let lower = f.to_ascii_lowercase();
+        if let Some(n) = f.split_whitespace().next().and_then(|w| w.parse::<u32>().ok()).filter(|_| f.contains("新消息") || lower.contains("unread")) {
+            unread = n;
+        } else if f == "已静音" || lower == "muted" {
+            muted = true;
+        } else if STATUS.contains(&f.as_str()) || is_time(f) || f.is_empty() {
+            // status / time
+        } else {
+            rest.push(f.clone());
+        }
+    }
+    // reactions ("表情回应：👍 11, ❤ 4") come after the message: cut there; a message containing
+    // ", " was split into several fields: join them again; in groups it starts at "发送人：…"
+    let cut = rest.iter().position(|f| f.starts_with("表情回应：") || f.starts_with("Reactions:")).unwrap_or(rest.len());
+    rest.truncate(cut);
+    let sender_line = rest.iter().position(|f| f.split_once('：').map(|(a, _)| !a.is_empty() && a.chars().count() <= 24).unwrap_or(false));
+    let preview = rest[sender_line.unwrap_or(0).min(rest.len())..].join(", ");
+    let preview: String = preview.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview = if preview.chars().count() > 160 { preview.chars().take(160).collect::<String>() + "…" } else { preview };
+    Some(TgChat { name, unread, muted, preview })
 }
 
 // ---------- source 2: Windows toasts (notification database) ----------

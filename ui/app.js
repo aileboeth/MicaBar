@@ -2056,7 +2056,7 @@ const PILL_ITEM_LABEL = {
 };
 
 const HOURS = Array.from({ length: 24 }, (_, h) => [h, `${String(h).padStart(2, "0")}:00`]);
-const SRC_LABEL = { toast: "系统通知", flash: "任务栏闪烁", ai: "AI 钩子", test: "测试" };
+const SRC_LABEL = { toast: "系统通知", flash: "任务栏闪烁", popup: "程序弹窗", ai: "AI 钩子", test: "测试" };
 
 function notifySettingsHtml() {
   // the tools' configs can change outside MicaBar: re-read when the page is built again later
@@ -2075,7 +2075,8 @@ function notifySettingsHtml() {
     return `<div class="na-row">${icon}<span class="na-name" title="${esc(a.key)}">${esc(a.app)}</span><span class="na-src">${SRC_LABEL[a.source] || ""} · ${a.count} 条</span>
       <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="island" ${cfg.island !== false ? "checked" : ""}> 岛上弹出</label>
       <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="mute" ${cfg.mute ? "checked" : ""}> 静音</label>
-      ${a.source === "toast" ? `<label title="关掉 Windows 自己右下角的弹窗，只在岛上显示（随时可以还原）"><input type="checkbox" data-ntake="${esc(a.key)}" ${a.takeover ? "checked" : ""}> 接管弹窗</label>` : "<span></span>"}</div>`;
+      ${a.source === "toast" ? `<label title="关掉 Windows 自己右下角的弹窗，只在岛上显示（随时可以还原）"><input type="checkbox" data-ntake="${esc(a.key)}" ${a.takeover ? "checked" : ""}> 接管弹窗</label>`
+        : a.source === "popup" ? `<label title="${esc(a.app)} 自己的右下角小窗一出现就藏起来，只在岛上显示"><input type="checkbox" data-napp="${esc(a.key)}" data-f="takeover" ${cfg.takeover ? "checked" : ""}> 接管弹窗</label>` : "<span></span>"}</div>`;
   }).join("");
   return `<div class="s-sec"><div class="s-title">通知<span class="s-note">其他程序的提醒在岛上弹出，收进「通知」页；内容只在内存里</span></div>
     ${sToggle("notify.on", "在岛上显示通知")}
@@ -2085,7 +2086,7 @@ function notifySettingsHtml() {
     ${sToggle("notify.quiet.on", "　免打扰时段")}
     ${sget("notify.quiet.on", false) ? `${sSelect("notify.quiet.from", "　　从", HOURS)}${sSelect("notify.quiet.to", "　　到", HOURS)}` : ""}
     ${sToggle("notify.toast", "　读取系统通知", "Telegram、邮件、浏览器等弹出 Windows 通知的程序，能显示发送人和内容")}
-    ${sToggle("notify.flash", "　任务栏闪烁提醒", "微信 4.x 来消息只闪任务栏、不发系统通知，所以只能显示「微信 · N 条新消息」，看不到内容")}
+    ${sToggle("notify.flash", "　任务栏闪烁和程序自己的弹窗", "微信 4.x 来消息只闪任务栏，只能显示「微信 · N 条新消息」；Telegram 关了系统通知后用自己的小窗提醒，岛上能显示会话、发送人和内容（从它的聊天列表读）")}
     <div class="m-actions end"><button class="ghost" data-do="notify-test">发一条测试通知</button></div>
     <div class="s-sub">AI 完成提醒<span class="s-note">往工具自己的配置里加一个钩子，任务完成或等你批准时通知本机 127.0.0.1:${notifyInfo?.port ?? 47900}（带随机口令）</span></div>
     ${hooks || `<div class="s-note">正在读取…</div>`}
