@@ -192,9 +192,15 @@ const Charts = (() => {
       grid += `<text class="c-tick" x="${pad.l - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${esc(opts.fmtTick(v))}</text>`;
     }
     let bars = "";
+    // many columns (30 days): every k-th label, totals on the caps only when there is room
+    const tickEvery = Math.max(1, Math.ceil(40 / band));
+    const caps = band >= 34;
+    const selIdx = opts.selected != null ? cats.indexOf(opts.selected) : -1;
     cats.forEach((c, i) => {
       const cx = pad.l + band * i + band / 2;
       const x = cx - bw / 2;
+      const dim = opts.selected != null && opts.selected !== c ? " dim" : "";
+      const hit = !opts.pick ? "" : `<rect class="c-hit" x="${pad.l + band * i}" y="${pad.t}" width="${band}" height="${ph}" data-${opts.pick}="${esc(c)}"><title>${esc(opts.fmtCat(c))} · 合计 ${esc(opts.fmtY(totals[i]))}${stacks.map((st) => ` · ${esc(st.name)} ${esc(opts.fmtY(st.values[i] || 0))}`).join("")}</title></rect>`;
       let base = 0;
       const segs = stacks.map((st) => ({ st, v: st.values[i] || 0 })).filter((s) => s.v > 0);
       segs.forEach((s, k) => {
@@ -208,10 +214,13 @@ const Charts = (() => {
         const p = r
           ? `M${x},${top + h} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${top + h} Z`
           : `M${x},${top + h} V${top} H${x + bw} V${top + h} Z`;
-        bars += `<path class="c-bar ${s.st.cls}" d="${p}"><title>${esc(opts.fmtCat(c))} · ${esc(s.st.name)} ${esc(opts.fmtY(s.v))}</title></path>`;
+        bars += `<path class="c-bar ${s.st.cls}${dim}" d="${p}"><title>${esc(opts.fmtCat(c))} · ${esc(s.st.name)} ${esc(opts.fmtY(s.v))}</title></path>`;
       });
-      if (totals[i] > 0) bars += `<text class="c-cap" x="${cx}" y="${(Y(totals[i]) - 5).toFixed(1)}" text-anchor="middle">${esc(opts.fmtTick(totals[i]))}</text>`;
-      bars += `<text class="c-tick" x="${cx}" y="${H - 4}" text-anchor="middle">${esc(opts.fmtCat(c))}</text>`;
+      const sel = opts.selected === c;
+      if (totals[i] > 0 && (caps || sel)) bars += `<text class="c-cap${sel ? " sel" : ""}" x="${cx}" y="${(Y(totals[i]) - 5).toFixed(1)}" text-anchor="middle">${esc(opts.fmtTick(totals[i]))}</text>`;
+      const nearSel = selIdx >= 0 && !sel && Math.abs(i - selIdx) < tickEvery;
+      if (sel || (!nearSel && (cats.length - 1 - i) % tickEvery === 0)) bars += `<text class="c-tick${sel ? " sel" : ""}" x="${cx}" y="${H - 4}" text-anchor="middle">${esc(opts.fmtCat(c))}</text>`;
+      bars += hit; // on top, so a click anywhere in the column picks it
     });
     return `<div class="chart" data-chart="${esc(id)}" style="width:${W}px;height:${H}px"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${grid}${bars}</svg></div>`;
   }

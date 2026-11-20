@@ -1515,9 +1515,9 @@ fn exit_group_options() -> Vec<String> {
 }
 
 #[tauri::command]
-fn traffic_query(state: tauri::State<'_, Arc<Shared>>, days: i64) -> traffic::Report {
+fn traffic_query(state: tauri::State<'_, Arc<Shared>>, days: i64, day: Option<String>) -> traffic::Report {
     let book = state.traffic.lock().unwrap();
-    traffic::report(&book, days.clamp(1, 31))
+    traffic::report(&book, days.clamp(1, traffic::KEEP_DAYS + 1), day.as_deref())
 }
 
 #[tauri::command]

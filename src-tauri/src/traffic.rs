@@ -83,8 +83,27 @@ fn load(date: &str) -> HashMap<String, AppTraffic> {
         .unwrap_or_default()
 }
 
+/// Records are kept for today plus this many days before it; older day files are removed.
+pub const KEEP_DAYS: i64 = 30;
+
+/// Removes day files older than KEEP_DAYS (names are YYYY-MM-DD, so they compare as text).
+fn prune() {
+    let oldest = local_date(KEEP_DAYS);
+    let Ok(rd) = std::fs::read_dir(dir()) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(stem) = name.strip_suffix(".json") else { continue };
+        let b = stem.as_bytes();
+        let is_date = b.len() == 10 && b[4] == b'-' && b[7] == b'-' && stem.chars().filter(|c| c.is_ascii_digit()).count() == 8;
+        if is_date && stem < oldest.as_str() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 impl Book {
     pub fn new() -> Book {
+        prune();
         let date = local_date(0);
         let apps = load(&date);
         Book { date, apps, dirty: false }
@@ -97,6 +116,7 @@ impl Book {
             self.flush();
             self.date = today;
             self.apps.clear();
+            prune();
         }
         if proxy.0 + proxy.1 + direct.0 + direct.1 <= 0.0 {
             return;
@@ -153,8 +173,9 @@ pub struct Report {
     pub apps: Vec<AppTotal>,
 }
 
-/// The last `n` days (oldest first) with per-day totals, and per-app totals over the range.
-pub fn report(book: &Book, n: i64) -> Report {
+/// The last `n` days (oldest first) with per-day totals, and per-app totals over the range
+/// (or over the one day `focus`, "YYYY-MM-DD", when given).
+pub fn report(book: &Book, n: i64, focus: Option<&str>) -> Report {
     let (today, today_apps) = book.today();
     let mut days = Vec::new();
     let mut apps: HashMap<String, AppTraffic> = HashMap::new();
@@ -162,11 +183,15 @@ pub fn report(book: &Book, n: i64) -> Report {
         let date = local_date(ago);
         let data = if date == today { today_apps.clone() } else { load(&date) };
         let mut d = DayTotal { date: date.clone(), ..Default::default() };
+        let count = focus.map_or(true, |f| f == date);
         for (k, a) in data {
             d.pu += a.pu;
             d.pd += a.pd;
             d.du += a.du;
             d.dd += a.dd;
+            if !count {
+                continue;
+            }
             let e = apps.entry(k).or_default();
             e.name = a.name;
             if e.path.is_none() {

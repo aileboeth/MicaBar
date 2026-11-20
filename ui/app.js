@@ -576,6 +576,17 @@ function rotHtml(target) {
   return rotateCards(rotCards(target), "main");
 }
 
+// What a pill item id or a rotation card key shows, so the rotation can skip what already stands
+// in the pill: "exits" / "media" / "speed" / "latency" / "ai:<tool>".
+function coverOf(k) {
+  if (k === "exit" || k === "exits" || k.startsWith("x:")) return "exits";
+  if (k === "media" || k.startsWith("m:")) return "media";
+  if (k.startsWith("ai-")) return "ai:" + k.slice(3);
+  if (k.startsWith("a:")) return "ai:" + k.slice(2);
+  if (k.startsWith("s:")) return k.slice(2);
+  return k;
+}
+
 // A slot that shows one card at a time, advancing every rotate.interval seconds.
 const rots = { main: rot };
 function rotateCards(cards, name) {
@@ -668,9 +679,16 @@ function renderPill() {
     html = `<span class="flash-msg ${flash.msg.level}">${decorate(flash.msg.text)}</span>`;
   } else {
     flash.msg = null;
-    const items = (sget("pill.items", null) || [{ id: "exits", on: true }, { id: "speed", on: true }, { id: "leaks", on: true }])
-      .filter((i) => i.on)
-      .map((i) => ({ id: i.id, html: pillItem(i.id, target) }))
+    const list = (sget("pill.items", null) || [{ id: "exits", on: true }, { id: "speed", on: true }, { id: "leaks", on: true }]).filter((i) => i.on);
+    // the rotating slot skips whatever already stands in the pill on its own (no exit IP or quota
+    // ring twice); with nothing left it disappears
+    const shown = new Set(list.filter((i) => i.id !== "rotate").map((i) => coverOf(i.id)));
+    const items = list
+      .map((i) => {
+        if (i.id !== "rotate") return { id: i.id, html: pillItem(i.id, target) };
+        const cards = rotCards(target).filter((c) => !shown.has(coverOf(c.key)));
+        return { id: "rotate", cards, html: rotateCards(cards, "main") };
+      })
       .filter((i) => i.html);
     html = foldPill(dot, items);
   }
@@ -717,17 +735,25 @@ function foldPill(dot, items) {
         const w = base + widths.slice(0, keep).reduce((a, b) => a + b, 0) + keep * sepW + slotW;
         if (w <= limit) break;
       }
+      // a kept rotation slot moves into the folded slot (one rotating slot, never two)
+      const ri = items.findIndex((i) => i.id === "rotate");
+      if (ri >= 0 && ri < keep) slotW = Math.max(slotW, widths[ri]);
+      const keptW = widths.slice(0, keep).reduce((a, b) => a + b, 0) - (ri >= 0 && ri < keep ? widths[ri] + sepW : 0);
       // the slot shrinks to what is left when even one kept item plus the widest card is too wide
-      const left = limit - (base + widths.slice(0, keep).reduce((a, b) => a + b, 0) + keep * sepW);
+      const left = limit - (base + keptW + keep * sepW);
       slotW = Math.max(60, Math.min(slotW, left));
     }
     fold.keep = keep;
     fold.slotW = slotW;
   }
   if (fold.keep >= items.length) return all;
-  const kept = items.slice(0, fold.keep).map(pillSpan).join(PILL_SEP);
-  const cards = items.slice(fold.keep).map((i) => ({ key: "f:" + i.id, html: i.html }));
-  return `${kept}${PILL_SEP}<span class="pill-item rot-slot fold" style="width:${Math.ceil(fold.slotW)}px">${rotateCards(cards, "fold")}</span>`;
+  const keptItems = items.slice(0, fold.keep).filter((i) => i.id !== "rotate");
+  const tail = [...items.slice(fold.keep), ...items.slice(0, fold.keep).filter((i) => i.id === "rotate")];
+  // folded items take turns with the rotation's own cards in the same slot (no slot inside a slot)
+  const cards = tail.flatMap((i) => (i.id === "rotate" ? i.cards : [{ key: "f:" + i.id, html: i.html }]));
+  if (!cards.length) return keptItems.map(pillSpan).join(PILL_SEP);
+  const kept = keptItems.map(pillSpan).join(PILL_SEP);
+  return `${kept}${kept ? PILL_SEP : ""}<span class="pill-item rot-slot fold" style="width:${Math.ceil(fold.slotW)}px">${rotateCards(cards, "fold")}</span>`;
 }
 // the rotating slot advances on its own, between snapshots too
 if (!MANAGER) setInterval(() => { if (!expanded) renderPill(); }, 1000);
@@ -1110,45 +1136,71 @@ function speedTabHtml() {
 // ---------- traffic tab ----------
 
 let trafficDays = 1;
+let trafficDay = null; // one day picked in the chart ("YYYY-MM-DD"): the app list shows only that day
+let trafficSort = "total";
+try { trafficSort = localStorage.getItem("mb-traffic-sort") || "total"; } catch { /* ignore */ }
 let trafficData = null;
 let trafficAt = 0;
 
 function loadTraffic(force) {
   if (!force && Date.now() - trafficAt < 10_000) return;
   trafficAt = Date.now();
-  invoke("traffic_query", { days: trafficDays })
+  invoke("traffic_query", { days: trafficDays, day: trafficDays > 1 ? trafficDay : null })
     .then((r) => { trafficData = r; if (tab === "traffic" || tab === "home") renderList(true); })
     .catch(() => {});
 }
+
+const dayName = (date, last) => {
+  if (date === last) return "今天";
+  const d = new Date(date + "T00:00:00");
+  return `${d.getMonth() + 1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
+};
 
 function trafficTabHtml() {
   loadTraffic(false);
   const r = trafficData;
   if (!r) return `<div class="empty">正在读取流量记录…</div>`;
   const P = (x) => x.pu + x.pd, D = (x) => x.du + x.dd;
-  const tp = r.days.reduce((s, d) => s + P(d), 0), td = r.days.reduce((s, d) => s + D(d), 0);
+  const last = r.days[r.days.length - 1]?.date;
+  const picked = trafficDays > 1 && trafficDay ? r.days.find((d) => d.date === trafficDay) : null;
+  // totals: the picked day, or the whole range
+  const span = picked ? [picked] : r.days;
+  const tp = span.reduce((s, d) => s + P(d), 0), td = span.reduce((s, d) => s + D(d), 0);
   const tot = tp + td;
   const pct = (v) => (tot ? Math.round((v / tot) * 100) : 0);
-  const head = `<div class="viz-head">${segmented("tdays", trafficDays, [[1, "今天"], [7, "最近 7 天"]])}
+  const rangeLabel = picked ? dayName(picked.date, last) : trafficDays > 1 ? `最近 ${trafficDays} 天` : "今天";
+  const head = `<div class="viz-head">${segmented("tdays", trafficDays, [[1, "今天"], [7, "7 天"], [30, "30 天"]])}
     <span class="legend"><span class="lg"><i class="key s1"></i>代理 ${fmtBytes(tp)}（${pct(tp)}%）</span><span class="lg"><i class="key s2"></i>直连 ${fmtBytes(td)}（${pct(td)}%）</span></span></div>`;
-  const summary = `<div class="t-total"><span class="t-label">合计</span><span class="t-value">${fmtBytes(tot)}</span>
-    ${Charts.segbar([{ value: tp, cls: "s1" }, { value: td, cls: "s2" }], `代理 ${fmtBytes(tp)} · 直连 ${fmtBytes(td)}`)}</div>`;
+  const used = r.days.filter((d) => P(d) + D(d) > 0);
+  const avg = trafficDays > 1 && used.length ? r.days.reduce((s, d) => s + P(d) + D(d), 0) / used.length : 0;
+  const peak = trafficDays > 1 && used.length ? used.reduce((a, b) => (P(b) + D(b) > P(a) + D(a) ? b : a)) : null;
+  const summary = `<div class="t-total"><span class="t-label">${esc(rangeLabel)}</span><span class="t-value">${fmtBytes(tot)}</span>
+    ${Charts.segbar([{ value: tp, cls: "s1" }, { value: td, cls: "s2" }], `代理 ${fmtBytes(tp)} · 直连 ${fmtBytes(td)}`)}</div>
+    ${!picked && peak ? `<div class="t-stats"><span>有流量的 ${used.length} 天平均 <b class="mono">${fmtBytes(avg)}</b>/天</span><span>最多 <button class="link" data-tday="${esc(peak.date)}">${esc(dayName(peak.date, last))}</button> <b class="mono">${fmtBytes(P(peak) + D(peak))}</b></span></div>` : ""}`;
   const chart = trafficDays > 1
     ? Charts.columns({
-        id: "traffic", width: chartW(), height: 160, cats: r.days.map((d) => d.date),
+        id: "traffic", width: chartW(), height: trafficDays > 7 ? 170 : 160, cats: r.days.map((d) => d.date),
         stacks: [{ name: "代理", cls: "s1", values: r.days.map(P) }, { name: "直连", cls: "s2", values: r.days.map(D) }],
-        fmtY: fmtBytes, fmtTick: tickRate, binary: true, fmtCat: (d) => (d === r.days[r.days.length - 1].date ? "今天" : d.slice(5)),
+        fmtY: fmtBytes, fmtTick: tickRate, binary: true, fmtCat: (d) => (d === last ? "今天" : d.slice(5)),
+        pick: "tday", selected: picked?.date ?? null,
       })
     : "";
-  const rows = r.apps.filter((a) => P(a) + D(a) > 0).slice(0, 30).map((a) => `<div class="t-row">
+  const key = { total: (a) => P(a) + D(a), proxy: P, direct: D, up: (a) => a.pu + a.du, down: (a) => a.pd + a.dd }[trafficSort] || ((a) => P(a) + D(a));
+  const apps = r.apps.filter((a) => key(a) > 0).sort((a, b) => key(b) - key(a));
+  const rows = apps.slice(0, 40).map((a) => `<div class="t-row">
       ${iconHtml({ path: a.path, name: a.name })}<span class="sp-name">${esc(a.name)}</span>
       ${Charts.segbar([{ value: P(a), cls: "s1" }, { value: D(a), cls: "s2" }], `代理 ${fmtBytes(P(a))} · 直连 ${fmtBytes(D(a))}`)}
-      <span class="t-num mono">${fmtBytes(P(a) + D(a))}</span>
+      <span class="t-num mono">${fmtBytes(key(a))}</span>
       <span class="t-sub mono">↑${fmtBytes(a.pu + a.du)} ↓${fmtBytes(a.pd + a.dd)}</span></div>`).join("");
+  const appHead = `<div class="g-head t-apphead">按程序（${esc(rangeLabel)}${picked || trafficDays === 1 ? "" : "合计"}）
+    ${picked ? `<button class="link" data-tday="">看全部 ${trafficDays} 天</button>` : ""}<span class="sp"></span>
+    ${segmented("tsort", trafficSort, [["total", "总量"], ["proxy", "代理"], ["direct", "直连"], ["down", "下载"], ["up", "上传"]])}</div>`;
   return `<div class="viz">${head}${summary}${chart}
-    <div class="g-head" style="margin-top:8px">按程序${trafficDays > 1 ? "（7 天合计）" : "（今天）"}</div>
-    ${rows || `<div class="empty">还没有流量记录</div>`}
-    <div class="m-hint">「代理」= 经过代理节点的字节；其余算「直连」。数据每分钟存一次，存在本机。</div></div>`;
+    ${trafficDays > 1 && !picked ? `<div class="m-hint t-pick">点柱子看那一天的明细</div>` : ""}
+    ${appHead}
+    ${rows || `<div class="empty">${picked ? "这一天没有流量记录" : "还没有流量记录"}</div>`}
+    ${apps.length > 40 ? `<div class="m-hint">只列出前 40 个程序（共 ${apps.length} 个）</div>` : ""}
+    <div class="m-hint">「代理」= 经过代理节点的字节；其余算「直连」。数据每分钟存一次，存在本机，保留最近 30 天，更早的自动删除。</div></div>`;
 }
 
 // ---------- node quality tab ----------
@@ -1628,20 +1680,28 @@ const ICON = {
   pause: svg("M7 5h3v14H7zM14 5h3v14h-3z", true),
 };
 
-function mediaCardHtml() {
-  if (!sget("media.on", true)) return "";
-  const m = media;
-  if (!m?.title) return `<div class="home-card media"><div class="hc-title">正在播放</div><div class="q-msg">没有正在播放的内容</div></div>`;
-  const pct = m.duration > 0 ? Math.min(100, (m.position / m.duration) * 100) : 0;
-  const t = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-  return `<div class="home-card media"><div class="hc-title">正在播放<span class="hc-sub">${esc(m.app)}</span></div>
-    <div class="mp">
-      ${m.cover && sget("media.cover", true) ? `<img class="mp-cover" src="${m.cover}" alt="">` : `<div class="mp-cover none">♪</div>`}
-      <div class="mp-info"><div class="mp-title">${esc(m.title)}</div><div class="mp-artist">${esc([m.artist, m.album].filter(Boolean).join(" · "))}</div>
-        ${m.duration > 0 ? `<div class="mp-bar"><i style="width:${pct}%"></i></div><div class="mp-time mono">${t(m.position)} / ${t(m.duration)}</div>` : ""}
-        <div class="mp-ctl"><button data-do="media-prev" title="上一首">${ICON.prev}</button><button data-do="media-toggle" title="播放 / 暂停">${m.playing ? ICON.pause : ICON.play}</button><button data-do="media-next" title="下一首">${ICON.next}</button></div>
-      </div>
-    </div></div>`;
+// Overview AI block: one small table per tool, side by side across the page. Rows = quota pools
+// (Antigravity: Gemini, Claude / GPT; others: one row), columns = windows (5 小时, 每周…), so the
+// block grows by pools, not by windows, and many tools spread sideways instead of downwards.
+function aiMini(q) {
+  const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">上次数据 · ${ago(q.at)}</span>` : "";
+  const head = `<div class="am-head"><b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}</div>`;
+  const ws = (q.windows || []).filter((w) => w && w.used != null);
+  if (!ws.length) return `<div class="am">${head}<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || "暂无数据")}</div></div>`;
+  if (ws.length >= GROUP_FROM) return `<div class="am">${head}${quotaBars(q, true)}</div>`;
+  const kindOf = (w) => (w.group && w.label.startsWith(w.group + " · ") ? w.label.slice(w.group.length + 3) : w.label);
+  const kinds = [...new Set(ws.map(kindOf))];
+  const pools = [...new Set(ws.map((w) => w.group || ""))];
+  const named = pools.some((p) => p);
+  const cols = `${named ? "minmax(0, 0.9fr) " : ""}repeat(${kinds.length}, minmax(0, 1fr))`;
+  const cell = (w) => {
+    if (!w) return `<span class="am-cell none">—</span>`;
+    const pct = Math.max(0, Math.min(100, w.used));
+    return `<span class="am-cell" title="${esc(`${w.label}：已用 ${Math.round(pct)}%，${untilText(w.resetsAt)}`)}"><span class="meter"><i class="${quotaClass(pct)}" style="width:${pct}%"></i></span><span class="q-pct mono">${Math.round(pct)}%</span></span>`;
+  };
+  const top = `${named ? "<span></span>" : ""}${kinds.map((k) => `<span class="am-kind">${esc(k)}</span>`).join("")}`;
+  const rows = pools.map((p) => `${named ? `<span class="am-pool" title="${esc(p)}">${esc(p)}</span>` : ""}${kinds.map((k) => cell(ws.find((w) => (w.group || "") === p && kindOf(w) === k))).join("")}`).join("");
+  return `<div class="am">${head}<div class="am-grid" style="grid-template-columns:${cols}">${top}${rows}</div></div>`;
 }
 
 function homeHtml() {
@@ -1677,7 +1737,8 @@ function homeHtml() {
     : "";
 
   const r = trafficData;
-  const tp = r ? r.days.reduce((s, x) => s + x.pu + x.pd, 0) : 0, td = r ? r.days.reduce((s, x) => s + x.du + x.dd, 0) : 0;
+  const today = r?.days[r.days.length - 1]; // the traffic page may hold 7 or 30 days: the tile is today only
+  const tp = today ? today.pu + today.pd : 0, td = today ? today.du + today.dd : 0;
   const L = snap.latency;
   const leaks = snap.guard?.unacked || 0;
   const tile = (label, value, note = "", go = "") => `<div class="tile ${go ? "go" : ""}" ${go ? `data-tab="${go}"` : ""}><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
@@ -1705,7 +1766,8 @@ function homeHtml() {
       <span class="speed mono">${speedHtml(a.up, a.down)}</span></div>`).join("");
 
   const ai = sget("ai.on", true) && aiState.length
-    ? `<div class="home-card"><div class="hc-title">AI 额度<span class="sp"></span><button class="link" data-tab="ai">详情</button></div>${aiState.filter((q) => q.status !== "absent").map((q) => aiCard(q, true)).join("") || `<div class="q-msg">没找到已登录的 AI 工具</div>`}</div>`
+    ? `<div class="h-sec"><div class="h-head"><b>AI 额度</b><span class="sp"></span><button class="link" data-tab="ai">详情</button></div>
+        ${(() => { const l = aiState.filter((q) => q.status !== "absent"); return l.length ? `<div class="am-list">${l.map(aiMini).join("")}</div>` : `<div class="q-msg">没找到已登录的 AI 工具</div>`; })()}</div>`
     : "";
 
   return `<div class="home">
@@ -1713,7 +1775,7 @@ function homeHtml() {
       <div class="hx-grid">${exitCards.join("")}</div>${groupNote}</div>
     ${tiles}
     <div class="h-sec">${chart}</div>
-    <div class="home-cols">${mediaCardHtml()}${ai}</div>
+    ${ai}
     <div class="h-sec"><div class="h-head"><b>正在联网的程序</b><span class="h-note">走代理的排在前面</span><span class="sp"></span><button class="link" data-tab="conns">全部连接</button></div>${top || `<div class="empty">没有连接</div>`}</div>
   </div>`;
 }
@@ -1857,12 +1919,12 @@ function settingsHtml() {
     ${sRange("size.panelH", "展开面板最大高度", 360, 900, 10, "px", "内容少时会矮一些")}
     <div class="m-actions end"><button class="ghost" data-do="size-reset">恢复默认大小</button><button class="primary" data-do="layout-edit">在屏幕上拖动调整</button></div>
   </div>
-  <div class="s-sec"><div class="s-title">胶囊里显示什么<span class="s-note">勾选的并排显示，箭头调顺序；宽度放不下时，排在后面的几项在最后一格里轮流显示</span></div>
+  <div class="s-sec"><div class="s-title">胶囊里显示什么<span class="s-note">勾选的并排显示，箭头调顺序；宽度放不下时，排在后面的几项和轮换区合成最后一格轮流显示</span></div>
     ${sOrderList("pill.items", PILL_ITEM_LABEL)}
     ${sSelect("pill.clockStyle", "时钟样式", [["simple", "简洁"], ["digital", "数码管"], ["serif", "衬线"]])}
     ${sToggle("pill.clockSeconds", "时钟显示秒")}
   </div>
-  <div class="s-sec"><div class="s-title">轮换区<span class="s-note">胶囊里的「轮换区」依次显示这些内容，没有数据的自动跳过</span></div>
+  <div class="s-sec"><div class="s-title">轮换区<span class="s-note">胶囊里的「轮换区」依次显示这些内容；没有数据的、胶囊里已经单独显示的自动跳过，不会重复</span></div>
     ${sOrderList("rotate.items", ROT_LABEL)}
     ${sNumber("rotate.interval", "每项显示", 2, 60, 1, "秒")}
   </div>
@@ -2560,11 +2622,25 @@ $("panel").addEventListener("click", (e) => {
     updateSys();
     return;
   }
+  if (seg?.dataset.seg === "tsort") {
+    trafficSort = seg.dataset.val;
+    try { localStorage.setItem("mb-traffic-sort", trafficSort); } catch { /* ignore */ }
+    renderList(true);
+    return;
+  }
   if (seg) {
     const v = Number(seg.dataset.val);
     if (seg.dataset.seg === "srange") speedRange = v;
     if (seg.dataset.seg === "nrange") nodeRange = v;
-    if (seg.dataset.seg === "tdays") { trafficDays = v; trafficData = null; loadTraffic(true); }
+    if (seg.dataset.seg === "tdays") { trafficDays = v; trafficDay = null; trafficData = null; loadTraffic(true); }
+    renderList(true);
+    return;
+  }
+  const tday = e.target.closest("[data-tday]");
+  if (tday) {
+    const d = tday.getAttribute("data-tday") || null;
+    trafficDay = d && d !== trafficDay ? d : null; // clicking the picked day again goes back to the range
+    loadTraffic(true);
     renderList(true);
     return;
   }
@@ -2682,7 +2758,6 @@ const NAV = [
   ["traffic", "流量", "M6 20V10M12 20V4M18 20v-7"],
   ["nodes", "节点", "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 8v4l3 2"],
   ["sys", "系统监控", "M6 20V12M10 20V6M14 20V10M18 20V4"],
-  ["music", "音乐", "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
   ["ai", "AI 额度", "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"],
   ["settings", "设置", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4L7 17M17 17l1.4 1.4M5.6 5.6L7 7"],
 ];
