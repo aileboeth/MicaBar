@@ -132,6 +132,19 @@ pub fn push(mut n: Note) {
     n.capturing = capturing();
     n.at = now_ms();
     n.count = n.count.max(1);
+    // the program behind the note: the flash window's / AI host's exe when not set by the source
+    if n.owner.is_empty() {
+        n.owner = match &n.target {
+            Target::Hwnd(_, Some(exe)) => stem_of(exe),
+            Target::Pid(pid) => procinfo::image_path(*pid).map(|p| stem_of(&p)).unwrap_or_default(),
+            _ => String::new(),
+        };
+    }
+    // already looking at that program: nothing to catch up on, so no red dot and no card
+    if !n.owner.is_empty() && foreground_stem() == n.owner {
+        n.read = true;
+        n.silent = true;
+    }
     let mut b = book().lock().unwrap();
     let seen = b.apps.entry(n.key.clone()).or_insert_with(|| AppSeen {
         key: n.key.clone(),
@@ -579,19 +592,56 @@ fn flash_note(hwnd: isize, key: String, path: Option<String>) {
     });
 }
 
-fn on_activate(hwnd: isize) {
+/// Exe stem of the program a top-level window belongs to. Store apps hosted by
+/// ApplicationFrameHost count as the app inside (its CoreWindow child belongs to the real exe).
+fn window_owner_stem(hwnd: isize) -> String {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::EnumChildWindows;
     if hwnd == 0 {
-        return;
+        return String::new();
     }
     let pid = window_pid(hwnd);
-    if pid == std::process::id() {
+    let stem = procinfo::image_path(pid).map(|p| stem_of(&p)).unwrap_or_default();
+    if stem != "applicationframehost" {
+        return stem;
+    }
+    struct Find {
+        host: u32,
+        pid: u32,
+    }
+    unsafe extern "system" fn cb(h: HWND, lp: LPARAM) -> BOOL {
+        let f = &mut *(lp as *mut Find);
+        let p = window_pid(h as isize);
+        if p != 0 && p != f.host {
+            f.pid = p;
+            return 0;
+        }
+        1
+    }
+    let mut f = Find { host: pid, pid: 0 };
+    unsafe { EnumChildWindows(hwnd as _, Some(cb), &mut f as *mut Find as LPARAM) };
+    if f.pid == 0 {
+        return stem;
+    }
+    procinfo::image_path(f.pid).map(|p| stem_of(&p)).unwrap_or(stem)
+}
+
+/// The program in front right now (exe stem), not MicaBar itself.
+fn foreground_stem() -> String {
+    let h = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as isize;
+    if h == 0 || window_pid(h) == std::process::id() {
+        return String::new();
+    }
+    window_owner_stem(h)
+}
+
+fn on_activate(hwnd: isize) {
+    if hwnd == 0 || window_pid(hwnd) == std::process::id() {
         return;
     }
-    if let Some(p) = procinfo::image_path(pid) {
-        let key = stem_of(&p);
-        if !key.is_empty() {
-            mark_read_key(&key);
-        }
+    let key = window_owner_stem(hwnd);
+    if !key.is_empty() {
+        mark_read_key(&key);
     }
 }
 
