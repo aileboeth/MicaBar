@@ -30,7 +30,7 @@ node — and decide right there whether it goes through the proxy or direct.
   blocked from direct connections with one click (Windows Firewall).
 - **Speed / traffic / nodes**: live speed graph, per-program proxy-vs-direct traffic (today, 7 or 30 days, click a
   day for its details), node latency and loss.
-- **Looks and feel**: live frosted glass (white / black, follows the system), colour presets and custom themes;
+- **Looks and feel**: live frosted glass (white / black, follows the system) that keeps text readable over any background (dark areas behind white glass are lifted, bright ones behind black glass dimmed), colour presets and custom themes;
   capsule / notch / line shapes docked to any screen edge; hover or click to open, pass-through mode, custom
   hotkey, keyboard navigation; stays out of the way of fullscreen games.
 
