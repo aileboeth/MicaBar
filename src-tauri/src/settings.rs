@@ -186,6 +186,9 @@ pub fn defaults() -> Value {
             "glass": true,
             // 20..100, 50 = default look
             "opacity": 50,
+            // keeps text readable over any backdrop: off | normal | strong (white glass lifts dark
+            // areas behind it, black glass dims bright ones, pixel by pixel)
+            "legible": "normal",
             // the collapsed pill as a whole, text included (percent; the open panel is always opaque)
             "pillOpacity": 100,
             "font": "",

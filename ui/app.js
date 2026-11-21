@@ -2323,6 +2323,7 @@ function settingsHtml() {
     ${sToggle("appearance.glass", "实时磨砂", "关掉后用纯色背景，同时停止截取屏幕（更省资源）")}
     <label class="s-row"><span class="s-label">背景不透明度<span class="s-note">50 = 默认；往右更不透明，往左更通透</span></span>
       <span class="s-num"><input type="range" data-sp="appearance.opacity" data-num="1" min="20" max="100" step="5" value="${esc(sget("appearance.opacity", 50))}"><span class="mono">${esc(sget("appearance.opacity", 50))}</span></span></label>
+    ${sSelect("appearance.legible", "背景亮度限制", [["normal", "标准（默认）"], ["strong", "强"], ["off", "关"]], "白磨砂下把背后的深色区域提亮、黑磨砂下把亮色区域压暗，背景一半亮一半暗时文字也看得清")}
     <label class="s-row"><span class="s-label">字体<span class="s-note">留空 = 系统默认</span></span>
       <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="例如 微软雅黑" spellcheck="false"></span></label>
     <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
@@ -3492,13 +3493,31 @@ function cancelPress() {
   press = null;
 }
 
+// Is the pointer on a scrollbar of the pressed element or one of its scrolling parents?
+// (Holding a scrollbar still must not grab the island.)
+function onScrollbar(e) {
+  for (let el = e.target; el && el !== document.body; el = el.parentElement) {
+    if (!(el instanceof HTMLElement)) continue;
+    const r = el.getBoundingClientRect();
+    const barW = el.offsetWidth - el.clientWidth - el.clientLeft * 2;
+    const barH = el.offsetHeight - el.clientHeight - el.clientTop * 2;
+    if (barW > 0 && e.clientX >= r.left + el.clientLeft + el.clientWidth) return true;
+    if (barH > 0 && e.clientY >= r.top + el.clientTop + el.clientHeight) return true;
+  }
+  return false;
+}
+
 island.addEventListener("pointerdown", (e) => {
   if (MANAGER || editing || fling.active || e.button !== 0) return;
   if (e.target.closest("input, select, textarea, #menu")) return;
+  if (onScrollbar(e)) return;
   const ev = { pointerId: e.pointerId, screenX: e.screenX, screenY: e.screenY };
   const hold = Math.min(1000, Math.max(150, Number(sget("interaction.holdMs", 260)) || 260));
   press = { sx: e.screenX, sy: e.screenY, timer: setTimeout(() => startGrab(ev), hold) };
 });
+
+// anything scrolling while the button is down (scrollbar drag, wheel) is not a grab
+document.addEventListener("scroll", () => { if (press) cancelPress(); }, true);
 
 document.addEventListener("pointermove", (e) => {
   if (press && Math.hypot(e.screenX - press.sx, e.screenY - press.sy) > 6) cancelPress();
@@ -3876,6 +3895,35 @@ function adaptTint(px, w, h) {
   island.style.setProperty("--tint-a", a.toFixed(3));
 }
 
+// Per-pixel brightness limit on the blurred backdrop, so text stays readable where the panel sits
+// over a contrasting area (white glass over a black terminal, black glass over a white page) even
+// when the rest of the backdrop averages out fine: white glass lifts dark areas to a floor, black
+// glass dims bright ones to a ceiling; hues stay.
+const LEGIBLE = { light: { normal: 150, strong: 185 }, dark: { normal: 100, strong: 70 } };
+function legible(px) {
+  const mode = sget("appearance.legible", "normal");
+  if (mode === "off") return;
+  const light = document.documentElement.dataset.theme === "light";
+  const lim = (light ? LEGIBLE.light : LEGIBLE.dark)[mode === "strong" ? "strong" : "normal"];
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i], g = px[i + 1], b = px[i + 2];
+    const L = (r * 54 + g * 183 + b * 19) >> 8;
+    if (light) {
+      if (L < lim) {
+        const t = (lim - L) / (255 - L);
+        px[i] = r + (255 - r) * t;
+        px[i + 1] = g + (255 - g) * t;
+        px[i + 2] = b + (255 - b) * t;
+      }
+    } else if (L > lim) {
+      const f = lim / L;
+      px[i] = r * f;
+      px[i + 1] = g * f;
+      px[i + 2] = b * f;
+    }
+  }
+}
+
 function startGlass() {
   const ch = new T.core.Channel();
   ch.onmessage = (msg) => {
@@ -3888,6 +3936,7 @@ function startGlass() {
       glassCanvas.width = w;
       glassCanvas.height = h;
     }
+    legible(px);
     gctx.putImageData(new ImageData(px, w, h), 0, 0);
     adaptTint(px, w, h);
     if (glassFrames++ === 0) {

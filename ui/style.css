@@ -300,6 +300,10 @@ html, body {
 #list::-webkit-scrollbar { width: 6px; }
 #list::-webkit-scrollbar-thumb { background: #2c2c35; border-radius: 3px; }
 #list::-webkit-scrollbar-track { background: transparent; }
+/* the node picker scrolls inside the page: same thin bar, not the wide Windows one */
+.node-list::-webkit-scrollbar { width: 6px; }
+.node-list::-webkit-scrollbar-thumb { background: #2c2c35; border-radius: 3px; }
+.node-list::-webkit-scrollbar-track { background: transparent; }
 
 .empty { color: var(--dimmer); text-align: center; padding: 30px 0; }
 
@@ -1009,9 +1013,8 @@ body[data-mode="manager"] .mu-cover { width: 180px; height: 180px; }
 .sm-app:hover .sm-end, .sm-end:focus-visible { opacity: 1; }
 .sm-end:hover { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
 
-/* startup apps: icon, name + where it comes from, on/off switch; the list scrolls on its own */
-.su-list { max-height: 268px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; }
-body[data-mode="manager"] .su-list { max-height: none; overflow: visible; }
+/* startup apps: icon, name + where it comes from, on/off switch; the page scrolls, not the list
+   (a list scrolling inside the scrolling page gave two scrollbars) */
 .sm-app.su-row { grid-template-columns: 22px minmax(0, 1fr) 34px; }
 .su-row.off .sm-app-name, .su-row.off .app-icon { opacity: .5; }
 .su-miss { color: var(--amber); }
