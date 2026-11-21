@@ -31,7 +31,7 @@ node — and decide right there whether it goes through the proxy or direct.
 - **Speed / traffic / nodes**: live speed graph, per-program proxy-vs-direct traffic (today, 7 or 30 days, click a
   day for its details), node latency and loss.
 - **Looks and feel**: live frosted glass (white / black, follows the system) that keeps text readable over any background (dark areas behind white glass are lifted, bright ones behind black glass dimmed), colour presets and custom themes;
-  capsule / notch / line shapes docked to any screen edge; hover or click to open, pass-through mode, custom
+  capsule / notch / indicator-bar shapes docked to any screen edge; hover or click to open, pass-through mode, custom
   hotkey, keyboard navigation; stays out of the way of fullscreen games.
 
 > The look and interaction are inspired by [fly-island](https://github.com/flyl1u/fly-island), some feature ideas
@@ -57,7 +57,8 @@ with "start with Windows" enabled it starts from a scheduled task without a prom
   exit IPs, appearance, open log, quit.
 - The gear in the panel opens the settings page of the desktop window: pill items, rotation, sizes, alert
   thresholds, shape, docking edge, theme, AI quota, now playing, autostart, resource profile and more — every
-  feature can be switched off.
+  feature can be switched off. Settings are grouped by category in the sidebar, shape and theme are picked from
+  preview cards, and ordered lists (pill items, rotation, pages, network tabs) are rearranged by dragging.
 
 ### Exits per group
 
