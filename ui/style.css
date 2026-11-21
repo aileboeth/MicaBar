@@ -1197,7 +1197,8 @@ html.no-anim .pni.pop, html.no-anim .pill-note.in { animation: none; }
 .s-row input[type="checkbox"]:focus-visible, input.sw:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 /* lists ordered by dragging the ⠿ handle */
-.s-drag { position: relative; display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; user-select: none; }
+/* negative side margins: the dots line up with the section title, the switch with the other rows' controls */
+.s-drag { position: relative; display: flex; flex-direction: column; gap: 2px; margin: 0 -8px 6px -9px; user-select: none; }
 .s-drag-row {
   position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 2px; border-radius: 10px;
   font-size: 12.5px; transition: transform 0.2s var(--spring), background 0.15s ease, box-shadow 0.15s ease;
@@ -1265,3 +1266,39 @@ html.no-anim .pni.pop, html.no-anim .pill-note.in { animation: none; }
 .tp-sp b { font-weight: 400; }
 .tp-sp .up { color: var(--p-up); }
 .tp-sp .down { color: var(--p-down); }
+
+/* sub-options: the whole row steps in (label, its note and the separator line) */
+.s-row.lv1 { margin-left: 18px; }
+.s-row.lv2 { margin-left: 36px; }
+/* units after number fields share one width, so the fields of a section line up in a column */
+.s-unit { display: inline-block; min-width: 3.2em; }
+
+/* entering / leaving the settings: sidebar items slide in one after another, the page rises */
+#tabs.nav-fwd > *, #tabs.nav-back > * {
+  animation: nav-in 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 16ms);
+}
+#tabs.nav-back > * { animation-name: nav-in-back; }
+@keyframes nav-in { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+@keyframes nav-in-back { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
+#list.page-in { animation: page-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes page-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+html.no-anim #tabs.nav-fwd > *, html.no-anim #tabs.nav-back > *, html.no-anim #list.page-in { animation: none; }
+
+/* carried off its edge: no glass meanwhile (capture pauses while the window covers the monitor) */
+#island.glass.free { background: var(--bg); }
+#island.glass.free #glass, #island.glass.free #tint { display: none; }
+#island.free { scale: 1.08; box-shadow: 0 20px 44px var(--shadow); }
+/* where a loose island will dock */
+#dock-hint {
+  position: absolute; z-index: 5; pointer-events: none; border-radius: 3px; opacity: 0;
+  background: var(--blue); box-shadow: 0 0 14px var(--blue);
+  transition: left 0.22s var(--spring), top 0.22s var(--spring), width 0.22s var(--spring), height 0.22s var(--spring), opacity 0.15s ease;
+}
+#dock-hint.on { opacity: 0.85; }
+/* docked on a new edge: a small settle */
+#island.land { animation: land 0.42s var(--spring); }
+@keyframes land { 0% { transform: scale(0.82); opacity: 0.6; } 100% { transform: none; opacity: 1; } }
+html.no-anim #island.land { animation: none; }
+/* no picture drag-out (it also cancelled grabbing the island) */
+#island img { -webkit-user-drag: none; }

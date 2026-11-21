@@ -298,6 +298,10 @@ function islandRect(open) {
     if (vertical) y = anchor === "start" ? EDGE_M : H - h - EDGE_M;
     else x = anchor === "start" ? EDGE_M : W - w - EDGE_M;
   }
+  // carried off the edge: centred on the pointer (the window covers the whole monitor meanwhile)
+  if (fling.active && fling.free && !open) {
+    return { x: fling.px - window.screenX - w / 2, y: fling.py - window.screenY - h / 2, w, h, style, dock, vertical };
+  }
   // grabbed / flying: wherever the drag or the animation puts it
   if (fling.active && !open) {
     const local = fling.pos - (vertical ? window.screenY : window.screenX);
@@ -313,8 +317,17 @@ function reportRect() {
   const dpr = window.devicePixelRatio || 1;
   const phys = (r, pad) => [(r.x - pad) * dpr, (r.y - pad) * dpr, (r.w + 2 * pad) * dpr, (r.h + 2 * pad) * dpr];
   const c = islandRect(false);
+  // The open panel's hover zone reaches the docked screen edge: the panel floats a few px off it,
+  // and with the line (whose zone does touch the edge) the pointer pushed against the edge opened
+  // the panel and was then outside it at once, so it closed straight away.
+  const p = { ...islandRect(true) };
+  const W = window.innerWidth, H = window.innerHeight;
+  if (p.dock === "top") { p.h += p.y; p.y = 0; }
+  else if (p.dock === "bottom") p.h = H - p.y;
+  else if (p.dock === "left") { p.w += p.x; p.x = 0; }
+  else p.w = W - p.x;
   // the thin line gets a bigger hover zone than it looks
-  invoke("set_hit_rects", { pill: phys(c, c.style === "line" ? 10 : 4), panel: phys(islandRect(true), 4) }).catch(() => {});
+  invoke("set_hit_rects", { pill: phys(c, c.style === "line" ? 10 : 4), panel: phys(p, 4) }).catch(() => {});
 }
 
 function applySize() {
@@ -2264,25 +2277,35 @@ function setPath(path, value) {
   return invoke("settings_set", { patch }).catch((e) => toast(String(e), true));
 }
 
+// A label starting with full-width spaces ("　") is a sub-option of the row above: the whole row
+// (label and its note, and the separator line) is indented one step per space, so the note
+// lines up under the label instead of starting at the left edge.
+function sRowOpen(label, note) {
+  const m = /^　+/.exec(label);
+  const lv = m ? Math.min(2, m[0].length) : 0;
+  const text = m ? label.slice(m[0].length) : label;
+  return `<label class="s-row${lv ? ` lv${lv}` : ""}"><span class="s-label">${text}${note ? `<span class="s-note">${note}</span>` : ""}</span>`;
+}
+
 function sToggle(path, label, note = "") {
-  return `<label class="s-row"><span class="s-label">${label}${note ? `<span class="s-note">${note}</span>` : ""}</span>
+  return `${sRowOpen(label, note)}
     <input type="checkbox" data-sp="${path}" ${sget(path, false) ? "checked" : ""}></label>`;
 }
 
 function sSelect(path, label, options, note = "") {
   const cur = String(sget(path, ""));
-  return `<label class="s-row"><span class="s-label">${label}${note ? `<span class="s-note">${note}</span>` : ""}</span>
+  return `${sRowOpen(label, note)}
     <select data-sp="${path}">${options.map(([v, t]) => `<option value="${esc(v)}" ${String(v) === cur ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`;
 }
 
 function sNumber(path, label, min, max, step, unit, note = "") {
-  return `<label class="s-row"><span class="s-label">${label}${note ? `<span class="s-note">${note}</span>` : ""}</span>
-    <span class="s-num"><input type="number" data-sp="${path}" data-num="1" min="${min}" max="${max}" step="${step}" value="${esc(sget(path, min))}">${unit}</span></label>`;
+  return `${sRowOpen(label, note)}
+    <span class="s-num"><input type="number" data-sp="${path}" data-num="1" min="${min}" max="${max}" step="${step}" value="${esc(sget(path, min))}"><span class="s-unit">${unit}</span></span></label>`;
 }
 
 function sRange(path, label, min, max, step, unit, note = "") {
   const v = sget(path, min);
-  return `<label class="s-row"><span class="s-label">${label}${note ? `<span class="s-note">${note}</span>` : ""}</span>
+  return `${sRowOpen(label, note)}
     <span class="s-num"><input type="range" data-sp="${path}" data-num="1" min="${min}" max="${max}" step="${step}" value="${esc(v)}"><span class="mono s-val">${esc(v)}${unit}</span></span></label>`;
 }
 
@@ -2298,7 +2321,7 @@ function groupPickerHtml() {
 }
 
 function sColor(path, label) {
-  return `<label class="s-row"><span class="s-label">${label}</span><input type="color" data-sp="${path}" value="${esc(sget(path, "#000000"))}"></label>`;
+  return `${sRowOpen(label, "")}<input type="color" data-sp="${path}" value="${esc(sget(path, "#000000"))}"></label>`;
 }
 
 let fontsCache = [];
@@ -2340,7 +2363,21 @@ function setCategory(id) {
   try { localStorage.setItem("mb-set-cat", id); } catch { /* ignore */ }
   document.querySelectorAll("[data-setcat]").forEach((b) => b.classList.toggle("active", b.dataset.setcat === id));
   $("list").scrollTop = 0;
+  playIn($("list"), "page-in");
   renderList(true);
+}
+
+// Entering / leaving the settings (desktop window): the sidebar items slide in one after the
+// other from the side they come from, the page rises in. The class only stays for the length of
+// the animation, so the settings page re-rendering after a change doesn't replay it.
+function playIn(el, cls) {
+  if (!el) return;
+  [...el.children].forEach((c, i) => c.style.setProperty("--i", Math.min(i, 14)));
+  el.classList.remove("nav-fwd", "nav-back", "page-in");
+  void el.offsetWidth;
+  el.classList.add(cls);
+  clearTimeout(el._playT);
+  el._playT = setTimeout(() => el.classList.remove(cls), 700);
 }
 
 const GRIP_SVG = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.4"/><circle cx="7" cy="3" r="1.4"/><circle cx="3" cy="8" r="1.4"/><circle cx="7" cy="8" r="1.4"/><circle cx="3" cy="13" r="1.4"/><circle cx="7" cy="13" r="1.4"/></svg>`;
@@ -2406,7 +2443,7 @@ const SET_PAGES = {
     ${sSelect("interaction.expand", "怎么展开", [["hover", "鼠标停留（收起时不挡点击）"], ["click", "点击（收起时胶囊会挡住下面的点击）"]])}
     ${sToggle("interaction.peek", "　鼠标停在胶囊上时变透明", "能看见被挡住的标签页等；点一下下面的东西就不会展开")}
     ${sNumber("interaction.hoverDelay", "　鼠标停留多久展开", 0, 2000, 50, "ms")}
-    ${sNumber("interaction.holdMs", "　长按多久抓起岛", 150, 1000, 10, "ms", "按住面板或胶囊这么久就能拖着甩到左右；太短的话普通点击也可能被当成长按")}
+    ${sNumber("interaction.holdMs", "　长按多久抓起岛", 150, 1000, 10, "ms", "按住面板或胶囊这么久就能拖着甩到左右，往屏幕中间拉开还能拖到别的边；太短的话普通点击也可能被当成长按")}
     ${sToggle("interaction.passthrough", "穿透模式", "鼠标完全不触发，点击穿透到下面的窗口；只能用快捷键打开")}
     ${sSelect("interaction.fullscreen", "全屏程序（游戏、视频）在前台时", [["pill", "显示胶囊，不自动展开"], ["hide", "完全隐藏"]])}
   </div>`,
@@ -2414,7 +2451,7 @@ const SET_PAGES = {
   collapsed: () => `
   <div class="s-sec"><div class="s-title">收起样式</div>
     ${shapeCardsHtml()}
-    ${sSelect("shape.dock", "停靠位置", [["top", "屏幕上边"], ["bottom", "屏幕下边（任务栏上方）"], ["left", "屏幕左边"], ["right", "屏幕右边"]], "左右两边时，胶囊会变成竖着的刘海")}
+    ${sSelect("shape.dock", "停靠位置", [["top", "屏幕上边"], ["bottom", "屏幕下边（任务栏上方）"], ["left", "屏幕左边"], ["right", "屏幕右边"]], "左右两边时，胶囊会变成竖着的刘海；也可以长按岛往屏幕中间拉开，拖到另一条边松手")}
     ${sSelect("shape.anchor", "在这条边上的位置", [["start", "靠左（停靠左右两边时为靠上）"], ["center", "居中"], ["end", "靠右（停靠左右两边时为靠下）"]], "也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊")}
     ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成指示条")}
   </div>
@@ -2526,8 +2563,9 @@ const SET_PAGES = {
     <div class="s-row"><span class="s-label">日志与数据<span class="s-note">${esc(appInfo?.logDir || "")}</span></span>
       <span><button class="ghost" data-do="open-logs">打开目录</button> <button class="ghost" data-do="open-home">GitHub 主页</button></span></div>
   </div>
-  <div class="s-sec"><div class="s-title">恢复默认<span class="s-note">这几页里的所有设置回到第一次打开时的样子</span></div>
-    <div class="m-actions end"><button class="ghost" data-do="settings-reset">恢复默认设置</button></div>
+  <div class="s-sec"><div class="s-title">恢复默认</div>
+    <div class="s-row"><span class="s-label">所有设置<span class="s-note">这几页里的所有设置回到第一次打开时的样子</span></span>
+      <button class="ghost" data-do="settings-reset">恢复默认设置</button></div>
   </div>`,
 };
 
@@ -3481,7 +3519,11 @@ function switchTab(name) {
   const crossing = MANAGER && (tab === "settings") !== (name === "settings");
   if (MANAGER && name === "settings" && tab !== "settings") setBack = tab;
   tab = name;
-  if (crossing) renderTabs();
+  if (crossing) {
+    renderTabs();
+    playIn($("tabs"), name === "settings" ? "nav-fwd" : "nav-back");
+    playIn($("list"), "page-in");
+  }
   if (!PAGE_TABS.has(name) && name !== "settings" && name !== "home") netTab = name;
   renderPages();
   document.querySelectorAll(".tab[data-tab]").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
@@ -3583,6 +3625,13 @@ listen("update", (e) => {
   if (tab === "settings") renderList(true);
 });
 invoke("settings_get").then(applySettings).catch(() => {});
+// opened straight on the settings (manager.html#settings/...): load what switchTab would have
+// (version and install type on the About page, monitors, fonts)
+if (MANAGER && tab === "settings") {
+  refreshMonitors();
+  refreshFonts();
+  refreshAppInfo();
+}
 
 $("search").addEventListener("input", (e) => {
   query = e.target.value.trim();
@@ -3647,10 +3696,60 @@ $("panel").addEventListener("scroll", () => { if ($("panel").scrollTop) $("panel
 // grabs it: it shrinks to the pill under the pointer and slides along the edge. Flung right it
 // moves one spot right (centre -> right wall, left wall -> centre), flung left the other way;
 // at a wall it bounces a few times, back to the centre it springs.
+// Pulled well away from its edge it comes loose and follows the pointer anywhere; a bar shows the
+// spot it will dock at (the nearest edge, left / middle / right third), and let go it flies there.
 
 const EDGE_M = 10; // gap to the screen side at the start / end spot (CSS px)
+const DETACH = 100; // pointer this far from the docked edge: the island comes loose (CSS px)
 const ANCHORS = ["start", "center", "end"];
-const fling = { active: false, phase: "", pos: 0, vel: 0, samples: [], from: "center", target: "", w: 0, bumps: 0, raf: 0 };
+const fling = { active: false, phase: "", pos: 0, vel: 0, samples: [], from: "center", target: "", w: 0, bumps: 0, raf: 0, free: false, px: 0, py: 0, dock: "" };
+
+// the island's monitor in screen CSS px (WB = bottom of the work area, above the taskbar)
+function monRect() {
+  const L = screen.left ?? screen.availLeft ?? 0, T = screen.top ?? screen.availTop ?? 0;
+  const W = screen.width, H = screen.height;
+  return { L, T, R: L + W, B: T + H, WB: (screen.availTop ?? T) + (screen.availHeight || H) };
+}
+
+// where a loose island let go at (px, py) docks: the nearest edge, and the third along it
+function dockTarget(px, py) {
+  const m = monRect();
+  const d = { top: py - m.T, bottom: m.WB - py, left: px - m.L, right: m.R - px };
+  const dock = Object.keys(d).reduce((a, b) => (d[b] < d[a] ? b : a));
+  const vertical = dock === "left" || dock === "right";
+  const f = vertical ? (py - m.T) / Math.max(1, m.WB - m.T) : (px - m.L) / Math.max(1, m.R - m.L);
+  return { dock, anchor: f < 1 / 3 ? "start" : f > 2 / 3 ? "end" : "center" };
+}
+
+// the landing bar for a dock target, in screen CSS px
+function hintRect(t) {
+  const m = monRect();
+  const len = 120, th = 5, off = 3;
+  if (t.dock === "left" || t.dock === "right") {
+    const y = t.anchor === "start" ? m.T + EDGE_M : t.anchor === "end" ? m.WB - len - EDGE_M : m.T + (m.WB - m.T - len) / 2;
+    return { x: t.dock === "left" ? m.L + off : m.R - th - off, y, w: th, h: len };
+  }
+  const x = t.anchor === "start" ? m.L + EDGE_M : t.anchor === "end" ? m.R - len - EDGE_M : m.L + (m.R - m.L - len) / 2;
+  return { x, y: t.dock === "top" ? m.T + off : m.WB - th - off, w: len, h: th };
+}
+
+let dockHint = null;
+function showDockHint(t) {
+  if (!dockHint) {
+    dockHint = document.createElement("div");
+    dockHint.id = "dock-hint";
+    document.body.appendChild(dockHint);
+  }
+  const r = hintRect(t);
+  dockHint.style.left = r.x - window.screenX + "px";
+  dockHint.style.top = r.y - window.screenY + "px";
+  dockHint.style.width = r.w + "px";
+  dockHint.style.height = r.h + "px";
+  dockHint.classList.add("on");
+}
+function hideDockHint() {
+  dockHint?.classList.remove("on");
+}
 let press = null; // pending long press {sx, sy, timer, id}
 let suppressClick = false;
 
@@ -3689,6 +3788,8 @@ function startGrab(e) {
   fling.samples = [{ p, t: performance.now() }];
   fling.phase = "drag";
   fling.active = true;
+  fling.free = false;
+  fling.dock = "";
   suppressClick = true;
   try { island.setPointerCapture(e.pointerId); } catch { /* ignore */ }
   invoke("grab_start").catch(() => {});
@@ -3724,12 +3825,35 @@ island.addEventListener("pointerdown", (e) => {
   press = { sx: e.screenX, sy: e.screenY, timer: setTimeout(() => startGrab(ev), hold) };
 });
 
+// Images (flags, covers, app icons) must not start the browser's own drag and drop: a long press
+// on a flag dragged the picture out (it could be dropped on the desktop as cn.svg) and cancelled
+// the grab.
+island.addEventListener("dragstart", (e) => e.preventDefault());
+
 // anything scrolling while the button is down (scrollbar drag, wheel) is not a grab
 document.addEventListener("scroll", () => { if (press) cancelPress(); }, true);
 
 document.addEventListener("pointermove", (e) => {
   if (press && Math.hypot(e.screenX - press.sx, e.screenY - press.sy) > 6) cancelPress();
   if (!fling.active || fling.phase !== "drag") return;
+  fling.px = e.screenX;
+  fling.py = e.screenY;
+  if (!fling.free) {
+    // pulled far enough away from its edge: it comes loose
+    const m = monRect(), dock = shape().dock;
+    const away = { top: e.screenY - m.T, bottom: m.WB - e.screenY, left: e.screenX - m.L, right: m.R - e.screenX }[dock];
+    if (away > DETACH) {
+      fling.free = true;
+      island.classList.add("free");
+      invoke("grab_free").catch(() => {});
+      invoke("log_js", { msg: "grabbed island came loose from its edge" }).catch(() => {});
+    }
+  }
+  if (fling.free) {
+    showDockHint(dockTarget(e.screenX, e.screenY));
+    applySize();
+    return;
+  }
   const { vertical } = edgeAxis();
   const p = vertical ? e.screenY : e.screenX;
   const lo = slotPos("start", fling.w), hi = slotPos("end", fling.w);
@@ -3763,7 +3887,34 @@ document.addEventListener("click", (e) => {
   }
 }, true);
 
+// a loose island let go: it flies to the spot the bar showed, then docks on that edge
+function releaseFree() {
+  const t = dockTarget(fling.px, fling.py);
+  const r = hintRect(t);
+  // aim a little inside the bar, so the island arrives against the edge and settles from there
+  const inward = { top: [0, 1], bottom: [0, -1], left: [1, 0], right: [-1, 0] }[t.dock];
+  const tx = r.x + r.w / 2 + inward[0] * 22, ty = r.y + r.h / 2 + inward[1] * 22;
+  const fx = fling.px, fy = fling.py;
+  fling.target = t.anchor;
+  fling.dock = t.dock;
+  fling.phase = "anim";
+  island.classList.remove("grabbed");
+  const dur = document.documentElement.classList.contains("no-anim") ? 0 : 260;
+  const t0 = performance.now();
+  const step = (now) => {
+    const k = dur ? Math.min(1, (now - t0) / dur) : 1;
+    const e = 1 - Math.pow(1 - k, 3); // ease out
+    fling.px = fx + (tx - fx) * e;
+    fling.py = fy + (ty - fy) * e;
+    applySize();
+    if (k < 1) fling.raf = requestAnimationFrame(step);
+    else endFling();
+  };
+  fling.raf = requestAnimationFrame(step);
+}
+
 function release() {
+  if (fling.free) return releaseFree();
   const s = fling.samples;
   const a = s[0], b = s[s.length - 1];
   const v = b && a && b.t > a.t ? (b.p - a.p) / (b.t - a.t) : 0; // px per ms
@@ -3832,12 +3983,32 @@ function bump(dir) {
 function endFling() {
   cancelAnimationFrame(fling.raf);
   const target = fling.target;
+  const dock = fling.free ? fling.dock : "";
   fling.active = false;
+  fling.free = false;
   fling.phase = "";
-  island.classList.remove("flinging", "grabbed");
+  hideDockHint();
+  island.classList.remove("grabbed", "free");
+  if (dock) {
+    // a new edge: the window moves there; the island keeps "flinging" (no position transition,
+    // so it doesn't slide across from the old window's coordinates) while it reshapes for the
+    // edge, then settles with a small bounce
+    clearTimeout(endFling.t);
+    endFling.t = setTimeout(() => island.classList.remove("flinging"), 380);
+    island.classList.remove("land");
+    void island.offsetWidth;
+    island.classList.add("land");
+  } else {
+    island.classList.remove("flinging");
+  }
   // remember the spot; the backend refits the window there
-  if (S?.shape) S.shape.anchor = target;
-  invoke("grab_end", { anchor: target }).catch(() => {});
+  if (S?.shape) {
+    S.shape.anchor = target;
+    if (dock) S.shape.dock = dock;
+  }
+  invoke("grab_end", { anchor: target, dock: dock || null }).catch(() => {});
+  pillLast = "";
+  renderPill();
   fitted = "";
   fitWindow();
   applySize();

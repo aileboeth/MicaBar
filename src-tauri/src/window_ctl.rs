@@ -54,6 +54,9 @@ pub struct WinState {
     /// The island is grabbed / being flung along the edge: all input to the window, which spans
     /// the whole edge meanwhile.
     pub grab: AtomicBool,
+    /// The grabbed island was pulled off its edge (to dock on another one): the window covers the
+    /// whole monitor meanwhile, so the glass capture pauses (the page draws a solid pill).
+    pub free: AtomicBool,
     /// After a grab: don't reopen until the cursor has left the pill.
     pub disarm: AtomicBool,
     /// A notification card is showing: the cursor on it holds it (and clicks reach it) instead
@@ -186,6 +189,15 @@ pub fn span_edge(w: &WebviewWindow) {
         let _ = w.set_size(tauri::PhysicalSize::new((f.right - f.left) as u32, size.height));
         let _ = w.set_position(PhysicalPosition::new(f.left, pos.y));
     }
+}
+
+/// The grabbed island left its edge: the window covers the whole monitor, so the pill can be
+/// carried anywhere and dropped at another edge. `fit_window` + `place_window` undo it afterwards.
+pub fn span_monitor(w: &WebviewWindow) {
+    let Some(m) = target_monitor() else { return };
+    let f = m.full;
+    let _ = w.set_size(tauri::PhysicalSize::new((f.right - f.left) as u32, (f.bottom - f.top) as u32));
+    let _ = w.set_position(PhysicalPosition::new(f.left, f.top));
 }
 
 /// Foreground window maximized on the island's monitor (taskbar still visible).

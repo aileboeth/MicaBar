@@ -9,6 +9,8 @@ param(
     # "x1,y1;x2,y2;..." press at the first point, glide through the rest, release at the last
     [string]$Drag = '',
     [int]$AfterDrag = 1500,
+    # with -Drag: also a full screenshot just before the button is released (shot-d.png)
+    [switch]$DragShot,
     # press Ctrl+Alt+N before the screenshot
     [switch]$Hotkey,
     # take N screenshots one second apart: shot-1.png ... shot-N.png
@@ -65,6 +67,15 @@ if ($Drag) {
             Start-Sleep -Milliseconds 20
         }
         Start-Sleep -Milliseconds 900
+    }
+    if ($DragShot) {
+        # the whole screen while the button is still down (shot-d.png)
+        $sw0 = [NiU]::GetSystemMetrics(0); $sh0 = [NiU]::GetSystemMetrics(1)
+        $bmp = New-Object System.Drawing.Bitmap $sw0, $sh0
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
+        $bmp.Save(($Out -replace '\.png$', '-d.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+        $g.Dispose(); $bmp.Dispose()
     }
     [NiU]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds $AfterDrag

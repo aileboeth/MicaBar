@@ -14,6 +14,7 @@ param(
     [int]$Wait = 1200,
     [string]$Clicks = '',
     [string]$Drag = '',
+    [switch]$DragShot,
     [string]$Flick = '',
     [int]$Frames = 0,
     [switch]$Hotkey,
@@ -76,6 +77,7 @@ if ($Shot) {
     $tr = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\MicaBar\shot.ps1 -X $X -Y $Y -Wait $Wait"
     if ($Clicks) { $tr += " -Clicks $Clicks" }
     if ($Drag) { $tr += " -Drag $Drag" }
+    if ($DragShot) { $tr += " -DragShot" }
     if ($Flick) { $tr += " -Flick $Flick -Frames $Frames" }
     if ($Hotkey) { $tr += " -Hotkey" }
     if ($Full) { $tr += " -CropW 4000 -CropH 3000" }
@@ -84,12 +86,13 @@ if ($Shot) {
     if ($Wheel) { $tr += " -Wheel $Wheel" }
     if ($MaxEdge) { $tr += " -MaxEdge" }
     if ($RestoreEdge) { $tr += " -RestoreEdge" }
-    Invoke-Vm "Remove-Item C:\MicaBar\shot.png -ErrorAction SilentlyContinue; schtasks /Create /TN NI-Shot /TR '$tr' /SC ONCE /ST 23:59 /IT /RL HIGHEST /F | Out-Null; schtasks /Run /TN NI-Shot | Out-Null; `$i=0; while (-not (Test-Path C:\MicaBar\shot.png.txt) -and `$i -lt 90) { Start-Sleep -Milliseconds 300; `$i++ }; Start-Sleep -Milliseconds 300; Get-Content C:\MicaBar\shot.png.txt; Remove-Item C:\MicaBar\shot.png.txt"
+    Invoke-Vm "Remove-Item C:\MicaBar\shot.png -ErrorAction SilentlyContinue; schtasks /Create /TN NI-Shot /TR '$tr' /SC ONCE /ST 23:59 /IT /RL HIGHEST /F | Out-Null; schtasks /Run /TN NI-Shot | Out-Null; `$i=0; while (-not ((Test-Path C:\MicaBar\shot.png.txt) -and (Test-Path C:\MicaBar\shot.png)) -and `$i -lt 90) { Start-Sleep -Milliseconds 300; `$i++ }; Start-Sleep -Milliseconds 600; Get-Content C:\MicaBar\shot.png.txt; Remove-Item C:\MicaBar\shot.png.txt"
     & scp @sshArgs "${vm}:C:/MicaBar/shot.png" (Join-Path $outDir $Shot)
     for ($i = 1; $i -le $Burst; $i++) {
         $name = $Shot -replace '\.png$', "-$i.png"
         & scp @sshArgs "${vm}:C:/MicaBar/shot-$i.png" (Join-Path $outDir $name)
     }
+    if ($DragShot) { & scp @sshArgs "${vm}:C:/MicaBar/shot-d.png" (Join-Path $outDir ($Shot -replace '\.png$', '-d.png')) }
     for ($i = 1; $i -le $Frames; $i++) {
         & scp @sshArgs "${vm}:C:/MicaBar/shot-f$i.png" (Join-Path $outDir ($Shot -replace '\.png$', "-f$i.png"))
     }

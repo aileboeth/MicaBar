@@ -2274,21 +2274,44 @@ async fn open_manager(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, page
 #[tauri::command]
 fn grab_start(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) {
     state.ws.grab.store(true, Ordering::SeqCst);
+    state.ws.free.store(false, Ordering::SeqCst);
     state.ws.expanded.store(false, Ordering::SeqCst);
     if let Some(w) = app.get_webview_window("main") {
         window_ctl::span_edge(&w);
     }
 }
 
-/// The flung island came to rest at `anchor` (start | center | end): remember it; the page then
-/// refits the window, which `place_window` puts at that spot.
+/// The grabbed island was pulled away from its edge: the window covers the whole monitor until
+/// `grab_end`, so it can be carried to another edge.
 #[tauri::command]
-fn grab_end(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, anchor: String) {
+fn grab_free(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) {
+    if !state.ws.grab.load(Ordering::SeqCst) || state.ws.free.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        window_ctl::span_monitor(&w);
+    }
+}
+
+/// The flung island came to rest at `anchor` (start | center | end), on edge `dock` when it was
+/// carried to another one: remember it; the page then refits the window, which `place_window`
+/// puts at that spot.
+#[tauri::command]
+fn grab_end(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, anchor: String, dock: Option<String>) {
     let anchor = if matches!(anchor.as_str(), "start" | "end") { anchor } else { "center".into() };
-    let s = settings::update(&serde_json::json!({ "shape": { "anchor": anchor } }));
+    let mut shape = serde_json::json!({ "anchor": anchor });
+    if let Some(d) = dock.filter(|d| matches!(d.as_str(), "top" | "bottom" | "left" | "right")) {
+        shape["dock"] = serde_json::Value::String(d);
+    }
+    let s = settings::update(&serde_json::json!({ "shape": shape }));
     state.ws.grab.store(false, Ordering::SeqCst);
+    state.ws.free.store(false, Ordering::SeqCst);
     state.ws.disarm.store(true, Ordering::SeqCst);
-    log(format!("island flung to {}", s.pointer("/shape/anchor").and_then(|v| v.as_str()).unwrap_or("")));
+    log(format!(
+        "island flung to {} {}",
+        s.pointer("/shape/dock").and_then(|v| v.as_str()).unwrap_or(""),
+        s.pointer("/shape/anchor").and_then(|v| v.as_str()).unwrap_or("")
+    ));
     let _ = app.emit("settings", &s);
 }
 
@@ -2474,6 +2497,7 @@ fn main() {
             note_mode,
             layout_edit,
             grab_start,
+            grab_free,
             grab_end,
             latency_history,
             latency_probe,

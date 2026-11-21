@@ -291,7 +291,10 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
     let mut fail_until: Option<Instant> = None;
     let mut logged_err = false;
     loop {
-        let paused = ws.game.load(Ordering::SeqCst) || ws.hidden.load(Ordering::SeqCst) || chan.lock().unwrap().is_none();
+        let paused = ws.game.load(Ordering::SeqCst)
+            || ws.hidden.load(Ordering::SeqCst)
+            || ws.free.load(Ordering::SeqCst)
+            || chan.lock().unwrap().is_none();
         let hwnd = ws.hwnd.load(Ordering::SeqCst);
         if paused || hwnd == 0 {
             cap = None;
