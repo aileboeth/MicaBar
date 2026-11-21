@@ -1422,8 +1422,11 @@ fn handle(mut s: std::net::TcpStream, port: u16) {
             Ok(n) => body.extend_from_slice(&tmp[..n]),
         }
     }
-    let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    // who's calling is looked up before answering: curl quits on the answer, and its connection
+    // (which tells its process) goes with it
     let peer = s.peer_addr().map(|a| a.port()).unwrap_or(0);
+    let host = client_host(peer, port);
+    let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
     drop(s);
     // "POST /n/claude/stop?t=TOKEN HTTP/1.1"
     let line = head.lines().next().unwrap_or("");
@@ -1442,7 +1445,13 @@ fn handle(mut s: std::net::TcpStream, port: u16) {
     if !settings::bool_at("notify.on", true) {
         return;
     }
-    ai_event(parts[1], parts[2], &json, client_host(peer, port));
+    let owner = match &host.0 {
+        Target::Hwnd(h, exe) => format!("window {h:#x} {}", exe.as_deref().map(stem_of).unwrap_or_default()),
+        Target::Pid(p) => format!("pid {p} {}", procinfo::image_path(*p).map(|x| stem_of(&x)).unwrap_or_default()),
+        _ => "unknown".into(),
+    };
+    log(format!("notify: {} {} from {owner}", parts[1], parts[2]));
+    ai_event(parts[1], parts[2], &json, host);
 }
 
 /// The AI session's host: walks up from the hook's client process (curl) to the first process
@@ -1455,7 +1464,10 @@ fn client_host(peer_port: u16, our_port: u16) -> (Target, Option<String>) {
         .into_iter()
         .find(|c| c.proto == crate::conn::Proto::Tcp && c.local_port == peer_port && c.remote.map(|(_, p)| p == our_port).unwrap_or(false))
         .map(|c| c.pid);
-    let Some(mut pid) = pid else { return (Target::None, None) };
+    let Some(mut pid) = pid else {
+        log(format!("notify: hook caller (port {peer_port}) not found among connections"));
+        return (Target::None, None);
+    };
     let tree = process_tree();
     let mut tool_exe = None;
     let mut chain = Vec::new();
@@ -1507,23 +1519,29 @@ fn console_window_of(pid: u32) -> Option<isize> {
     }
 }
 
-/// The window the user actually sees for a console window: a classic console window is itself
-/// visible; a ConPTY pseudo window (Windows Terminal) is hidden and owned by the terminal window,
-/// or failing that belongs to OpenConsole.exe, whose parent is the terminal.
+/// The window the user actually sees for a console window: a ConPTY pseudo window (Windows
+/// Terminal) is owned by the terminal window (it claims to be visible and reports the console
+/// client, e.g. cmd.exe, as its process — so the owner comes first); a classic console window is
+/// itself the window; failing both, the pseudo window's host (OpenConsole.exe) has the terminal
+/// as its parent.
 fn console_top_window(h: isize, tree: &HashMap<u32, (u32, String)>) -> Option<isize> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, IsWindowVisible, GA_ROOTOWNER};
     unsafe {
-        if IsWindowVisible(h as _) != 0 {
-            return Some(h);
-        }
         let owner = GetAncestor(h as _, GA_ROOTOWNER) as isize;
         if owner != 0 && owner != h && IsWindowVisible(owner as _) != 0 {
             return Some(owner);
         }
+        if IsWindowVisible(h as _) != 0 {
+            return Some(h);
+        }
     }
-    let host = window_pid(h);
-    let parent = tree.get(&host).map(|(p, _)| *p)?;
-    main_window(parent)
+    let (parent, name) = tree.get(&window_pid(h))?;
+    let name = name.to_ascii_lowercase();
+    if name != "openconsole.exe" && name != "conhost.exe" {
+        return None; // the window reports the console client (cmd…): its parent may be explorer
+    }
+    let p = tree.get(parent)?;
+    (!p.1.eq_ignore_ascii_case("explorer.exe")).then(|| main_window(*parent)).flatten()
 }
 
 static STARTS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
