@@ -1720,18 +1720,31 @@ fn is_ours(cmd: &str, tool: &str) -> bool {
 }
 
 /// Hooks written by 0.2.9 and earlier have `--data-binary @-` unquoted, which PowerShell (where
-/// Claude Code runs hooks) can't parse: every message showed "hook failed". Rewritten once at start.
+/// Claude Code runs hooks) can't parse: every message showed "hook failed". Fixed in place at start
+/// (only those commands; hooks the user removed stay removed).
 fn repair_claude_hooks() {
-    let Ok(text) = std::fs::read_to_string(claude_settings()) else { return };
-    let Ok(v) = serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) else { return };
-    let broken = v.get("hooks").and_then(|h| h.as_object()).map(|o| {
-        o.values().filter_map(|a| a.as_array()).flatten().filter_map(|g| g.get("hooks").and_then(|h| h.as_array())).flatten().filter_map(|x| x.get("command").and_then(|c| c.as_str())).any(|c| is_ours(c, "claude") && c.contains("--data-binary @-"))
-    });
-    if broken == Some(true) {
-        match set_hook("claude", true) {
-            Ok(_) => log("notify: Claude Code hooks rewritten (quoted @- for PowerShell)"),
-            Err(e) => log(format!("notify: repairing Claude Code hooks failed: {e}")),
+    let p = claude_settings();
+    let Ok(text) = std::fs::read_to_string(&p) else { return };
+    let Ok(mut v) = serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) else { return };
+    let mut fixed = 0;
+    if let Some(o) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        for g in o.values_mut().filter_map(|a| a.as_array_mut()).flatten() {
+            for x in g.get_mut("hooks").and_then(|h| h.as_array_mut()).into_iter().flatten() {
+                let Some(c) = x.get("command").and_then(|c| c.as_str()) else { continue };
+                if is_ours(c, "claude") && c.contains("--data-binary @-") {
+                    x["command"] = Value::String(c.replace("--data-binary @-", "--data-binary \"@-\""));
+                    fixed += 1;
+                }
+            }
         }
+    }
+    if fixed == 0 {
+        return;
+    }
+    backup_once(&p);
+    match serde_json::to_string_pretty(&v).map_err(|e| e.to_string()).and_then(|out| std::fs::write(&p, out + "\n").map_err(|e| e.to_string())) {
+        Ok(()) => log(format!("notify: {fixed} Claude Code hook(s) fixed (quoted @- for PowerShell)")),
+        Err(e) => log(format!("notify: fixing Claude Code hooks failed: {e}")),
     }
 }
 
