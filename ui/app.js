@@ -26,6 +26,12 @@ const icons = new Map(); // path -> dataURL | null | "pending"
 if (MANAGER) {
   expanded = true; // the manager window always shows the "panel"
   tab = decodeURIComponent(location.hash.slice(1)) || "home";
+  // "settings/notify": a settings category (picked up where the category is first read)
+  const [page, cat] = tab.split("/");
+  if (cat) {
+    tab = page;
+    try { localStorage.setItem("mb-set-cat", cat); } catch { /* ignore */ }
+  }
 }
 
 let regionNames = null;
@@ -1749,7 +1755,7 @@ function aiCard(q, compact) {
 }
 
 function aiTabHtml() {
-  if (!sget("ai.on", true)) return `<div class="empty">AI 额度已关闭（设置 → AI 额度）</div>`;
+  if (!sget("ai.on", true)) return `<div class="empty">AI 额度已关闭（设置 → 额度与圆环）</div>`;
   const list = aiState.length ? aiState.map((q) => aiCard(q, false)).join("") : `<div class="empty">正在查询…</div>`;
   const last = aiState.reduce((m, q) => Math.max(m, q.at || 0), 0);
   const via = [...new Set(aiState.filter((q) => q.via).map((q) => q.via))];
@@ -2195,7 +2201,7 @@ function notifySettingsHtml() {
   }).join("");
   return `<div class="s-sec"><div class="s-title">通知<span class="s-note">其他程序的提醒在岛上弹出，收进「通知」页；内容只在内存里</span></div>
     ${sToggle("notify.on", "在岛上显示通知")}
-    ${sSelect("notify.style", "　提示方式", [["icon", "胶囊右边一格，只显示程序图标"], ["inline", "胶囊里的内容暂时让开，显示一行消息"], ["card", "胶囊展开成卡片"]], "胶囊里有「未读通知」这一项时才显示图标（设置 → 胶囊里显示什么）")}
+    ${sSelect("notify.style", "　提示方式", [["icon", "胶囊右边一格，只显示程序图标"], ["inline", "胶囊里的内容暂时让开，显示一行消息"], ["card", "胶囊展开成卡片"]], "胶囊里有「未读通知」这一项时才显示图标（设置 → 收起外观 → 显示内容）")}
     ${sNumber("notify.duration", "　每次停留", 2, 30, 1, "秒", "鼠标放在通知上时一直停着；同时来几条会叠起来，放上去就展开")}
     ${sSelect("notify.privacy", "　显示内容", [["source", "不显示内容，只显示程序和发送人"], ["smart", "显示全文；全屏、录屏时只显示程序"], ["full", "始终显示全文"]], "岛上和通知页都按这个显示")}
     ${sToggle("notify.followDnd", "　跟随 Windows 勿扰", "Windows 开着勿扰 / 专注时，通知只收进通知页，不在岛上弹出")}
@@ -2301,57 +2307,185 @@ function refreshFonts() {
   invoke("fonts_list").then((f) => { fontsCache = f || []; if (tab === "settings") renderList(true); }).catch(() => {});
 }
 
-function sOrderList(path, labels) {
+// ---------- settings pages (manager window: the sidebar turns into these categories) ----------
+
+const SET_NAV = [
+  ["基础设置", [
+    ["general", "常规", "M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4"],
+    ["collapsed", "收起外观", "M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 4v1.5a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V4"],
+    ["expanded", "展开外观", "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"],
+    ["theme", "面板主题", "M12 3a9 9 0 1 0 0 18c1 0 1.5-.8 1.5-1.5 0-.8-.6-1.2-.6-2 0-.8.7-1.5 1.6-1.5H17a4 4 0 0 0 4-4c0-5-4-9-9-9zM7.5 11.5h0M10 7.5h0M14.5 7.5h0"],
+  ]],
+  ["网络", [["network", "出口与提示", "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9"]]],
+  ["AI 用量", [["ai", "额度与圆环", "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"]]],
+  ["音乐", [["music", "正在播放", "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"]]],
+  ["通知", [["notify", "通知", "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"]]],
+  ["其他", [["about", "关于", "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16v-5M12 8h0"]]],
+];
+const SET_CATS = SET_NAV.flatMap(([, items]) => items.map((x) => x[0]));
+let setCat = (() => { try { const c = localStorage.getItem("mb-set-cat"); return SET_CATS.includes(c) ? c : "general"; } catch { return "general"; } })();
+let setBack = "home"; // the page the back button returns to
+
+const navIcon = (d) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+
+function settingsNavHtml() {
+  return `<button class="tab nav back" data-setback title="回到${esc((NAV.find((n) => n[0] === setBack) || NAV[0])[1])}">${navIcon("M15 6l-6 6 6 6")}<span>返回</span></button>
+    ${SET_NAV.map(([group, items]) => `<div class="nav-group">${group}</div>
+      ${items.map(([id, label, d]) => `<button class="tab nav ${id === setCat ? "active" : ""}" data-setcat="${id}">${navIcon(d)}<span>${label}</span></button>`).join("")}`).join("")}`;
+}
+
+function setCategory(id) {
+  if (!SET_CATS.includes(id)) return;
+  setCat = id;
+  try { localStorage.setItem("mb-set-cat", id); } catch { /* ignore */ }
+  document.querySelectorAll("[data-setcat]").forEach((b) => b.classList.toggle("active", b.dataset.setcat === id));
+  $("list").scrollTop = 0;
+  renderList(true);
+}
+
+const GRIP_SVG = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.4"/><circle cx="7" cy="3" r="1.4"/><circle cx="3" cy="8" r="1.4"/><circle cx="7" cy="8" r="1.4"/><circle cx="3" cy="13" r="1.4"/><circle cx="7" cy="13" r="1.4"/></svg>`;
+
+// A list whose order matters: drag a row by its ⠿ handle (or Alt+↑ / ↓ on the handle); the switch
+// shows / hides the item.
+function sDragList(path, labels) {
   const list = (sget(path, []) || []).filter((i) => labels[i.id]);
-  return `<div class="s-order">${list.map((i, k) => `<div class="s-ord-row">
-      <label><input type="checkbox" data-ol="${path}" data-id="${i.id}" ${i.on ? "checked" : ""}> ${labels[i.id]}</label>
-      <span class="s-ord-btns"><button data-mv='${esc(JSON.stringify({ path, id: i.id, dir: -1 }))}' ${k === 0 ? "disabled" : ""}>↑</button><button data-mv='${esc(JSON.stringify({ path, id: i.id, dir: 1 }))}' ${k === list.length - 1 ? "disabled" : ""}>↓</button></span>
+  return `<div class="s-drag" data-dl="${path}">${list.map((i) => `<div class="s-drag-row ${i.on ? "" : "off"}" data-id="${esc(i.id)}">
+      <button class="grip" data-grip title="拖动调整顺序（选中后也可以按 Alt+↑ / ↓）" aria-label="调整「${esc(labels[i.id])}」的顺序">${GRIP_SVG}</button>
+      <span class="s-drag-name">${labels[i.id]}</span>
+      <input type="checkbox" class="sw" data-ol="${path}" data-id="${esc(i.id)}" ${i.on ? "checked" : ""} aria-label="显示「${esc(labels[i.id])}」">
     </div>`).join("")}</div>`;
 }
 
-function settingsHtml() {
-  if (!S) return `<div class="empty">正在读取设置…</div>`;
-  const tabLabels = Object.fromEntries(Object.entries(TAB_DEFS).map(([k, v]) => [k, v.label]));
-  return `
-  <div class="s-sec"><div class="s-title">外观</div>
-    ${sSelect("appearance.theme", "主题", [["auto", "跟随系统（白 / 黑磨砂）"], ["glass-dark", "黑色磨砂"], ["glass-light", "白色磨砂"], ...Object.entries(PRESETS).map(([k, p]) => [k, p.name]), ["custom", "自定义"]])}
-    ${sget("appearance.theme") === "custom" ? `
-      ${sSelect("appearance.custom.base", "　基调", [["dark", "深色"], ["light", "浅色"]])}
-      ${sColor("appearance.custom.bg", "　底色")}
-      ${sColor("appearance.custom.text", "　文字颜色")}
-      ${sColor("appearance.custom.accent", "　强调色")}` : ""}
-    ${sToggle("appearance.glass", "实时磨砂", "关掉后用纯色背景，同时停止截取屏幕（更省资源）")}
-    <label class="s-row"><span class="s-label">背景不透明度<span class="s-note">50 = 默认；往右更不透明，往左更通透</span></span>
-      <span class="s-num"><input type="range" data-sp="appearance.opacity" data-num="1" min="20" max="100" step="5" value="${esc(sget("appearance.opacity", 50))}"><span class="mono">${esc(sget("appearance.opacity", 50))}</span></span></label>
-    ${sSelect("appearance.legible", "背景亮度限制", [["normal", "标准（默认）"], ["strong", "强"], ["off", "关"]], "白磨砂下把背后的深色区域提亮、黑磨砂下把亮色区域压暗，背景一半亮一半暗时文字也看得清")}
-    <label class="s-row"><span class="s-label">字体<span class="s-note">留空 = 系统默认</span></span>
-      <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="例如 微软雅黑" spellcheck="false"></span></label>
-    <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
-    ${sRange("appearance.pillOpacity", "收起时胶囊的不透明度", 10, 100, 5, "%", "整颗胶囊连文字一起变淡，不那么显眼；展开后总是完全不透明")}
-    ${sSelect("appearance.scale", "界面缩放", [[90, "90%"], [100, "100%"], [110, "110%"], [125, "125%"], [150, "150%"]])}
+const CHECK_SVG = `<svg class="pick-check" width="18" height="18" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="var(--blue)"/><path d="M7 12.5l3.2 3.2L17 9" fill="none" stroke="var(--on-accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+// collapsed look: a tiny screen with a window on it and the island at the top edge
+function shapeCardsHtml() {
+  const cur = sget("shape.style", "capsule");
+  const card = (id, name) => `<button class="pick-card ${cur === id ? "on" : ""}" data-pick="shape.style" data-val="${id}" aria-pressed="${cur === id}">
+      <div class="sc-mock"><div class="sc-win"><i></i><i></i><i></i><i></i></div><div class="sc-shape ${id}"><b></b><b></b><b></b><b></b></div></div>
+      <div class="pick-name"><span>${name}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
+  return `<div class="pick-grid">${card("notch", "刘海")}${card("capsule", "胶囊")}${card("line", "指示条")}</div>`;
+}
+
+// a small pill in a theme's colours: flag, exit IP, speed, clock
+const BASE_THEMES = {
+  "glass-dark": { name: "黑色磨砂", bg: "#0c0c10", text: "#f2f2f5", dim: "#9a9aa6", green: "#34d399", amber: "#fbbf24" },
+  "glass-light": { name: "白色磨砂", bg: "#f6f6f9", text: "#15151a", dim: "#4b4b57", green: "#059669", amber: "#b45309" },
+};
+function themePill(t) {
+  return `<div class="tp-pill" style="--p-bg:${t.bg};--p-text:${t.text};--p-dim:${t.dim || t.text};--p-up:${t.amber || "#fbbf24"};--p-down:${t.green || "#34d399"}">
+    <img class="tp-flag" src="flags/us.svg" alt=""><span class="mono">107.149.174.88</span>
+    <span class="mono tp-sp"><b class="up">↑</b>12K <b class="down">↓</b>1.2M</span><span class="mono tp-clock">14:32</span></div>`;
+}
+function themeCardsHtml(ids) {
+  const cur = sget("appearance.theme", "auto");
+  const sys = lightQuery.matches ? "glass-light" : "glass-dark";
+  return `<div class="pick-grid">${ids.map((id) => {
+    let t, name;
+    if (id === "auto") { t = BASE_THEMES[sys]; name = `跟随系统（现在是${lightQuery.matches ? "白" : "黑"}）`; }
+    else if (BASE_THEMES[id]) { t = BASE_THEMES[id]; name = t.name; }
+    else if (id === "custom") { const c = sget("appearance.custom", {}) || {}; t = { bg: c.bg || "#16161c", text: c.text || "#f2f2f5", dim: mixHex(c.text || "#f2f2f5", c.bg || "#16161c", 0.3) }; name = "自定义"; }
+    else { t = PRESETS[id]; name = t.name; }
+    return `<button class="pick-card theme ${cur === id ? "on" : ""}" data-pick="appearance.theme" data-val="${id}" aria-pressed="${cur === id}">
+      <div class="tp-stage">${themePill(t)}</div><div class="pick-name"><span>${esc(name)}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
+  }).join("")}</div>`;
+}
+
+const sizeButtons = `<div class="m-actions end"><button class="ghost" data-do="size-reset">恢复默认大小</button><button class="primary" data-do="layout-edit">在屏幕上拖动调整</button></div>`;
+
+const SET_PAGES = {
+  general: () => `
+  <div class="s-sec"><div class="s-title">启动与屏幕</div>
+    ${sToggle("general.autostart", "开机自启", "登录 10 秒后以管理员权限启动（计划任务，不弹 UAC）")}
+    ${sSelect("general.monitor", "显示在哪块屏幕", [["primary", "主屏幕"], ["cursor", "跟随鼠标所在的屏幕"], ...monitorsCache.map((m) => [m.name, `${m.name.replace("\\\\.\\", "")}（${m.w}×${m.h}${m.primary ? "，主屏" : ""}）`])])}
+    ${sSelect("general.profile", "资源档位", [["saver", "省电"], ["balanced", "均衡"], ["smooth", "流畅"]], "影响节点测速等后台任务的频率")}
   </div>
-  <div class="s-sec"><div class="s-title">大小<span class="s-note">也可以在屏幕上直接拖动边缘调整</span></div>
-    ${sRange("size.pillH", "胶囊高度", 28, 64, 2, "px")}
-    ${sRange("size.pillW", "胶囊宽度", 0, 1400, 10, "px", "0 = 跟着内容自动变宽")}
-    ${sRange("size.pillMaxW", "　自动宽度最多", 200, 1400, 10, "px")}
-    ${sRange("size.panelW", "展开面板宽度", 480, 1100, 10, "px")}
-    ${sRange("size.panelH", "展开面板最大高度", 360, 900, 10, "px", "内容少时会矮一些")}
-    <div class="m-actions end"><button class="ghost" data-do="size-reset">恢复默认大小</button><button class="primary" data-do="layout-edit">在屏幕上拖动调整</button></div>
+  <div class="s-sec"><div class="s-title">交互</div>
+    <div class="s-row"><span class="s-label">快捷键（展开 / 收起）${snap && !snap.hotkeyOk ? `<span class="s-note bad">没注册成功：可能被别的程序占用了</span>` : ""}</span>
+      <button class="hk ${hotkeyRec ? "rec" : ""}" data-do="hotkey-rec">${hotkeyRec ? "请按下新的组合键…（Esc 取消）" : esc(sget("interaction.hotkey", "Ctrl+Alt+N"))}</button></div>
+    ${sSelect("interaction.expand", "怎么展开", [["hover", "鼠标停留（收起时不挡点击）"], ["click", "点击（收起时胶囊会挡住下面的点击）"]])}
+    ${sToggle("interaction.peek", "　鼠标停在胶囊上时变透明", "能看见被挡住的标签页等；点一下下面的东西就不会展开")}
+    ${sNumber("interaction.hoverDelay", "　鼠标停留多久展开", 0, 2000, 50, "ms")}
+    ${sNumber("interaction.holdMs", "　长按多久抓起岛", 150, 1000, 10, "ms", "按住面板或胶囊这么久就能拖着甩到左右；太短的话普通点击也可能被当成长按")}
+    ${sToggle("interaction.passthrough", "穿透模式", "鼠标完全不触发，点击穿透到下面的窗口；只能用快捷键打开")}
+    ${sSelect("interaction.fullscreen", "全屏程序（游戏、视频）在前台时", [["pill", "显示胶囊，不自动展开"], ["hide", "完全隐藏"]])}
+  </div>`,
+
+  collapsed: () => `
+  <div class="s-sec"><div class="s-title">收起样式</div>
+    ${shapeCardsHtml()}
+    ${sSelect("shape.dock", "停靠位置", [["top", "屏幕上边"], ["bottom", "屏幕下边（任务栏上方）"], ["left", "屏幕左边"], ["right", "屏幕右边"]], "左右两边时，胶囊会变成竖着的刘海")}
+    ${sSelect("shape.anchor", "在这条边上的位置", [["start", "靠左（停靠左右两边时为靠上）"], ["center", "居中"], ["end", "靠右（停靠左右两边时为靠下）"]], "也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊")}
+    ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成指示条")}
   </div>
-  <div class="s-sec"><div class="s-title">胶囊里显示什么<span class="s-note">勾选的并排显示，箭头调顺序；宽度放不下时，排在后面的几项和轮换区合成最后一格轮流显示</span></div>
-    ${sOrderList("pill.items", PILL_ITEM_LABEL)}
+  <div class="s-sec"><div class="s-title">显示内容<span class="s-note">拖动 ⠿ 调整顺序；宽度放不下时，排在后面的几项和轮换区合成最后一格轮流显示（指示条只显示状态色）</span></div>
+    ${sDragList("pill.items", PILL_ITEM_LABEL)}
     ${sSelect("pill.clockStyle", "时钟样式", [["simple", "简洁"], ["digital", "数码管"], ["serif", "衬线"]])}
     ${sToggle("pill.clockSeconds", "时钟显示秒")}
   </div>
   <div class="s-sec"><div class="s-title">轮换区<span class="s-note">胶囊里的「轮换区」依次显示这些内容；没有数据的、胶囊里已经单独显示的自动跳过，不会重复</span></div>
-    ${sOrderList("rotate.items", ROT_LABEL)}
+    ${sDragList("rotate.items", ROT_LABEL)}
     ${sNumber("rotate.interval", "每项显示", 2, 60, 1, "秒")}
   </div>
+  <div class="s-sec"><div class="s-title">大小与透明度<span class="s-note">也可以在屏幕上直接拖动边缘调整</span></div>
+    ${sRange("size.pillH", "胶囊高度", 28, 64, 2, "px")}
+    ${sRange("size.pillW", "胶囊宽度", 0, 1400, 10, "px", "0 = 跟着内容自动变宽")}
+    ${sRange("size.pillMaxW", "　自动宽度最多", 200, 1400, 10, "px")}
+    ${sRange("appearance.pillOpacity", "收起时胶囊的不透明度", 10, 100, 5, "%", "整颗胶囊连文字一起变淡，不那么显眼；展开后总是完全不透明")}
+    ${sizeButtons}
+  </div>`,
+
+  expanded: () => `
+  <div class="s-sec"><div class="s-title">展开后的页面<span class="s-note">岛顶部的图标切换；拖动 ⠿ 调整顺序，会记住上次停在哪一页</span></div>
+    ${sDragList("panel.pages", PAGE_LABEL)}
+  </div>
+  <div class="s-sec"><div class="s-title">网络页的页签<span class="s-note">拖动 ⠿ 调整顺序</span></div>
+    ${sDragList("panel.tabs", Object.fromEntries(Object.entries(TAB_DEFS).map(([k, v]) => [k, v.label])))}
+  </div>
+  <div class="s-sec"><div class="s-title">面板大小</div>
+    ${sRange("size.panelW", "展开面板宽度", 480, 1100, 10, "px")}
+    ${sRange("size.panelH", "展开面板最大高度", 360, 900, 10, "px", "内容少时会矮一些")}
+    ${sSelect("appearance.scale", "界面缩放", [[90, "90%"], [100, "100%"], [110, "110%"], [125, "125%"], [150, "150%"]])}
+    ${sizeButtons}
+  </div>`,
+
+  theme: () => `
+  <div class="s-sec"><div class="s-title">基础</div>
+    ${themeCardsHtml(["auto", "glass-dark", "glass-light"])}
+  </div>
+  <div class="s-sec"><div class="s-title">主题扩展</div>
+    ${themeCardsHtml([...Object.keys(PRESETS), "custom"])}
+    ${sget("appearance.theme") === "custom" ? `
+      ${sSelect("appearance.custom.base", "基调", [["dark", "深色"], ["light", "浅色"]])}
+      ${sColor("appearance.custom.bg", "底色")}
+      ${sColor("appearance.custom.text", "文字颜色")}
+      ${sColor("appearance.custom.accent", "强调色")}` : ""}
+  </div>
+  <div class="s-sec"><div class="s-title">磨砂与文字</div>
+    ${sToggle("appearance.glass", "实时磨砂", "关掉后用纯色背景，同时停止截取屏幕（更省资源）")}
+    ${sRange("appearance.opacity", "背景不透明度", 20, 100, 5, "", "50 = 默认；往右更不透明，往左更通透")}
+    ${sSelect("appearance.legible", "背景亮度限制", [["normal", "标准（默认）"], ["strong", "强"], ["off", "关"]], "白磨砂下把背后的深色区域提亮、黑磨砂下把亮色区域压暗，背景一半亮一半暗时文字也看得清")}
+    <label class="s-row"><span class="s-label">字体<span class="s-note">留空 = 系统默认</span></span>
+      <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="例如 微软雅黑" spellcheck="false"></span></label>
+    <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
+  </div>`,
+
+  network: () => `
   <div class="s-sec"><div class="s-title">分组出口<span class="s-note">每个分组单独测一次出口 IP（经覆写里只监听本机的专用端口）</span></div>
     ${sSelect("exit.mode", "显示哪些分组", [["auto", "自动：每个不同的出口节点测一次（兜底分组和有流量的分组优先）"], ["manual", "手动勾选"]])}
     ${sNumber("exit.max", "　最多测", 1, 12, 1, "个出口", "用同一个节点的分组共用一次检测，不占名额")}
     ${sget("exit.mode") === "manual" ? groupPickerHtml() : ""}
   </div>
+  <div class="s-sec"><div class="s-title">短暂提示<span class="s-note">发生时在胶囊上显示 5 秒，同类 1 分钟内只提示一次</span></div>
+    ${sToggle("flash.exitChange", "出口 IP 变了")}
+    ${sToggle("flash.nodeDown", "节点无响应")}
+    ${sToggle("flash.latencyHigh", "节点延迟变高")}
+    ${sNumber("flash.latencyMs", "　延迟超过", 100, 5000, 50, "ms")}
+    ${sToggle("flash.speedSpike", "网速突增")}
+    ${sNumber("flash.speedMBps", "　突增到超过", 1, 1000, 1, "MB/s")}
+  </div>`,
+
+  ai: () => `
   <div class="s-sec"><div class="s-title">AI 额度<span class="s-note">用本机已登录的凭据向各家官方查询，只读，不保存、不外传</span></div>
     ${sToggle("ai.on", "显示 AI 额度")}
     ${sToggle("ai.claude", "　Claude Code")}
@@ -2372,48 +2506,18 @@ function settingsHtml() {
     ${sColor("ai.ring.colors.warn", "　提醒")}
     ${sColor("ai.ring.colors.crit", "　警告")}
     <div class="m-actions end"><button class="ghost" data-do="ring-reset">恢复默认颜色和阈值</button></div>
-  </div>
-  ${notifySettingsHtml()}
-  <div class="s-sec"><div class="s-title">展开后的页面<span class="s-note">岛顶部的图标切换；勾选显示，箭头调顺序，会记住上次停在哪一页</span></div>
-    ${sOrderList("panel.pages", PAGE_LABEL)}
-  </div>
+  </div>`,
+
+  music: () => `
   <div class="s-sec"><div class="s-title">正在播放</div>
     ${sToggle("media.on", "显示正在播放的歌", "读取 Windows 媒体控制（网易云、QQ 音乐、Spotify、浏览器等）")}
     ${sToggle("media.cover", "　显示封面")}
     ${sSelect("media.pillStyle", "　胶囊里的歌显示成", [["viz", "封面 + 随音乐跳动的线条"], ["title", "封面 + 歌名和歌手"]], "跳动的线条读的是正在播放的声音大小（只在本机算音量，不录音、不保存）")}
-  </div>
-  <div class="s-sec"><div class="s-title">短暂提示<span class="s-note">发生时在胶囊上显示 5 秒，同类 1 分钟内只提示一次</span></div>
-    ${sToggle("flash.exitChange", "出口 IP 变了")}
-    ${sToggle("flash.nodeDown", "节点无响应")}
-    ${sToggle("flash.latencyHigh", "节点延迟变高")}
-    ${sNumber("flash.latencyMs", "　延迟超过", 100, 5000, 50, "ms")}
-    ${sToggle("flash.speedSpike", "网速突增")}
-    ${sNumber("flash.speedMBps", "　突增到超过", 1, 1000, 1, "MB/s")}
-  </div>
-  <div class="s-sec"><div class="s-title">网络页的页签<span class="s-note">勾选显示，箭头调顺序</span></div>
-    ${sOrderList("panel.tabs", tabLabels)}
-  </div>
-  <div class="s-sec"><div class="s-title">外形</div>
-    ${sSelect("shape.style", "收起时的样子", [["capsule", "胶囊（悬浮）"], ["notch", "刘海（贴边）"], ["line", "细线（只显示状态色）"]])}
-    ${sSelect("shape.dock", "停靠位置", [["top", "屏幕上边"], ["bottom", "屏幕下边（任务栏上方）"], ["left", "屏幕左边"], ["right", "屏幕右边"]], "左右两边时，胶囊会变成竖着的刘海")}
-    ${sSelect("shape.anchor", "在这条边上的位置", [["start", "靠左（停靠左右两边时为靠上）"], ["center", "居中"], ["end", "靠右（停靠左右两边时为靠下）"]], "也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊")}
-    ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成细线")}
-  </div>
-  <div class="s-sec"><div class="s-title">交互</div>
-    ${sSelect("interaction.expand", "怎么展开", [["hover", "鼠标停留（收起时不挡点击）"], ["click", "点击（收起时胶囊会挡住下面的点击）"]])}
-    ${sToggle("interaction.peek", "　鼠标停在胶囊上时变透明", "能看见被挡住的标签页等；点一下下面的东西就不会展开")}
-    ${sNumber("interaction.hoverDelay", "　鼠标停留多久展开", 0, 2000, 50, "ms")}
-    ${sNumber("interaction.holdMs", "　长按多久抓起岛", 150, 1000, 10, "ms", "按住面板或胶囊这么久就能拖着甩到左右；太短的话普通点击也可能被当成长按")}
-    ${sToggle("interaction.passthrough", "穿透模式", "鼠标完全不触发，点击穿透到下面的窗口；只能用快捷键打开")}
-    <div class="s-row"><span class="s-label">快捷键（展开 / 收起）${snap && !snap.hotkeyOk ? `<span class="s-note bad">没注册成功：可能被别的程序占用了</span>` : ""}</span>
-      <button class="hk ${hotkeyRec ? "rec" : ""}" data-do="hotkey-rec">${hotkeyRec ? "请按下新的组合键…（Esc 取消）" : esc(sget("interaction.hotkey", "Ctrl+Alt+N"))}</button></div>
-    ${sSelect("interaction.fullscreen", "全屏程序（游戏、视频）在前台时", [["pill", "显示胶囊，不自动展开"], ["hide", "完全隐藏"]])}
-  </div>
-  <div class="s-sec"><div class="s-title">常规</div>
-    ${sToggle("general.autostart", "开机自启", "登录 10 秒后以管理员权限启动（计划任务，不弹 UAC）")}
-    ${sSelect("general.monitor", "显示在哪块屏幕", [["primary", "主屏幕"], ["cursor", "跟随鼠标所在的屏幕"], ...monitorsCache.map((m) => [m.name, `${m.name.replace("\\\\.\\", "")}（${m.w}×${m.h}${m.primary ? "，主屏" : ""}）`])])}
-    ${sSelect("general.profile", "资源档位", [["saver", "省电"], ["balanced", "均衡"], ["smooth", "流畅"]], "影响节点测速等后台任务的频率")}
-  </div>
+  </div>`,
+
+  notify: () => notifySettingsHtml(),
+
+  about: () => `
   <div class="s-sec"><div class="s-title">关于</div>
     <div class="s-row"><span class="s-label">MicaBar ${esc(appInfo?.version || "")}<span class="s-note">${appInfo ? (appInfo.installed ? "安装版" : "便携版（不能自动更新）") : ""}</span></span>
       <button class="ghost" data-do="update-check">检查更新</button></div>
@@ -2422,7 +2526,15 @@ function settingsHtml() {
     <div class="s-row"><span class="s-label">日志与数据<span class="s-note">${esc(appInfo?.logDir || "")}</span></span>
       <span><button class="ghost" data-do="open-logs">打开目录</button> <button class="ghost" data-do="open-home">GitHub 主页</button></span></div>
   </div>
-  <div class="m-actions end"><button class="ghost" data-do="settings-reset">恢复默认设置</button></div>`;
+  <div class="s-sec"><div class="s-title">恢复默认<span class="s-note">这几页里的所有设置回到第一次打开时的样子</span></div>
+    <div class="m-actions end"><button class="ghost" data-do="settings-reset">恢复默认设置</button></div>
+  </div>`,
+};
+
+function settingsHtml() {
+  if (!S) return `<div class="empty">正在读取设置…</div>`;
+  const label = SET_NAV.flatMap(([, items]) => items).find((x) => x[0] === setCat)?.[1] || "设置";
+  return `<div class="set-page"><h1 class="set-h">${label}</h1>${(SET_PAGES[setCat] || SET_PAGES.general)()}</div>`;
 }
 
 let appInfo = null;
@@ -2538,6 +2650,85 @@ function moveItem(spec) {
   [list[i], list[j]] = [list[j], list[i]];
   setPath(spec.path, list);
 }
+
+// ----- drag to reorder (settings lists) -----
+// The row follows the pointer; the others slide out of the way (each move animated from where it
+// was). Dropping saves the new order; entries this page doesn't show keep their place at the end.
+let sortDrag = null;
+let gripFocus = null; // {path, id}: focus that handle again after the page re-renders
+
+$("list").addEventListener("pointerdown", (e) => {
+  const g = e.target.closest("[data-grip]");
+  if (!g || e.button !== 0) return;
+  const row = g.closest(".s-drag-row");
+  const box = row.parentElement;
+  e.preventDefault();
+  g.focus({ preventScroll: true });
+  g.setPointerCapture(e.pointerId);
+  const by = box.getBoundingClientRect().top;
+  sortDrag = { pid: e.pointerId, row, box, grabY: e.clientY - by - row.offsetTop, moved: false, order: [...box.children].map((r) => r.dataset.id).join() };
+  row.classList.add("dragging");
+  box.classList.add("sorting");
+});
+
+$("list").addEventListener("pointermove", (e) => {
+  if (!sortDrag || e.pointerId !== sortDrag.pid) return;
+  const { row, box } = sortDrag;
+  const y = e.clientY - box.getBoundingClientRect().top; // pointer, in the list's own coordinates
+  const others = [...box.children].filter((r) => r !== row);
+  const before = others.find((r) => y < r.offsetTop + r.offsetHeight / 2) || null;
+  if (row.nextElementSibling !== before && !(before === null && box.lastElementChild === row)) {
+    const was = new Map(others.map((r) => [r, r.offsetTop]));
+    box.insertBefore(row, before);
+    for (const r of others) {
+      const dy = was.get(r) - r.offsetTop;
+      if (!dy) continue;
+      r.style.transition = "none";
+      r.style.transform = `translateY(${dy}px)`;
+      r.getBoundingClientRect();
+      r.style.transition = "";
+      r.style.transform = "";
+    }
+  }
+  const top = Math.max(-6, Math.min(box.clientHeight - row.offsetHeight + 6, y - sortDrag.grabY));
+  row.style.transform = `translateY(${top - row.offsetTop}px)`;
+});
+
+function endDrag(e) {
+  if (!sortDrag || e.pointerId !== sortDrag.pid) return;
+  const { row, box } = sortDrag;
+  const path = box.dataset.dl;
+  const ids = [...box.children].map((r) => r.dataset.id);
+  row.style.transform = "";
+  row.classList.remove("dragging");
+  box.classList.remove("sorting");
+  const changed = ids.join() !== sortDrag.order;
+  sortDrag = null;
+  if (!changed) return;
+  const all = sget(path, []) || [];
+  const shown = ids.map((id) => all.find((x) => x.id === id)).filter(Boolean);
+  gripFocus = { path, id: row.dataset.id };
+  setPath(path, [...shown, ...all.filter((x) => !ids.includes(x.id))]);
+}
+$("list").addEventListener("pointerup", endDrag);
+$("list").addEventListener("pointercancel", endDrag);
+
+// Alt+↑ / ↓ on a focused handle moves that row
+$("list").addEventListener("keydown", (e) => {
+  const g = e.target.closest?.("[data-grip]");
+  if (!g || !e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+  e.preventDefault();
+  const path = g.closest("[data-dl]").dataset.dl;
+  const id = g.closest(".s-drag-row").dataset.id;
+  gripFocus = { path, id };
+  moveItem({ path, id, dir: e.key === "ArrowUp" ? -1 : 1 });
+});
+
+// picture cards (collapsed shape, theme)
+$("list").addEventListener("click", (e) => {
+  const p = e.target.closest("[data-pick]");
+  if (p && sget(p.dataset.pick) !== p.dataset.val) setPath(p.dataset.pick, p.dataset.val);
+});
 
 // ---------- leak guard tab ----------
 
@@ -2694,10 +2885,15 @@ function renderList(force = false) {
   if (tab === "settings") {
     // the settings page only re-renders when settings change (not on every snapshot), so open
     // dropdowns and number fields are not destroyed while the user works with them
-    if (!force) return;
+    if (!force || sortDrag) return;
     const scroll = list.scrollTop;
     list.innerHTML = `<div id="list-inner">${settingsHtml()}</div>`;
     list.scrollTop = scroll;
+    if (gripFocus) {
+      const r = [...list.querySelectorAll(`[data-dl="${gripFocus.path}"] .s-drag-row`)].find((x) => x.dataset.id === gripFocus.id);
+      r?.querySelector("[data-grip]")?.focus({ preventScroll: true });
+      gripFocus = null;
+    }
     measurePanel();
     return;
   }
@@ -3255,6 +3451,12 @@ function renderTabs() {
   const tabs = visibleTabs();
   if (MANAGER) {
     if (!tabs.includes(tab)) tab = "home";
+    document.body.dataset.page = tab;
+    if (tab === "settings") {
+      // the sidebar becomes the settings categories, with a way back
+      $("tabs").innerHTML = settingsNavHtml();
+      return;
+    }
     const counts = { conns: true, guard: true, notes: true };
     $("tabs").innerHTML = NAV.map(([id, label, d]) => `<button class="tab nav ${id === tab ? "active" : ""}" data-tab="${id}">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>
@@ -3276,10 +3478,13 @@ function switchTab(name) {
     invoke("open_manager", { page: "settings" }).catch(() => {});
     return;
   }
+  const crossing = MANAGER && (tab === "settings") !== (name === "settings");
+  if (MANAGER && name === "settings" && tab !== "settings") setBack = tab;
   tab = name;
+  if (crossing) renderTabs();
   if (!PAGE_TABS.has(name) && name !== "settings" && name !== "home") netTab = name;
   renderPages();
-  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
+  document.querySelectorAll(".tab[data-tab]").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   $("gear").classList.toggle("active", name === "settings");
   if (MANAGER) {
     document.body.dataset.page = name;
@@ -3308,6 +3513,9 @@ $("tabs").addEventListener("wheel", (e) => {
   e.preventDefault();
 }, { passive: false });
 $("tabs").addEventListener("click", (e) => {
+  const cat = e.target.closest("[data-setcat]");
+  if (cat) return setCategory(cat.dataset.setcat);
+  if (e.target.closest("[data-setback]")) return switchTab(setBack === "settings" ? "home" : setBack);
   const b = e.target.closest("[data-tab]");
   if (b) switchTab(b.dataset.tab);
 });
@@ -3961,7 +4169,15 @@ window.addEventListener("resize", () => {
   } else logView("resize");
 });
 if (MANAGER) {
-  listen("goto", (e) => switchTab(e.payload || "home"));
+  listen("goto", (e) => {
+    const [page, cat] = String(e.payload || "home").split("/");
+    if (cat && SET_CATS.includes(cat)) {
+      setCat = cat;
+      try { localStorage.setItem("mb-set-cat", cat); } catch { /* ignore */ }
+      if (tab === "settings") { renderTabs(); renderList(true); return; }
+    }
+    switchTab(page);
+  });
   $("side").addEventListener("click", (e) => {
     const d = e.target.closest("[data-do]");
     if (d) runAction(d);
