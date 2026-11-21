@@ -1379,6 +1379,7 @@ pub fn port() -> u16 {
 fn ai_server() {
     std::thread::spawn(|| {
         let _ = token(); // created now, so the hook commands can be written any time
+        repair_claude_hooks();
         let port = port();
         let l = match std::net::TcpListener::bind(("127.0.0.1", port)) {
             Ok(l) => l,
@@ -1445,30 +1446,84 @@ fn handle(mut s: std::net::TcpStream, port: u16) {
 }
 
 /// The AI session's host: walks up from the hook's client process (curl) to the first process
-/// owning a window (Windows Terminal, VS Code…), and finds the AI tool's exe on the way (icon).
-fn client_host(peer_port: u16, our_port: u16) -> (Option<u32>, Option<String>) {
+/// owning a window (VS Code…), and finds the AI tool's exe on the way (icon). A console session
+/// whose chain reaches explorer.exe without a window (started from a shortcut, the console handed
+/// to Windows Terminal as the default terminal, which is not in the chain) gets the console's real
+/// window instead, so the note belongs to that terminal window.
+fn client_host(peer_port: u16, our_port: u16) -> (Target, Option<String>) {
     let pid = crate::conn::snapshot()
         .into_iter()
         .find(|c| c.proto == crate::conn::Proto::Tcp && c.local_port == peer_port && c.remote.map(|(_, p)| p == our_port).unwrap_or(false))
         .map(|c| c.pid);
-    let Some(mut pid) = pid else { return (None, None) };
+    let Some(mut pid) = pid else { return (Target::None, None) };
     let tree = process_tree();
     let mut tool_exe = None;
+    let mut chain = Vec::new();
     for _ in 0..16 {
         let Some((parent, name)) = tree.get(&pid).cloned() else { break };
         let lname = name.to_ascii_lowercase();
+        if lname == "explorer.exe" {
+            break;
+        }
         if tool_exe.is_none() && (lname.starts_with("claude") || lname.starts_with("codex")) {
             tool_exe = procinfo::image_path(pid);
         }
         if main_window(pid).is_some() {
-            return (Some(pid), tool_exe);
+            return (Target::Pid(pid), tool_exe);
         }
+        chain.push(pid);
         if parent == 0 || parent == pid {
             break;
         }
         pid = parent;
     }
-    (None, tool_exe)
+    // the console window of the nearest still-running process in the chain (curl may be gone)
+    for p in chain {
+        if let Some(h) = console_window_of(p) {
+            if let Some(top) = console_top_window(h, &tree) {
+                let exe = procinfo::image_path(window_pid(top));
+                return (Target::Hwnd(top, exe), tool_exe);
+            }
+        }
+    }
+    (Target::None, tool_exe)
+}
+
+static CONSOLE_LOCK: Mutex<()> = Mutex::new(());
+
+/// The console window a process is attached to (briefly attaches MicaBar to that console;
+/// Ctrl+C / Ctrl+Break are ignored meanwhile so a keypress in that terminal can't stop MicaBar).
+fn console_window_of(pid: u32) -> Option<isize> {
+    use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleWindow, SetConsoleCtrlHandler};
+    let _g = CONSOLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        SetConsoleCtrlHandler(None, 1);
+        if AttachConsole(pid) == 0 {
+            return None;
+        }
+        let h = GetConsoleWindow() as isize;
+        FreeConsole();
+        (h != 0).then_some(h)
+    }
+}
+
+/// The window the user actually sees for a console window: a classic console window is itself
+/// visible; a ConPTY pseudo window (Windows Terminal) is hidden and owned by the terminal window,
+/// or failing that belongs to OpenConsole.exe, whose parent is the terminal.
+fn console_top_window(h: isize, tree: &HashMap<u32, (u32, String)>) -> Option<isize> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, IsWindowVisible, GA_ROOTOWNER};
+    unsafe {
+        if IsWindowVisible(h as _) != 0 {
+            return Some(h);
+        }
+        let owner = GetAncestor(h as _, GA_ROOTOWNER) as isize;
+        if owner != 0 && owner != h && IsWindowVisible(owner as _) != 0 {
+            return Some(owner);
+        }
+    }
+    let host = window_pid(h);
+    let parent = tree.get(&host).map(|(p, _)| *p)?;
+    main_window(parent)
 }
 
 static STARTS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
@@ -1536,9 +1591,9 @@ fn last_reply(transcript: &str) -> String {
     String::new()
 }
 
-fn ai_event(tool: &str, event: &str, j: &Value, host: (Option<u32>, Option<String>)) {
+fn ai_event(tool: &str, event: &str, j: &Value, host: (Target, Option<String>)) {
     let s = |k: &str| j.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let target = host.0.map(Target::Pid).unwrap_or_default();
+    let target = host.0.clone();
     let (key, app) = match tool {
         "claude" => ("claude", "Claude Code"),
         "codex" => ("codex", "Codex"),
@@ -1664,6 +1719,22 @@ fn is_ours(cmd: &str, tool: &str) -> bool {
     cmd.contains("127.0.0.1:") && cmd.contains(&format!("/n/{tool}/"))
 }
 
+/// Hooks written by 0.2.9 and earlier have `--data-binary @-` unquoted, which PowerShell (where
+/// Claude Code runs hooks) can't parse: every message showed "hook failed". Rewritten once at start.
+fn repair_claude_hooks() {
+    let Ok(text) = std::fs::read_to_string(claude_settings()) else { return };
+    let Ok(v) = serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) else { return };
+    let broken = v.get("hooks").and_then(|h| h.as_object()).map(|o| {
+        o.values().filter_map(|a| a.as_array()).flatten().filter_map(|g| g.get("hooks").and_then(|h| h.as_array())).flatten().filter_map(|x| x.get("command").and_then(|c| c.as_str())).any(|c| is_ours(c, "claude") && c.contains("--data-binary @-"))
+    });
+    if broken == Some(true) {
+        match set_hook("claude", true) {
+            Ok(_) => log("notify: Claude Code hooks rewritten (quoted @- for PowerShell)"),
+            Err(e) => log(format!("notify: repairing Claude Code hooks failed: {e}")),
+        }
+    }
+}
+
 fn claude_installed(v: &Value) -> bool {
     v.pointer("/hooks/Stop")
         .and_then(|a| a.as_array())
@@ -1750,7 +1821,8 @@ pub fn set_hook(tool: &str, on: bool) -> Result<String, String> {
                     })
                     .collect();
                 if on {
-                    let cmd = format!("curl.exe -s -m 2 -o NUL --data-binary @- \"{}\"", hook_url("claude", name));
+                    // Claude Code runs hooks through PowerShell, where a bare @- is a parse error
+                    let cmd = format!("curl.exe -s -m 2 -o NUL --data-binary \"@-\" \"{}\"", hook_url("claude", name));
                     kept.push(json!({ "hooks": [{ "type": "command", "command": cmd }] }));
                 }
                 if kept.is_empty() {
