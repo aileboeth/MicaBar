@@ -2527,7 +2527,7 @@ const SET_PAGES = {
     ${sToggle("ai.on", "显示 AI 额度")}
     ${sToggle("ai.claude", "　Claude Code")}
     ${sToggle("ai.codex", "　Codex", "需要用 ChatGPT 账号登录的 Codex")}
-    ${sToggle("ai.antigravity", "　Antigravity", "Antigravity 打开并进入工作区时才能读到")}
+    ${sToggle("ai.antigravity", "　Antigravity", "Antigravity 打开着时才能读到（只问本机的语言服务器）")}
     ${sToggle("ai.grok", "　Grok", "需要用 grok CLI 登录过")}
     ${sNumber("ai.interval", "　每隔多久查一次", 1, 120, 1, "分钟", "Claude 最少 10 分钟一次，设得更短也按 10 分钟")}
     ${sNumber("ai.proxyPort", "　走哪个代理端口", 0, 65535, 1, "", "0 = 自动用代理软件的端口（Clash 的 mixed/http 端口或系统代理）。额度只经代理查询，找不到端口就不查，绝不直连；Antigravity 只问本机，不出网")}

@@ -409,6 +409,31 @@ fn ag_summary(v: &Value) -> Vec<Window> {
     out
 }
 
+/// Newer Antigravity (2.3x) starts one standalone "hub" language server that reads its token from
+/// stdin, so the command line has no --csrf_token. It announces itself for local clients in
+/// ~/.gemini/antigravity/daemon/hub_<port>.json ({pid, httpsPort, httpPort, csrfToken}); files of
+/// servers that have exited stay behind, so only one whose pid is a running language server counts.
+fn ag_discovery(running: &[u32]) -> Option<(u32, String, Vec<u16>)> {
+    let dir = home().join(".gemini").join("antigravity").join("daemon");
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    files.into_iter().find_map(|(_, p)| {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+        let pid = v.get("pid")?.as_u64()? as u32;
+        if !running.contains(&pid) {
+            return None;
+        }
+        let csrf = v.get("csrfToken")?.as_str()?.to_string();
+        let ports: Vec<u16> = ["httpsPort", "httpPort"].iter().filter_map(|k| v.get(*k)?.as_u64()).map(|p| p as u16).collect();
+        (!ports.is_empty()).then_some((pid, csrf, ports))
+    })
+}
+
 async fn antigravity() -> Result<Quota, String> {
     let procs: Vec<u32> = crate::procinfo::list_processes()
         .into_iter()
@@ -416,19 +441,27 @@ async fn antigravity() -> Result<Quota, String> {
         .map(|(p, _)| p)
         .collect();
     let installed = std::env::var("LOCALAPPDATA").map(|l| PathBuf::from(l).join("Programs").join("Antigravity").exists()).unwrap_or(false);
-    let server = procs.iter().find_map(|&p| {
-        let cmd = command_line(p)?;
-        let csrf = arg_value(&cmd, "--csrf_token")?;
-        Some((p, csrf))
-    });
-    let Some((pid, csrf)) = server else {
-        return Err(if installed || !procs.is_empty() { "absent:Antigravity 没在运行（打开它并进入一个工作区后才能读到额度）".into() } else { "absent:没找到 Antigravity".into() });
+    // the hub's discovery file first; older versions: a workspace server with --csrf_token
+    let (pid, csrf, mut ports) = match ag_discovery(&procs) {
+        Some(found) => found,
+        None => {
+            let server = procs.iter().find_map(|&p| {
+                let cmd = command_line(p)?;
+                let csrf = arg_value(&cmd, "--csrf_token")?;
+                Some((p, csrf))
+            });
+            let Some((pid, csrf)) = server else {
+                return Err(if installed || !procs.is_empty() { "absent:Antigravity 没在运行（打开它后才能读到额度）".into() } else { "absent:没找到 Antigravity".into() });
+            };
+            (pid, csrf, Vec::new())
+        }
     };
-    let ports: Vec<u16> = crate::conn::snapshot()
-        .into_iter()
-        .filter(|s| s.pid == pid && (s.remote.is_none() || s.state == "LISTEN") && matches!(s.proto, crate::conn::Proto::Tcp))
-        .map(|s| s.local_port)
-        .collect();
+    // any other port the server listens on, after the announced ones
+    for s in crate::conn::snapshot() {
+        if s.pid == pid && (s.remote.is_none() || s.state == "LISTEN") && matches!(s.proto, crate::conn::Proto::Tcp) && !ports.contains(&s.local_port) {
+            ports.push(s.local_port);
+        }
+    }
     let c = reqwest::Client::builder()
         .danger_accept_invalid_certs(true) // the language server uses a self-signed loopback certificate
         .no_proxy()

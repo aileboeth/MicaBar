@@ -96,7 +96,7 @@ JS 覆写给每个 select / url-test / fallback / load-balance 分组加一个 `
 | --- | --- | --- |
 | Claude Code | `~/.claude/.credentials.json` 的 `claudeAiOauth.accessToken` | `GET api.anthropic.com/api/oauth/usage`（`anthropic-beta: oauth-2025-04-20`）：`five_hour` / `seven_day` 的 `utilization`、`resets_at` |
 | Codex | `~/.codex/auth.json`（ChatGPT 登录） | `GET chatgpt.com/backend-api/wham/usage`；没有时读会话日志里最近的 `rate_limits`；自定义服务商（API）没有订阅额度 |
-| Antigravity | 运行中的 `language_server` 命令行里的 `--csrf_token` | 本机端口 `…/LanguageServerService/RetrieveUserQuotaSummary` 或 `GetUserStatus`（自签名证书，只连回环） |
+| Antigravity | 新版（2.3x，单个 hub 语言服务器，口令从 stdin 传入）：Antigravity 给本机客户端写的 `~/.gemini/antigravity/daemon/hub_<端口>.json`（pid、端口、`csrfToken`；只认 pid 还在运行的那个，旧文件会留着）；旧版：运行中的 `language_server` 命令行里的 `--csrf_token` | 本机端口 `…/LanguageServerService/RetrieveUserQuotaSummary` 或 `GetUserStatus`（自签名证书，只连回环） |
 | Grok | `~/.grok/auth.json`（grok CLI 登录） | `GET cli-chat-proxy.grok.com/v1/billing?format=credits` |
 
 凭据每次查询时读取，只发给该工具自己的服务，不保存、不写日志、不续期（过期时提示打开该工具用一下）。
