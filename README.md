@@ -159,7 +159,7 @@ Implementation notes (Chinese): [docs/internals.zh-CN.md](docs/internals.zh-CN.m
 
 ## License
 
-[MIT](LICENSE). Flag icons from [flag-icons](https://github.com/lipis/flag-icons) (MIT, see `ui/flags/LICENSE`).
+[MIT](LICENSE). Flag icons from [flag-icons](https://github.com/lipis/flag-icons) (MIT, see `ui/flags/LICENSE`). AI tool marks from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT, see `ui/brands/LICENSE`); the marks belong to their owners.
 
 MicaBar is provided "as is", without warranty of any kind. Exit control and the leak guard change your proxy
 client's override configuration, add firewall rules and may restart the proxy client; the author is not liable

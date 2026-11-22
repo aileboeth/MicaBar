@@ -544,7 +544,23 @@ document.addEventListener("visibilitychange", () => updateViz());
 
 // ---------- quota rings ----------
 
-const RING_LETTER = { claude: "C", codex: "X", antigravity: "A", grok: "G" };
+// Brand marks (lobe-icons, MIT): files in ui/brands; Grok is one path drawn in the text colour so it
+// reads on both themes. A tool without a mark falls back to its initial.
+const BRAND_FILE = { claude: "brands/claude.svg", codex: "brands/codex.svg", antigravity: "brands/antigravity.svg" };
+const GROK_PATH = "M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815";
+const hasBrand = (tool) => !!BRAND_FILE[tool] || tool === "grok";
+// as an HTML element
+function brandIcon(tool, px, cls = "") {
+  if (BRAND_FILE[tool]) return `<img class="brand-ic ${cls}" src="${BRAND_FILE[tool]}" width="${px}" height="${px}" alt="">`;
+  if (tool === "grok") return `<svg class="brand-ic grok ${cls}" width="${px}" height="${px}" viewBox="0 0 24 24" aria-hidden="true"><path d="${GROK_PATH}"/></svg>`;
+  return "";
+}
+// inside an SVG, centred on (c, c), s wide
+function brandInSvg(tool, c, s) {
+  const x = c - s / 2;
+  if (BRAND_FILE[tool]) return `<image href="${BRAND_FILE[tool]}" x="${x}" y="${x}" width="${s}" height="${s}"/>`;
+  return `<svg class="grok" x="${x}" y="${x}" width="${s}" height="${s}" viewBox="0 0 24 24"><path d="${GROK_PATH}"/></svg>`;
+}
 const ringLevel = (used) => (used >= Number(sget("ai.ring.crit", 85)) ? "crit" : used >= Number(sget("ai.ring.warn", 60)) ? "warn" : "ok");
 
 // The windows a tool's ring shows: [outer, inner?] from its setting (both | first | second | max).
@@ -567,10 +583,15 @@ function ringWindows(q) {
   return ws.slice(0, 2);
 }
 
-// SVG ring: one arc per window (outer = first), the tool's letter in the middle.
+// SVG ring: one arc per window (outer = first), the tool's mark (or given text) in the middle.
 function ringSvg(q, size, stroke, center) {
   const ws = ringWindows(q);
   const c = size / 2;
+  // the hole inside the innermost arc
+  const hole = 2 * (c - stroke - Math.max(0, ws.length - 1) * (stroke + 1.5));
+  const mid = center != null || !hasBrand(q.tool)
+    ? `<text x="${c}" y="${c}" dy="0.36em" text-anchor="middle">${center ?? esc((q.name || "?")[0])}</text>`
+    : brandInSvg(q.tool, c, Math.max(8, Math.min(hole - 1, size * 0.62)));
   const arcs = ws.map((w, i) => {
     const r = c - stroke / 2 - i * (stroke + 1.5);
     const len = 2 * Math.PI * r;
@@ -578,7 +599,7 @@ function ringSvg(q, size, stroke, center) {
     return `<circle class="rg-track" cx="${c}" cy="${c}" r="${r}" stroke-width="${stroke}"/>` +
       (pct > 0 ? `<circle class="rg-arc ${ringLevel(pct)}" cx="${c}" cy="${c}" r="${r}" stroke-width="${stroke}" stroke-dasharray="${(len * pct) / 100} ${len}" transform="rotate(-90 ${c} ${c})"/>` : "");
   }).join("");
-  return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">${arcs}<text x="${c}" y="${c}" dy="0.36em" text-anchor="middle">${center ?? (RING_LETTER[q.tool] || esc((q.name || "?")[0]))}</text></svg>`;
+  return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">${arcs}${mid}</svg>`;
 }
 
 // pill item: ring + the share used (both windows: "44/12%")
@@ -848,7 +869,12 @@ const NOTE_W = 400;
 const nst = { active: [], hover: false, fan: false, timer: 0, h: 0, on: false };
 let gameOn = false;
 const BELL = "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0";
-const GLYPH = { claude: "✳", codex: "◎" };
+// a note without an app icon: the AI tool's mark, else the app's initial
+const NOTE_BRAND = { claude: "brands/claude-tile.svg", codex: "brands/codex.svg" };
+function noteGlyph(n) {
+  if (NOTE_BRAND[n.key]) return `<img class="app-icon n-brand b-${n.key}" src="${NOTE_BRAND[n.key]}" alt="">`;
+  return `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc([...(n.app || "?")][0])}</div>`;
+}
 
 const noteById = (id) => notes.find((n) => n.id === id);
 const unreadCount = () => notes.filter((n) => !n.read).length;
@@ -867,7 +893,7 @@ function noteIcon(n) {
     ? `<img class="n-appimg" src="${n.iconUrl}" alt="">`
     : n.icon
       ? iconHtml({ path: n.icon, name: n.app })
-      : `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc(GLYPH[n.key] || [...(n.app || "?")][0])}</div>`;
+      : noteGlyph(n);
   if (n.avatar && noteHidden(n) < 2) return `<div class="n-ico avatar"><img class="n-av" src="${n.avatar}" alt=""><span class="n-badge">${app}</span></div>`;
   return `<div class="n-ico">${app}</div>`;
 }
@@ -906,7 +932,7 @@ function noteMini(n, avatar) {
   if (avatar && n.avatar && noteHidden(n) < 2) return `<img class="nm-av" src="${n.avatar}" alt="">`;
   if (n.iconUrl) return `<img class="app-icon" src="${n.iconUrl}" alt="">`;
   if (n.icon) return iconHtml({ path: n.icon, name: n.app });
-  return `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc(GLYPH[n.key] || [...(n.app || "?")][0])}</div>`;
+  return noteGlyph(n);
 }
 
 function inlineNoteHtml() {
@@ -1916,7 +1942,7 @@ function aiCard(q, compact) {
     ? `<div class="ai-body">${ringSvg(q, 88, ringed.length > 1 ? 7 : 9, `${Math.round(ringed[0].used)}%`)}<div class="ai-rows">${bars}</div></div>`
     : bars;
   return `<div class="ai-card ${q.status}">
-    <div class="ai-head"><b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}<span class="sp"></span>${!compact && q.source ? `<span class="q-src">${esc(q.source)}</span>` : ""}</div>
+    <div class="ai-head">${brandIcon(q.tool, 18)}<b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}<span class="sp"></span>${!compact && q.source ? `<span class="q-src">${esc(q.source)}</span>` : ""}</div>
     ${body}
     ${!compact && q.status === "stale" && q.message ? `<div class="q-msg bad">${esc(q.message)}</div>` : ""}
   </div>`;

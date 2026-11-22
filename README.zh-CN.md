@@ -125,7 +125,7 @@ pnpm release          # 安装包 + 便携版 + 自动更新清单 -> dist\relea
 
 ## 许可
 
-[MIT](LICENSE)。国旗图标来自 [flag-icons](https://github.com/lipis/flag-icons)（MIT，见 `ui/flags/LICENSE`）。
+[MIT](LICENSE)。国旗图标来自 [flag-icons](https://github.com/lipis/flag-icons)（MIT，见 `ui/flags/LICENSE`）。AI 工具图标来自 [lobe-icons](https://github.com/lobehub/lobe-icons)（MIT，见 `ui/brands/LICENSE`），商标归各自所有者。
 
 ## 免责声明
 
