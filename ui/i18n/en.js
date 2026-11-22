@@ -1003,5 +1003,6 @@ I18N.add("en", {
 "setting|开机自启": "Start with Windows",
 "tab|连接": "Conns",
 "tab|监听": "Listen",
-"tour|跳过": "Skip"
+"tour|跳过": "Skip",
+"没认出是哪块网卡，但能连上外网": "Couldn't tell which adapter it is, but the internet works"
 });

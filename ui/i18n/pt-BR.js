@@ -1003,5 +1003,6 @@ I18N.add("pt-BR", {
 "setting|开机自启": "Iniciar com o Windows",
 "tab|连接": "Conex.",
 "tab|监听": "Escuta",
-"tour|跳过": "Pular"
+"tour|跳过": "Pular",
+"没认出是哪块网卡，但能连上外网": "Não deu para identificar o adaptador, mas a internet funciona"
 });

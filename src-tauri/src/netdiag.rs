@@ -183,6 +183,42 @@ fn uplink() -> Option<(String, Ipv4Addr)> {
     best.map(|(_, n, g)| (n, g))
 }
 
+/// An up adapter with a usable IPv4 address but no gateway listed (PPPoE / dial-up, some
+/// tethering and VPN-style uplinks): the line can still work, there is just no router to ping.
+fn uplink_no_gateway() -> Option<String> {
+    let ads = ipconfig::get_adapters().ok()?;
+    ads.iter()
+        .filter(|a| a.oper_status() == ipconfig::OperStatus::IfOperStatusUp && !proxy::looks_like_tun(a))
+        .filter(|a| !matches!(a.if_type(), ipconfig::IfType::SoftwareLoopback))
+        .find(|a| {
+            a.ip_addresses().iter().any(|ip| match ip {
+                IpAddr::V4(v) => !v.is_loopback() && !v.is_link_local() && !v.is_unspecified(),
+                _ => false,
+            })
+        })
+        .map(|a| a.friendly_name().to_string())
+}
+
+/// Every adapter for the log when none looked like the uplink (so the next report says why).
+fn adapters_summary() -> String {
+    let Ok(ads) = ipconfig::get_adapters() else { return "adapter list failed".into() };
+    ads.iter()
+        .map(|a| {
+            let v4 = a.ip_addresses().iter().filter(|i| i.is_ipv4()).count();
+            let gw4 = a.gateways().iter().filter(|g| g.is_ipv4() && !g.is_unspecified()).count();
+            format!(
+                "[{} | {} | {:?} | {:?} | v4={v4} gw4={gw4} tun={}]",
+                a.friendly_name(),
+                a.description(),
+                a.if_type(),
+                a.oper_status(),
+                proxy::looks_like_tun(a)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// One ICMP echo; round trip in ms.
 fn ping(ip: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
     #[repr(C)]
@@ -378,7 +414,13 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     let up = uplink();
     match &up {
         Some((name, _)) => set(&mut r, 0, "ok", name.clone(), None),
-        None => set(&mut r, 0, "fail", crate::i18n::t("没有连上的网卡").into(), None),
+        None => {
+            log(format!("netdiag: no adapter with an IPv4 gateway: {}", adapters_summary()));
+            match uplink_no_gateway() {
+                Some(name) => set(&mut r, 0, "ok", name, None),
+                None => set(&mut r, 0, "fail", crate::i18n::t("没有连上的网卡").into(), None),
+            }
+        }
     }
     progress(&r);
 
@@ -409,6 +451,10 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     match &net {
         Ok(ms) => set(&mut r, 3, "ok", crate::i18n::t("直连畅通").into(), Some(*ms)),
         Err(e) => set(&mut r, 3, "fail", e.clone(), None),
+    }
+    // the internet answers, so the adapter works even when it wasn't recognised
+    if r.steps[0].status == "fail" && net.is_ok() {
+        set(&mut r, 0, "warn", crate::i18n::t("没认出是哪块网卡，但能连上外网").into(), None);
     }
     progress(&r);
 

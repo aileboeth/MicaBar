@@ -1003,5 +1003,6 @@ I18N.add("fr", {
 "setting|开机自启": "Lancer avec Windows",
 "tab|连接": "Conn.",
 "tab|监听": "Écoute",
-"tour|跳过": "Passer"
+"tour|跳过": "Passer",
+"没认出是哪块网卡，但能连上外网": "Carte réseau non identifiée, mais internet fonctionne"
 });

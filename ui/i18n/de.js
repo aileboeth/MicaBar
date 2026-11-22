@@ -1003,5 +1003,6 @@ I18N.add("de", {
 "setting|开机自启": "Mit Windows starten",
 "tab|连接": "Verb.",
 "tab|监听": "Ports",
-"tour|跳过": "Überspringen"
+"tour|跳过": "Überspringen",
+"没认出是哪块网卡，但能连上外网": "Adapter nicht erkannt, aber das Internet funktioniert"
 });
