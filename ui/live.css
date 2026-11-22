@@ -280,3 +280,10 @@ html.no-anim .lv-chip, html.no-anim .lv-enter, html.no-anim #diag-btn.hot, html.
 .ipk.k-proxy { --kc: var(--red); }
 /* settings section titles: the note takes the leftover width, the title never wraps (long translations) */
 .s-title .s-note { flex: 1 1 0; min-width: 0; }
+
+/* docked left / right: the pill is only as wide as its height, so a ring stacks over its number
+   and shows the main window only (the second number stays in the horizontal pill and the tooltip) */
+#island.vertical .ring-item { flex-direction: column; gap: 1px; }
+#island.vertical .ring-item .mono { font-size: 10px; line-height: 1.1; }
+#island.vertical .ring-item .rg-sub { display: none; }
+#island.vertical #pill .pill-speed { display: grid; grid-template-columns: auto auto; column-gap: 1px; font-size: 10px; line-height: 1.2; }

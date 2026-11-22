@@ -5033,12 +5033,19 @@ $("edit").addEventListener("pointerdown", (e) => {
   const kW = editPart === "panel" ? "panelW" : "pillW";
   const kH = editPart === "panel" ? "panelH" : "pillH";
   drag = { edge, x: e.clientX, y: e.clientY, w: r.w, h: r.h, kW, kH, dock: r.dock };
-  hd.setPointerCapture(e.pointerId);
+  // capture on the layer, not the handle: every move re-renders the handles, and a replaced
+  // handle loses the capture (the drag broke off, and the lost pointerup left it "held")
+  try { $("edit").setPointerCapture(e.pointerId); } catch { /* ignore */ }
   island.classList.add("dragging");
   e.preventDefault();
 });
 $("edit").addEventListener("pointermove", (e) => {
   if (!drag) return;
+  // the button was released somewhere we didn't hear about: never resize on a plain hover
+  if (!(e.buttons & 1)) {
+    stopDrag();
+    return;
+  }
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   const centredX = drag.dock === "top" || drag.dock === "bottom";
   const centredY = !centredX;
@@ -5061,6 +5068,7 @@ const stopDrag = () => {
 };
 $("edit").addEventListener("pointerup", stopDrag);
 $("edit").addEventListener("pointercancel", stopDrag);
+$("edit").addEventListener("lostpointercapture", stopDrag);
 $("edit").addEventListener("click", (e) => {
   const seg = e.target.closest("[data-seg='epart']");
   if (seg) {
