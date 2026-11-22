@@ -51,13 +51,15 @@ fn app_label(aumid: &str) -> String {
     a.trim_end_matches(".exe").rsplit('\\').next().unwrap_or(a).to_string()
 }
 
-/// Polls after a track change during which the cover is read again: players (NetEase Cloud Music,
-/// QQ Music…) publish the new title first and the new thumbnail a moment later, so a single read
-/// at the change kept the previous song's cover (or none) until something else changed.
-const COVER_REREADS: u32 = 6;
+/// Polls (1.5 s each) after a track change during which the cover is read again: players publish
+/// the new title first and the new thumbnail a moment later (NetEase Cloud Music, QQ Music), and
+/// browsers (YouTube Music) only after downloading the artwork, so a single read at the change kept
+/// the previous song's cover (or none). Up to ~30 s; once a new cover arrived, two more reads.
+const COVER_REREADS: u32 = 20;
+const COVER_SETTLE: u32 = 2;
 
 /// One poll: the session the system considers current, else the first one that is playing.
-fn poll(mgr: &Manager, last_key: &mut String, last_cover: &mut Option<String>, rereads: &mut u32) -> Option<NowPlaying> {
+fn poll(mgr: &Manager, last_key: &mut String, last_cover: &mut Option<String>, prev_cover: &mut Option<String>, rereads: &mut u32) -> Option<NowPlaying> {
     let sessions = mgr.GetSessions().ok()?;
     let mut pick = mgr.GetCurrentSession().ok();
     let playing = |s: &windows::Media::Control::GlobalSystemMediaTransportControlsSession| {
@@ -80,12 +82,19 @@ fn poll(mgr: &Manager, last_key: &mut String, last_cover: &mut Option<String>, r
     let key = format!("{app}|{title}|{artist}|{album}");
     if key != *last_key {
         *last_key = key;
-        *last_cover = props.Thumbnail().ok().and_then(|t| read_cover(&t));
-        *rereads = COVER_REREADS;
+        let previous = last_cover.take();
+        let first = props.Thumbnail().ok().and_then(|t| read_cover(&t));
+        // the same picture as the song before = the player hasn't swapped it yet
+        *rereads = if first.is_some() && first != previous { COVER_SETTLE } else { COVER_REREADS };
+        *prev_cover = previous;
+        *last_cover = first;
     } else if *rereads > 0 {
         *rereads -= 1;
         if let Some(c) = props.Thumbnail().ok().and_then(|t| read_cover(&t)) {
             if last_cover.as_ref() != Some(&c) {
+                if prev_cover.as_ref() != Some(&c) {
+                    *rereads = (*rereads).min(COVER_SETTLE);
+                }
                 *last_cover = Some(c);
             }
         }
@@ -106,7 +115,7 @@ pub fn start(state: Shared, on_change: impl Fn(Option<NowPlaying>) + Send + 'sta
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let mut mgr: Option<Manager> = None;
-        let (mut last_key, mut last_cover, mut rereads) = (String::new(), None, 0u32);
+        let (mut last_key, mut last_cover, mut prev_cover, mut rereads) = (String::new(), None, None, 0u32);
         let mut fails = 0u32;
         loop {
             let on = crate::settings::bool_at("media.on", true);
@@ -130,7 +139,7 @@ pub fn start(state: Shared, on_change: impl Fn(Option<NowPlaying>) + Send + 'sta
                     }
                 }
             }
-            let now = poll(mgr.as_ref().unwrap(), &mut last_key, &mut last_cover, &mut rereads);
+            let now = poll(mgr.as_ref().unwrap(), &mut last_key, &mut last_cover, &mut prev_cover, &mut rereads);
             let changed = {
                 let mut cur = state.lock().unwrap();
                 let differs = match (&*cur, &now) {
