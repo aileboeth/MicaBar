@@ -278,3 +278,5 @@ html.no-anim .lv-chip, html.no-anim .lv-enter, html.no-anim #diag-btn.hot, html.
 .ipk.k-hosting { --kc: var(--amber); }
 .ipk.k-mobile { --kc: var(--blue); }
 .ipk.k-proxy { --kc: var(--red); }
+/* settings section titles: the note takes the leftover width, the title never wraps (long translations) */
+.s-title .s-note { flex: 1 1 0; min-width: 0; }

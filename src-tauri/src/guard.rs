@@ -277,7 +277,7 @@ impl Matcher {
             m.sources.push((name, n));
         };
         if s.builtin {
-            add(&mut m, BUILTIN.iter().map(|d| Entry { kind: "suffix".into(), value: d.to_string() }).collect(), "内置".into());
+            add(&mut m, BUILTIN.iter().map(|d| Entry { kind: "suffix".into(), value: d.to_string() }).collect(), crate::i18n::t("内置").into());
         }
         if s.gfw {
             let t = std::fs::read_to_string(dir().join("gfw.txt")).unwrap_or_default();
@@ -287,7 +287,7 @@ impl Matcher {
             let t = std::fs::read_to_string(import_file(&im.url)).unwrap_or_default();
             add(&mut m, parse_list(&t), im.url.clone());
         }
-        add(&mut m, s.custom.clone(), "自定义".into());
+        add(&mut m, s.custom.clone(), crate::i18n::t("自定义").into());
         m.keywords.sort();
         m.keywords.dedup();
         m
@@ -325,7 +325,7 @@ impl Matcher {
                     }
                 }
                 if let Some(k) = self.keywords.iter().find(|k| host.contains(k.as_str())) {
-                    return Some(format!("关键词 {k}"));
+                    return Some(crate::tr!("关键词 {0}", k));
                 }
             }
         }
@@ -416,7 +416,7 @@ fn netsh(args: &[String]) -> Result<String, String> {
     if out.status.success() {
         Ok(text)
     } else {
-        Err(format!("netsh 失败（{}）", text.trim()))
+        Err(crate::tr!("netsh 失败（{0}）", text.trim()))
     }
 }
 

@@ -121,7 +121,7 @@ pub fn list() -> Vec<Item> {
             out.push(Item {
                 id: format!("{}|{name}", src.key),
                 desc: describe(&name, path.as_deref()),
-                source: src.label.into(),
+                source: crate::i18n::t(src.label),
                 enabled: approved(src.root, src.approved, &name),
                 name,
                 command,
@@ -144,7 +144,7 @@ pub fn list() -> Vec<Item> {
             out.push(Item {
                 id: format!("{key}|{file}"),
                 desc: None,
-                source: label.into(),
+                source: crate::i18n::t(label),
                 enabled: approved(root, "StartupFolder", &file),
                 name,
                 command: path.clone(),
@@ -159,18 +159,18 @@ pub fn list() -> Vec<Item> {
 
 /// On / off through StartupApproved (12 bytes: flag, 3 zero bytes, FILETIME of turning it off).
 pub fn set(id: &str, on: bool) -> Result<(), String> {
-    let (key, name) = id.split_once('|').ok_or("无效的启动项")?;
+    let (key, name) = id.split_once('|').ok_or(crate::i18n::t("无效的启动项"))?;
     let (root, sub) = match key {
         "hkcu" => (HKEY_CURRENT_USER, "Run"),
         "hklm" => (HKEY_LOCAL_MACHINE, "Run"),
         "hklm32" => (HKEY_LOCAL_MACHINE, "Run32"),
         "ufolder" => (HKEY_CURRENT_USER, "StartupFolder"),
         "cfolder" => (HKEY_LOCAL_MACHINE, "StartupFolder"),
-        _ => return Err("无效的启动项".into()),
+        _ => return Err(crate::i18n::t("无效的启动项").into()),
     };
     // only entries that exist (the page can't make up new names)
     if !list().iter().any(|i| i.id == id) {
-        return Err("这个启动项已经不在了".into());
+        return Err(crate::i18n::t("这个启动项已经不在了").into());
     }
     let mut bytes = vec![if on { 2u8 } else { 3u8 }, 0, 0, 0];
     let ft: u64 = if on {
@@ -182,8 +182,8 @@ pub fn set(id: &str, on: bool) -> Result<(), String> {
     bytes.extend_from_slice(&ft.to_le_bytes());
     let (k, _) = RegKey::predef(root)
         .create_subkey_with_flags(format!(r"{APPROVED}\{sub}"), KEY_SET_VALUE)
-        .map_err(|e| format!("打不开注册表：{e}"))?;
-    k.set_raw_value(name, &RegValue { bytes, vtype: RegType::REG_BINARY }).map_err(|e| format!("写不进注册表：{e}"))?;
+        .map_err(|e| crate::tr!("打不开注册表：{0}", e))?;
+    k.set_raw_value(name, &RegValue { bytes, vtype: RegType::REG_BINARY }).map_err(|e| crate::tr!("写不进注册表：{0}", e))?;
     crate::log(format!("startup: {id} -> {}", if on { "on" } else { "off" }));
     Ok(())
 }

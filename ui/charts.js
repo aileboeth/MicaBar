@@ -341,7 +341,7 @@ const Charts = (() => {
       const cx = pad.l + band * i + band / 2;
       const x = cx - bw / 2;
       const dim = opts.selected != null && opts.selected !== c ? " dim" : "";
-      const hit = !opts.pick ? "" : `<rect class="c-hit" x="${pad.l + band * i}" y="${pad.t}" width="${band}" height="${ph}" data-${opts.pick}="${esc(c)}"><title>${esc(opts.fmtCat(c))} · 合计 ${esc(opts.fmtY(totals[i]))}${stacks.map((st) => ` · ${esc(st.name)} ${esc(opts.fmtY(st.values[i] || 0))}`).join("")}</title></rect>`;
+      const hit = !opts.pick ? "" : `<rect class="c-hit" x="${pad.l + band * i}" y="${pad.t}" width="${band}" height="${ph}" data-${opts.pick}="${esc(c)}"><title>${tr("{0} · 合计 {1}{2}", esc(opts.fmtCat(c)), esc(opts.fmtY(totals[i])), stacks.map((st) => ` · ${esc(st.name)} ${esc(opts.fmtY(st.values[i] || 0))}`).join(""))}</title></rect>`;
       let base = 0;
       const segs = stacks.map((st) => ({ st, v: st.values[i] || 0 })).filter((s) => s.v > 0);
       segs.forEach((s, k) => {

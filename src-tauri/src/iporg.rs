@@ -22,6 +22,8 @@ const VERSION: u32 = 2;
 #[serde(default)]
 pub struct IpOrg {
     pub v: u32,
+    /// interface language the names were looked up in (region, carrier)
+    pub lang: String,
     /// registered organisation, e.g. "Ipxo LLC" (often the subscriber's name for home lines)
     pub org: Option<String>,
     /// the access provider, e.g. "AT&T Enterprises, LLC"
@@ -72,7 +74,8 @@ fn save() {
 pub fn cached(ip: &str) -> Option<IpOrg> {
     let now = crate::now_ms();
     let c = cache().lock().unwrap();
-    let v = c.ips.get(ip).filter(|v| v.v == VERSION)?;
+    let lang = crate::i18n::lang();
+    let v = c.ips.get(ip).filter(|v| v.v == VERSION && v.lang == lang)?;
     let ttl = if v.src.is_empty() { RETRY_MS } else { TTL_MS };
     (now.saturating_sub(v.at) < ttl).then(|| v.clone())
 }
@@ -94,11 +97,11 @@ fn text(v: &serde_json::Value, k: &str) -> Option<String> {
 }
 
 async fn get_json(c: &reqwest::Client, url: &str) -> Result<serde_json::Value, String> {
-    let r = c.get(url).send().await.map_err(|e| if e.is_timeout() { "超时".to_string() } else { "连接失败".to_string() })?;
+    let r = c.get(url).send().await.map_err(|e| if e.is_timeout() { crate::i18n::t("超时").to_string() } else { crate::i18n::t("连接失败").to_string() })?;
     if !r.status().is_success() {
         return Err(format!("HTTP {}", r.status().as_u16()));
     }
-    r.json::<serde_json::Value>().await.map_err(|_| "返回格式不对".to_string())
+    r.json::<serde_json::Value>().await.map_err(|_| crate::i18n::t("返回格式不对").to_string())
 }
 
 /// Chinese name of a mainland carrier from its ASN or English name.
@@ -142,7 +145,14 @@ pub async fn lookup(ip: &str, proxy_port: Option<u16>) -> IpOrg {
     if let Some(v) = cached(ip) {
         return v;
     }
-    let mut out = IpOrg { v: VERSION, at: crate::now_ms(), ..Default::default() };
+    let lang = crate::i18n::lang();
+    let mut out = IpOrg { v: VERSION, lang: lang.clone(), at: crate::now_ms(), ..Default::default() };
+    // ip-api region names: en de es pt-BR fr ja zh-CN ru (Korean gets English, zh-TW Chinese)
+    let api_lang = match lang.as_str() {
+        "zh-CN" | "zh-TW" => "zh-CN",
+        "ko" => "en",
+        l => l,
+    };
     let c = match client(proxy_port) {
         Ok(c) => c,
         Err(e) => {
@@ -150,10 +160,10 @@ pub async fn lookup(ip: &str, proxy_port: Option<u16>) -> IpOrg {
             return out;
         }
     };
-    let (c2, url_b) = (c.clone(), format!("http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,message,countryCode,regionName,isp,org,as,proxy,hosting"));
+    let (c2, url_b) = (c.clone(), format!("http://ip-api.com/json/{ip}?lang={api_lang}&fields=status,message,countryCode,regionName,isp,org,as,proxy,hosting"));
     let b = tauri::async_runtime::spawn(async move { get_json(&c2, &url_b).await });
     let a = get_json(&c, &format!("https://proxycheck.io/v2/{ip}?vpn=1&asn=1")).await;
-    let b = b.await.unwrap_or_else(|_| Err("查询中断".into()));
+    let b = b.await.unwrap_or_else(|_| Err(crate::i18n::t("查询中断").into()));
     let mut errs = Vec::new();
     let mut asn: Option<u32> = None;
     let mut cc: Option<String> = None;
@@ -182,7 +192,7 @@ pub async fn lookup(ip: &str, proxy_port: Option<u16>) -> IpOrg {
             };
             out.src.push("proxycheck.io".into());
         }
-        Ok(v) => errs.push(format!("proxycheck.io: {}", text(&v, "message").or_else(|| text(&v, "status")).unwrap_or_else(|| "没有结果".into()))),
+        Ok(v) => errs.push(format!("proxycheck.io: {}", text(&v, "message").or_else(|| text(&v, "status")).unwrap_or_else(|| crate::i18n::t("没有结果").into()))),
         Err(e) => errs.push(format!("proxycheck.io: {e}")),
     }
     match b {
@@ -204,7 +214,7 @@ pub async fn lookup(ip: &str, proxy_port: Option<u16>) -> IpOrg {
             names.push_str(&format!(" {} {} {}", text(&v, "isp").unwrap_or_default(), text(&v, "org").unwrap_or_default(), text(&v, "as").unwrap_or_default()));
             out.src.push("ip-api.com".into());
         }
-        Ok(v) => errs.push(format!("ip-api.com: {}", text(&v, "message").unwrap_or_else(|| "查询失败".into()))),
+        Ok(v) => errs.push(format!("ip-api.com: {}", text(&v, "message").unwrap_or_else(|| crate::i18n::t("查询失败").into()))),
         Err(e) => errs.push(format!("ip-api.com: {e}")),
     }
     if out.kind.is_none() && ipapi_hosting {
@@ -213,7 +223,7 @@ pub async fn lookup(ip: &str, proxy_port: Option<u16>) -> IpOrg {
     if matches!(cc.as_deref(), Some("CN") | None) {
         names.push_str(&format!(" {} {}", out.isp.clone().unwrap_or_default(), out.org.clone().unwrap_or_default()));
         if cc.as_deref() == Some("CN") {
-            out.carrier = cn_carrier(asn, &names).map(str::to_string);
+            out.carrier = cn_carrier(asn, &names).map(crate::i18n::t);
         }
     }
     if !errs.is_empty() {

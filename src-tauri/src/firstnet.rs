@@ -172,11 +172,11 @@ pub fn learning_until() -> u64 {
 
 /// Network profiles whose Windows Firewall is switched off ("域" / "专用" / "公用"); a group
 /// policy setting wins over the local one. Rules added there don't do anything.
-pub fn firewall_off() -> Vec<&'static str> {
+pub fn firewall_off() -> Vec<String> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
     let hk = winreg::RegKey::predef(HKEY_LOCAL_MACHINE);
     let read = |path: &str| hk.open_subkey(path).ok().and_then(|k| k.get_value::<u32, _>("EnableFirewall").ok());
-    [("DomainProfile", "DomainProfile", "域"), ("StandardProfile", "PrivateProfile", "专用"), ("PublicProfile", "PublicProfile", "公用")]
+    [("DomainProfile", "DomainProfile", crate::i18n::t("域")), ("StandardProfile", "PrivateProfile", crate::i18n::t("专用")), ("PublicProfile", "PublicProfile", crate::i18n::t("公用"))]
         .into_iter()
         .filter(|(local, policy, _)| {
             let p = read(&format!(r"SOFTWARE\Policies\Microsoft\WindowsFirewall\{policy}"));
@@ -192,8 +192,8 @@ pub fn firewall_warning() -> Option<String> {
     let off = firewall_off();
     match off.len() {
         0 => None,
-        3 => Some("但 Windows 防火墙现在是关着的，规则要等防火墙打开后才生效".into()),
-        _ => Some(format!("但 Windows 防火墙在「{}」网络下是关着的，连这类网络时规则不生效", off.join("、"))),
+        3 => Some(crate::i18n::t("但 Windows 防火墙现在是关着的，规则要等防火墙打开后才生效").into()),
+        _ => Some(crate::tr!("但 Windows 防火墙在「{0}」网络下是关着的，连这类网络时规则不生效", off.join("、"))),
     }
 }
 
@@ -206,7 +206,7 @@ fn netsh(args: &[String]) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("netsh 失败（{}）", String::from_utf8_lossy(&out.stdout).trim()))
+        Err(crate::tr!("netsh 失败（{0}）", String::from_utf8_lossy(&out.stdout).trim()))
     }
 }
 

@@ -46,7 +46,12 @@ fn home() -> PathBuf {
     PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into()))
 }
 
-pub const NO_PROXY: &str = "连不上：没找到代理软件的本地端口，额度只经代理查询，不会直连（代理软件开着就会自动接上，也可以在设置 → AI 额度里填端口）";
+/// Error markers: "soon:" = never reached the service (look again in a minute); NO_PROXY is
+/// replaced by its sentence before it is shown.
+pub const NO_PROXY: &str = "soon:noproxy";
+fn no_proxy_text() -> String {
+    crate::i18n::t("连不上：没找到代理软件的本地端口，额度只经代理查询，不会直连（代理软件开着就会自动接上，也可以在设置 → AI 额度里填端口）")
+}
 
 /// The account services are only ever asked through the proxy client's local port: never
 /// directly (direct requests from China fail or get the account flagged).
@@ -105,15 +110,15 @@ fn time_ms(v: &Value) -> Option<u64> {
 fn window_label(secs: f64) -> String {
     let h = secs / 3600.0;
     if (h - 5.0).abs() < 0.5 {
-        "5 小时".into()
+        crate::i18n::t("5 小时").into()
     } else if (h - 24.0 * 7.0).abs() < 2.0 {
-        "每周".into()
+        crate::i18n::t("每周").into()
     } else if h >= 24.0 * 27.0 {
-        "每月".into()
+        crate::i18n::t("每月").into()
     } else if h >= 24.0 {
-        format!("{} 天", (h / 24.0).round())
+        crate::tr!("{0} 天", (h / 24.0).round())
     } else {
-        format!("{} 小时", h.round())
+        crate::tr!("{0} 小时", h.round())
     }
 }
 
@@ -145,8 +150,8 @@ fn http_err(tool: &str, status: reqwest::StatusCode, body: &str, retry: Option<u
         return format!("429:{}", retry.unwrap_or(0));
     }
     match status.as_u16() {
-        401 | 403 => format!("{tool} 的登录已失效，打开 {tool} 用一下就会自动续期"),
-        _ => format!("{tool} 返回 {}：{}", status.as_u16(), body.chars().take(80).collect::<String>()),
+        401 | 403 => crate::tr!("{0} 的登录已失效，打开 {1} 用一下就会自动续期", tool, tool),
+        _ => crate::tr!("{0} 返回 {1}：{2}", tool, status.as_u16(), body.chars().take(80).collect::<String>()),
     }
 }
 
@@ -154,12 +159,12 @@ fn http_err(tool: &str, status: reqwest::StatusCode, body: &str, retry: Option<u
 
 async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
     let dir = std::env::var("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|_| home().join(".claude"));
-    let text = std::fs::read_to_string(dir.join(".credentials.json")).map_err(|_| "absent:没找到 Claude Code 的登录（~/.claude/.credentials.json）".to_string())?;
+    let text = std::fs::read_to_string(dir.join(".credentials.json")).map_err(|_| format!("absent:{}", crate::i18n::t("没找到 Claude Code 的登录（~/.claude/.credentials.json）")).to_string())?;
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let o = v.get("claudeAiOauth").ok_or("absent:Claude Code 没有用订阅账号登录")?;
-    let token = o.get("accessToken").and_then(|t| t.as_str()).ok_or("absent:Claude Code 没有用订阅账号登录")?;
+    let o = v.get("claudeAiOauth").ok_or(format!("absent:{}", crate::i18n::t("Claude Code 没有用订阅账号登录")))?;
+    let token = o.get("accessToken").and_then(|t| t.as_str()).ok_or(format!("absent:{}", crate::i18n::t("Claude Code 没有用订阅账号登录")))?;
     if o.get("expiresAt").and_then(|e| e.as_u64()).map(|e| e < crate::now_ms()).unwrap_or(false) {
-        return Err("Claude Code 的登录已过期，打开 Claude Code 用一下就会自动续期".into());
+        return Err(format!("soon:{}", crate::i18n::t("Claude Code 的登录已过期，打开 Claude Code 用一下就会自动续期")));
     }
     let plan = o.get("subscriptionType").and_then(|s| s.as_str()).map(|s| {
         let mut c = s.chars();
@@ -173,7 +178,7 @@ async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
         .header("User-Agent", "MicaBar")
         .send()
         .await
-        .map_err(|e| format!("连不上 Anthropic：{}", err_chain(&e)))?;
+        .map_err(|e| format!("soon:{}", crate::tr!("连不上 Anthropic：{0}", err_chain(&e))))?;
     let status = r.status();
     let retry = retry_after(&r);
     let body = r.text().await.unwrap_or_default();
@@ -182,14 +187,14 @@ async fn claude(proxy: Option<u16>) -> Result<Quota, String> {
     }
     let u: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let mut windows = Vec::new();
-    for (key, label) in [("five_hour", "5 小时"), ("seven_day", "每周"), ("seven_day_opus", "每周 · Opus"), ("seven_day_sonnet", "每周 · Sonnet")] {
+    for (key, label) in [("five_hour", crate::i18n::t("5 小时")), ("seven_day", crate::i18n::t("每周")), ("seven_day_opus", crate::i18n::t("每周 · Opus")), ("seven_day_sonnet", crate::i18n::t("每周 · Sonnet"))] {
         if let Some(w) = u.get(key).filter(|w| w.is_object()) {
             if let Some(used) = w.get("utilization").and_then(|x| x.as_f64()) {
                 windows.push(Window { label: label.into(), used, resets_at: w.get("resets_at").and_then(time_ms), group: None });
             }
         }
     }
-    Ok(Quota { plan, windows, source: Some("Anthropic 账户用量".into()), ..Default::default() })
+    Ok(Quota { plan, windows, source: Some(crate::i18n::t("Anthropic 账户用量").into()), ..Default::default() })
 }
 
 // ---------- Codex ----------
@@ -210,7 +215,7 @@ fn codex_window(w: &Value, now: u64) -> Option<Window> {
         .or_else(|| w.get("resets_at"))
         .and_then(time_ms)
         .or_else(|| w.get("reset_after_seconds").or_else(|| w.get("resets_in_seconds")).and_then(|x| x.as_f64()).map(|s| now + (s * 1000.0) as u64));
-    Some(Window { label: if secs > 0.0 { window_label(secs) } else { "额度".into() }, used, resets_at, group: None })
+    Some(Window { label: if secs > 0.0 { window_label(secs) } else { crate::i18n::t("额度").into() }, used, resets_at, group: None })
 }
 
 /// Newest rate-limit snapshot Codex wrote into its session logs (offline fallback).
@@ -277,23 +282,23 @@ async fn codex(proxy: Option<u16>) -> Result<Quota, String> {
                     let rl = u.get("rate_limit").cloned().unwrap_or(Value::Null);
                     let windows: Vec<Window> = ["primary_window", "secondary_window"].iter().filter_map(|k| rl.get(*k).and_then(|w| codex_window(w, now))).collect();
                     let plan = u.get("plan_type").and_then(|p| p.as_str()).map(|p| p.to_string());
-                    return Ok(Quota { plan, windows, source: Some("ChatGPT 账户用量".into()), ..Default::default() });
+                    return Ok(Quota { plan, windows, source: Some(crate::i18n::t("ChatGPT 账户用量").into()), ..Default::default() });
                 }
                 if let Some((windows, at)) = codex_from_sessions() {
-                    return Ok(Quota { windows, source: Some(format!("最近一次 Codex 会话（{}）", crate::fmt_time(at))), ..Default::default() });
+                    return Ok(Quota { windows, source: Some(crate::tr!("最近一次 Codex 会话（{0}）", crate::fmt_time(at))), ..Default::default() });
                 }
                 return Err(http_err("Codex", status, &body, retry));
             }
             Err(e) => {
                 if let Some((windows, at)) = codex_from_sessions() {
-                    return Ok(Quota { windows, source: Some(format!("最近一次 Codex 会话（{}）", crate::fmt_time(at))), ..Default::default() });
+                    return Ok(Quota { windows, source: Some(crate::tr!("最近一次 Codex 会话（{0}）", crate::fmt_time(at))), ..Default::default() });
                 }
-                return Err(format!("连不上 chatgpt.com：{}", err_chain(&e)));
+                return Err(format!("soon:{}", crate::tr!("连不上 chatgpt.com：{0}", err_chain(&e))));
             }
         }
     }
     if let Some((windows, at)) = codex_from_sessions() {
-        return Ok(Quota { windows, source: Some(format!("最近一次 Codex 会话（{}）", crate::fmt_time(at))), ..Default::default() });
+        return Ok(Quota { windows, source: Some(crate::tr!("最近一次 Codex 会话（{0}）", crate::fmt_time(at))), ..Default::default() });
     }
     // a custom model provider (API key / relay) has no subscription quota
     let cfg = std::fs::read_to_string(codex_home().join("config.toml")).unwrap_or_default();
@@ -302,9 +307,9 @@ async fn codex(proxy: Option<u16>) -> Result<Quota, String> {
         l.strip_prefix("model_provider").map(|r| r.trim_start().trim_start_matches('=').trim().trim_matches('"').to_string())
     });
     match provider {
-        Some(p) if !p.is_empty() && p != "openai" => Err("absent:Codex 用的是自定义服务商（按 API 计费），没有订阅额度".into()),
-        _ if codex_home().exists() => Err("absent:Codex 没有用 ChatGPT 账号登录（没有 auth.json）".into()),
-        _ => Err("absent:没找到 Codex".into()),
+        Some(p) if !p.is_empty() && p != "openai" => Err(format!("absent:{}", crate::i18n::t("Codex 用的是自定义服务商（按 API 计费），没有订阅额度")).into()),
+        _ if codex_home().exists() => Err(format!("absent:{}", crate::i18n::t("Codex 没有用 ChatGPT 账号登录（没有 auth.json）")).into()),
+        _ => Err(format!("absent:{}", crate::i18n::t("没找到 Codex")).into()),
     }
 }
 
@@ -382,7 +387,7 @@ fn ag_summary(v: &Value) -> Vec<Window> {
     let mut out = Vec::new();
     let Some(groups) = find_key(v, "groups").and_then(|g| g.as_array()) else { return out };
     for g in groups {
-        let name = g.get("displayName").and_then(|x| x.as_str()).unwrap_or("模型");
+        let name = g.get("displayName").and_then(|x| x.as_str()).map(str::to_string).unwrap_or_else(|| crate::i18n::t("模型"));
         let short = match name.trim_end_matches(" models").trim_end_matches(" Models") {
             "Claude and GPT" => "Claude / GPT".to_string(),
             s => s.to_string(),
@@ -393,10 +398,10 @@ fn ag_summary(v: &Value) -> Vec<Window> {
         for b in buckets {
             let Some(rem) = b.get("remainingFraction").and_then(|x| x.as_f64()) else { continue };
             let kind = match b.get("window").and_then(|w| w.as_str()) {
-                Some("5h") => "5 小时".to_string(),
-                Some("weekly") => "每周".to_string(),
+                Some("5h") => crate::i18n::t("5 小时").to_string(),
+                Some("weekly") => crate::i18n::t("每周").to_string(),
                 Some(o) => o.to_string(),
-                None => b.get("displayName").and_then(|x| x.as_str()).unwrap_or("额度").to_string(),
+                None => b.get("displayName").and_then(|x| x.as_str()).map(str::to_string).unwrap_or_else(|| crate::i18n::t("额度")),
             };
             out.push(Window {
                 label: format!("{short} · {kind}"),
@@ -451,7 +456,7 @@ async fn antigravity() -> Result<Quota, String> {
                 Some((p, csrf))
             });
             let Some((pid, csrf)) = server else {
-                return Err(if installed || !procs.is_empty() { "absent:Antigravity 没在运行（打开它后才能读到额度）".into() } else { "absent:没找到 Antigravity".into() });
+                return Err(if installed || !procs.is_empty() { format!("absent:{}", crate::i18n::t("Antigravity 没在运行（打开它后才能读到额度）")).into() } else { format!("absent:{}", crate::i18n::t("没找到 Antigravity")).into() });
             };
             (pid, csrf, Vec::new())
         }
@@ -469,7 +474,7 @@ async fn antigravity() -> Result<Quota, String> {
         .build()
         .map_err(|e| e.to_string())?;
     let body = serde_json::json!({ "metadata": { "ideName": "antigravity", "extensionName": "antigravity", "locale": "zh-CN" } });
-    let mut last_err = String::from("语言服务器没有响应");
+    let mut last_err = String::from(crate::i18n::t("语言服务器没有响应"));
     for port in ports {
         for scheme in ["https", "http"] {
             for method in ["RetrieveUserQuotaSummary", "GetUserStatus"] {
@@ -483,7 +488,7 @@ async fn antigravity() -> Result<Quota, String> {
                     .await;
                 let Ok(r) = r else { continue };
                 if !r.status().is_success() {
-                    last_err = format!("语言服务器返回 {}", r.status().as_u16());
+                    last_err = crate::tr!("语言服务器返回 {0}", r.status().as_u16());
                     continue;
                 }
                 let Ok(v) = r.json::<Value>().await else { continue };
@@ -497,7 +502,7 @@ async fn antigravity() -> Result<Quota, String> {
                     continue;
                 }
                 let plan = find_key(&v, "planName").and_then(|p| p.as_str()).map(|s| s.to_string());
-                return Ok(Quota { plan, windows, source: Some("Antigravity 本机语言服务器".into()), ..Default::default() });
+                return Ok(Quota { plan, windows, source: Some(crate::i18n::t("Antigravity 本机语言服务器").into()), ..Default::default() });
             }
         }
     }
@@ -508,7 +513,7 @@ async fn antigravity() -> Result<Quota, String> {
 
 async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
     let dir = std::env::var("GROK_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".grok"));
-    let text = std::fs::read_to_string(dir.join("auth.json")).map_err(|_| "absent:没找到 Grok 的登录（需要先用 grok CLI 登录一次）".to_string())?;
+    let text = std::fs::read_to_string(dir.join("auth.json")).map_err(|_| format!("absent:{}", crate::i18n::t("没找到 Grok 的登录（需要先用 grok CLI 登录一次）")).to_string())?;
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     // one entry per sign-in scope; take the first with a bearer key that hasn't expired
     let now = crate::now_ms();
@@ -522,7 +527,7 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
     let entry = entries
         .iter()
         .find(|e| e.get("expires_at").and_then(time_ms).map(|t| t > now).unwrap_or(true))
-        .ok_or("Grok 的登录已过期，运行一次 grok 就会自动续期")?;
+        .ok_or_else(|| format!("soon:{}", crate::i18n::t("Grok 的登录已过期，运行一次 grok 就会自动续期")))?;
     let key = entry.get("key").and_then(|k| k.as_str()).unwrap_or_default();
     let c = client(proxy)?;
     let get = |path: &str| {
@@ -532,7 +537,7 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
             .header("Accept", "application/json")
             .send()
     };
-    let r = get("/v1/billing?format=credits").await.map_err(|e| format!("连不上 grok.com：{}", err_chain(&e)))?;
+    let r = get("/v1/billing?format=credits").await.map_err(|e| format!("soon:{}", crate::tr!("连不上 grok.com：{0}", err_chain(&e))))?;
     let status = r.status();
     let retry = retry_after(&r);
     let body = r.text().await.unwrap_or_default();
@@ -544,7 +549,7 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
     let end = cfg.pointer("/currentPeriod/end").or_else(|| cfg.get("billingPeriodEnd")).and_then(time_ms);
     let mut windows = Vec::new();
     if let Some(p) = cfg.get("creditUsagePercent").and_then(|x| x.as_f64()) {
-        windows.push(Window { label: "本期额度".into(), used: p, resets_at: end, group: None });
+        windows.push(Window { label: crate::i18n::t("本期额度").into(), used: p, resets_at: end, group: None });
     }
     if let Some(list) = cfg.get("productUsage").and_then(|x| x.as_array()) {
         for p in list {
@@ -558,9 +563,9 @@ async fn grok(proxy: Option<u16>) -> Result<Quota, String> {
         Err(_) => None,
     };
     if windows.is_empty() {
-        return Err("Grok 没返回额度信息".into());
+        return Err(crate::i18n::t("Grok 没返回额度信息").into());
     }
-    Ok(Quota { plan, windows, source: Some("Grok 账户用量".into()), ..Default::default() })
+    Ok(Quota { plan, windows, source: Some(crate::i18n::t("Grok 账户用量").into()), ..Default::default() })
 }
 
 type Map<T> = std::sync::Mutex<std::collections::HashMap<String, T>>;
@@ -668,7 +673,7 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
     let until = backoff().lock().unwrap().get(tool).map(|b| b.1).unwrap_or(0);
     retry_at().lock().unwrap().remove(tool);
     let r = if at < until {
-        Err(format!("官方接口限流，{} 后再查", crate::fmt_time(until).get(..5).unwrap_or("")))
+        Err(crate::tr!("官方接口限流，{0} 后再查", crate::fmt_time(until).get(..5).unwrap_or("")))
     } else {
         let before = last_sent().lock().unwrap().insert(tool.to_string(), at);
         // without a proxy port client() refuses before anything is sent (after the local sign-in
@@ -678,7 +683,7 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
             "codex" => codex(proxy).await,
             "antigravity" => antigravity().await,
             "grok" => grok(proxy).await,
-            _ => Err("absent:未知工具".into()),
+            _ => Err(format!("absent:{}", crate::i18n::t("未知工具")).into()),
         };
         if matches!(&r, Err(e) if e == NO_PROXY) {
             // nothing went out: don't count it as a request (Claude's 10-minute spacing)
@@ -700,7 +705,7 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
             let step = (10u64 << (entry.0 - 1).min(3)).min(60) * 60_000;
             entry.1 = at + step.max(retry * 1000);
             crate::log(format!("ai {tool}: 429, next query after {}", crate::fmt_time(entry.1)));
-            Err(format!("官方接口限流，{} 后再查", crate::fmt_time(entry.1).get(..5).unwrap_or("")))
+            Err(crate::tr!("官方接口限流，{0} 后再查", crate::fmt_time(entry.1).get(..5).unwrap_or("")))
         }
         Ok(q) => {
             backoff().lock().unwrap().remove(tool);
@@ -711,10 +716,11 @@ pub async fn query(tool: &str, proxy: Option<u16>, prev: Option<&Quota>) -> Quot
     // tries that never reached the service (no connection yet, sign-in expired, tool not running):
     // look again in a minute instead of waiting the whole interval
     if let Err(e) = &r {
-        if e.starts_with("连不上") || e.contains("已过期") || e.starts_with("absent:") {
+        if e.starts_with("soon:") || e.starts_with("absent:") {
             retry_at().lock().unwrap().insert(tool.to_string(), at + 60_000);
         }
     }
+    let r = r.map_err(|e| if e == NO_PROXY { no_proxy_text() } else { e.strip_prefix("soon:").map(str::to_string).unwrap_or(e) });
     let q = match r {
         Ok(mut q) => {
             q.tool = tool.into();
@@ -741,7 +747,7 @@ pub fn err_chain(e: &dyn std::error::Error) -> String {
     while let Some(x) = src {
         let t = x.to_string();
         if !s.contains(&t) {
-            s.push_str("：");
+            s.push_str(&crate::i18n::t("："));
             s.push_str(&t);
         }
         src = x.source();

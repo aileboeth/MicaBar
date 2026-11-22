@@ -35,7 +35,13 @@ if (MANAGER) {
 }
 
 let regionNames = null;
-try { regionNames = new Intl.DisplayNames(["zh-CN"], { type: "region" }); } catch { /* ignore */ }
+try { regionNames = new Intl.DisplayNames([I18N.lang], { type: "region" }); } catch { /* ignore */ }
+// static text in index.html / manager.html
+for (const el of document.querySelectorAll("[title], [placeholder]")) {
+  if (el.title) el.title = tr(el.title);
+  if (el.placeholder) el.placeholder = tr(el.placeholder);
+}
+for (const el of document.querySelectorAll("[data-do='layout-edit']")) el.textContent = tr(el.textContent.trim());
 
 // ---------- settings ----------
 
@@ -61,11 +67,11 @@ const panelH = () => sz("panelH");
 
 const PRESETS = {
   onedark: { name: "One Dark Pro", base: "dark", bg: "#282c34", text: "#abb2bf", dim: "#8b93a1", dimmer: "#5c6370", blue: "#61afef", green: "#98c379", amber: "#e5c07b", red: "#e06c75", violet: "#c678dd" },
-  "github-dark": { name: "GitHub 深色", base: "dark", bg: "#0d1117", text: "#e6edf3", dim: "#9da7b3", dimmer: "#6e7681", blue: "#58a6ff", green: "#3fb950", amber: "#d29922", red: "#f85149", violet: "#bc8cff" },
-  "github-light": { name: "GitHub 浅色", base: "light", bg: "#ffffff", text: "#1f2328", dim: "#59636e", dimmer: "#818b98", blue: "#0969da", green: "#1a7f37", amber: "#9a6700", red: "#d1242f", violet: "#8250df" },
+  "github-dark": { name: tr("GitHub 深色"), base: "dark", bg: "#0d1117", text: "#e6edf3", dim: "#9da7b3", dimmer: "#6e7681", blue: "#58a6ff", green: "#3fb950", amber: "#d29922", red: "#f85149", violet: "#bc8cff" },
+  "github-light": { name: tr("GitHub 浅色"), base: "light", bg: "#ffffff", text: "#1f2328", dim: "#59636e", dimmer: "#818b98", blue: "#0969da", green: "#1a7f37", amber: "#9a6700", red: "#d1242f", violet: "#8250df" },
   dracula: { name: "Dracula", base: "dark", bg: "#282a36", text: "#f8f8f2", dim: "#b6b9c8", dimmer: "#6272a4", blue: "#8be9fd", green: "#50fa7b", amber: "#f1fa8c", red: "#ff5555", violet: "#bd93f9" },
   nightowl: { name: "Night Owl", base: "dark", bg: "#011627", text: "#d6deeb", dim: "#a1aab8", dimmer: "#637777", blue: "#82aaff", green: "#addb67", amber: "#ecc48d", red: "#ef5350", violet: "#c792ea" },
-  "solarized-light": { name: "Solarized 浅色", base: "light", bg: "#fdf6e3", text: "#073642", dim: "#586e75", dimmer: "#93a1a1", blue: "#268bd2", green: "#859900", amber: "#b58900", red: "#dc322f", violet: "#6c71c4" },
+  "solarized-light": { name: tr("Solarized 浅色"), base: "light", bg: "#fdf6e3", text: "#073642", dim: "#586e75", dimmer: "#93a1a1", blue: "#268bd2", green: "#859900", amber: "#b58900", red: "#dc322f", violet: "#6c71c4" },
 };
 const THEME_VARS = ["--tint-rgb", "--solid-rgb", "--text", "--dim", "--dimmer", "--glass-dim", "--glass-dimmer", "--blue", "--green", "--amber", "--red", "--violet", "--menu-bg", "--toast-bg", "--font-ui", "--bg-a"];
 
@@ -159,10 +165,10 @@ function speedHtml(up, down) {
 function ago(ms) {
   if (!ms) return "";
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 10) return "刚刚";
-  if (s < 60) return `${s} 秒前`;
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  return `${Math.floor(s / 3600)} 小时前`;
+  if (s < 10) return tr("刚刚");
+  if (s < 60) return `${tr("{0} 秒前", s)}`;
+  if (s < 3600) return `${tr("{0} 分钟前", Math.floor(s / 60))}`;
+  return `${tr("{0} 小时前", Math.floor(s / 3600))}`;
 }
 
 function routeClass(node) {
@@ -268,7 +274,7 @@ function setMaximized(v) {
   if (v && !MANAGER && !maxHint.shown && sget("shape.lineWhenMaximized", false) && sget("shape.style", "capsule") !== "line") {
     maxHint.shown = true;
     maxHint.until = Date.now() + 5000;
-    fireFlash("maxline", "前台窗口最大化了，岛缩成指示条（设置 → 收起外观里可以关）", "info");
+    fireFlash("maxline", tr("前台窗口最大化了，岛缩成指示条（设置 → 收起外观里可以关）"), "info");
     setTimeout(() => { pillLast = ""; renderPill(); applySize(); }, 5100);
   }
   applySize();
@@ -455,26 +461,26 @@ function pillItem(id, target) {
     case "rotate":
       return rotHtml(target);
     case "exit":
-      return `${target?.cc ? flagImg(target.cc) : ""}<span class="mono ip-text">${esc(target?.ip || (target?.error ? "出口检测失败" : "检测中…"))}</span>`;
+      return `${target?.cc ? flagImg(target.cc) : ""}<span class="mono ip-text">${esc(target?.ip || (target?.error ? tr("出口检测失败") : tr("检测中…")))}</span>`;
     case "conns":
-      return `<span class="mono pn pn3">${snap ? snap.connCount : 0}</span><span class="pill-unit">连接</span>`;
+      return `<span class="mono pn pn3">${snap ? snap.connCount : 0}</span><span class="pill-unit">${trc("pill", "连接")}</span>`;
     case "speed":
       return `<span class="mono pill-speed"><span class="u">↑</span><span class="sv">${shortRate(snap?.up)}</span> <span class="d">↓</span><span class="sv">${shortRate(snap?.down)}</span></span>`;
     case "latency": {
       const L = snap?.latency;
       if (!L?.at) return "";
-      if (L.ms == null) return `<span class="lat bad">节点${esc(L.error || "无响应")}</span>`;
+      if (L.ms == null) return `<span class="lat bad">${tr("节点{0}", esc(L.error || tr("无响应")))}</span>`;
       const c = L.ms < 200 ? "good" : L.ms < 500 ? "mid" : "bad";
       return `<span class="lat ${c} mono pn pn6">${Math.min(L.ms, 9999)}ms</span>`;
     }
     case "leaks": {
       const n = snap?.guard?.unacked || 0;
-      return n ? `<span class="pill-alert">⚠ 泄漏 ${n}</span>` : "";
+      return n ? `<span class="pill-alert">${tr("⚠ 泄漏 {0}", n)}</span>` : "";
     }
     case "cpu":
       return snap?.sys?.cpu != null ? `<span class="pill-unit">CPU</span><span class="mono pn pn4">${Math.round(snap.sys.cpu)}%</span>` : "";
     case "mem":
-      return snap?.sys?.memTotal ? `<span class="pill-unit">内存</span><span class="mono pn pn4">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
+      return snap?.sys?.memTotal ? `<span class="pill-unit">${tr("内存")}</span><span class="mono pn pn4">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
     case "clock":
       return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
     case "notes": {
@@ -485,7 +491,7 @@ function pillItem(id, target) {
         // one small icon per app with unread notes (newest first, overlapping, at most 3)
         const apps = [];
         for (const n of un) if (!apps.some((a) => a.key === n.key)) apps.push(n);
-        return `<span class="pill-nicons" title="${apps.map((a) => esc(a.app)).join("、")}">${apps.slice(0, 3).map((n) =>
+        return `<span class="pill-nicons" title="${apps.map((a) => esc(a.app)).join(tr("、"))}">${apps.slice(0, 3).map((n) =>
           `<span class="pni${n.id === notePop ? " pop" : ""}">${noteMini(n, false)}</span>`).join("")}${apps.length > 3 ? `<span class="pni-more mono">+${apps.length - 3}</span>` : ""}</span>`;
       }
       const u = un.length;
@@ -630,7 +636,7 @@ const rot = { key: null, at: 0, anim: false };
 // "🚀 代理设置" -> "代理设置"; long names cut to 8 characters
 function shortGroup(name, isDefault) {
   const s = String(name || "").replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}️‍]/gu, "").trim();
-  if (!s) return isDefault ? "代理" : "分组";
+  if (!s) return isDefault ? tr("代理") : tr("分组");
   return [...s].length > 8 ? [...s].slice(0, 8).join("") + "…" : s;
 }
 
@@ -640,9 +646,9 @@ function quotaClass(used) {
 }
 
 function shortWindow(label) {
-  if (label === "5 小时") return "5h";
-  if (label === "每周") return "周";
-  if (label === "每月") return "月";
+  if (label === tr("5 小时") || label === "5 小时") return "5h";
+  if (label === tr("每周") || label === "每周") return tr("周");
+  if (label === tr("每月") || label === "每月") return tr("月");
   return [...label].length > 8 ? [...label].slice(0, 8).join("") + "…" : label;
 }
 
@@ -733,9 +739,9 @@ function elapsed(ms) {
 }
 const durText = (ms) => {
   const s = Math.round(ms / 1000);
-  if (s < 60) return `${s} 秒`;
-  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
-  return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
+  if (s < 60) return `${tr("{0} 秒", s)}`;
+  if (s < 3600) return `${tr("{0} 分 {1} 秒", Math.floor(s / 60), s % 60)}`;
+  return `${tr("{0} 小时 {1} 分", Math.floor(s / 3600), Math.floor((s % 3600) / 60))}`;
 };
 
 // These items are rebuilt every second (their timers tick): looping animations get a negative
@@ -763,10 +769,10 @@ function agentsPill() {
   const ask = agents.filter((a) => a.state === "ask").length;
   const lead = agentLead();
   const st = ask ? "ask" : "run";
-  const tip = agents.map((a) => `${a.project}：${a.state === "ask" ? a.ask || "等你确认" : "运行 " + elapsed(Date.now() - a.started)}`).join("\n") + "\n点一下切到它的窗口";
-  const name = agents.length === 1 ? esc(lead.project) : `${agents.length} 个任务`;
+  const tip = agents.map((a) => `${tr("{0}：{1}", a.project, a.state === "ask" ? a.ask || tr("等你确认") : tr("运行 ") + elapsed(Date.now() - a.started))}`).join("\n") + tr("\n点一下切到它的窗口");
+  const name = agents.length === 1 ? esc(lead.project) : `${tr("{0} 个任务", agents.length)}`;
   const tail = ask
-    ? `<span class="ag-ask">${agents.length === 1 ? "等你确认" : `${ask} 个等你`}</span>`
+    ? `<span class="ag-ask">${agents.length === 1 ? tr("等你确认") : `${tr("{0} 个等你", ask)}`}</span>`
     : `<span class="ag-t mono">${elapsed(Date.now() - lead.started)}</span>`;
   return `<span class="ag-pill ${st}${liveEnter("pill-ag")}" style="${livePhase()}" data-ag="${esc(lead.id)}" title="${esc(tip)}"><span class="ag-ic ${st}">${brandIcon(lead.tool, 15)}<i class="ag-orbit"></i></span><span class="ag-name">${name}</span>${tail}</span>`;
 }
@@ -782,9 +788,9 @@ function diagPill() {
   if (!p || !sget("diag.on", true)) return "";
   const sys = p.kind === "sysproxy";
   const since = !sys && p.downSince ? `<span class="dg-t mono">${elapsed(Date.now() - p.downSince)}</span>` : "";
-  return `<span class="dg-pill ${sys ? "warn" : "bad"}${liveEnter("pill-dg")}" style="${livePhase()}" data-dg="1" title="${esc(p.verdict || "")}\n点一下看诊断">
+  return `<span class="dg-pill ${sys ? "warn" : "bad"}${liveEnter("pill-dg")}" style="${livePhase()}" data-dg="1" title="${tr("{0}\n点一下看诊断", esc(p.verdict || ""))}">
     <span class="dg-ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="${sys ? DG_PATH.plug : DG_PATH.wifiOff}"/></svg></span>
-    <span class="dg-txt">${esc(p.problem || "网络异常")}</span>${since}</span>`;
+    <span class="dg-txt">${esc(p.problem || tr("网络异常"))}</span>${since}</span>`;
 }
 
 // a short press on a live item: jump to the session's window / open the diagnosis
@@ -812,7 +818,7 @@ invoke("agents_get").then((l) => { agents = l || []; renderPill(); }).catch(() =
 
 // ----- network diagnosis -----
 
-const DG_STEPS = [["nic", "网卡"], ["gw", "路由器"], ["dns", "DNS"], ["net", "互联网"], ["core", "代理软件"], ["node", "节点"]];
+const DG_STEPS = [["nic", tr("网卡")], ["gw", tr("路由器")], ["dns", "DNS"], ["net", tr("互联网")], ["core", tr("代理软件")], ["node", tr("节点")]];
 const DG_ICON = {
   nic: "M3 5h18v11H3zM8 20h8M12 16v4",
   gw: "M3 14h18v6H3zM7 17h.01M11 17h.01M8.5 10a5 5 0 0 1 7 0M6 7.5a8.5 8.5 0 0 1 12 0",
@@ -846,7 +852,7 @@ function diagSheetHtml() {
   const chain = steps.length ? `<div class="dg-chain">${steps.map((s, i) => {
     const link = i ? `<span class="dg-link ${dgLink(steps[i - 1], s)}"><i></i></span>` : "";
     const badge = DG_BADGE[s.status] ? `<b class="dg-badge">${svgI(DG_BADGE[s.status], 10, 3.2)}</b>` : "";
-    const det = s.detail || (s.status === "run" ? "检测中…" : s.status === "skip" ? "跳过" : "");
+    const det = s.detail || (s.status === "run" ? tr("检测中…") : s.status === "skip" ? tr("跳过") : "");
     return `${link}<div class="dg-node ${s.status}" style="--i:${i}">
       <span class="dg-orb">${svgI(DG_ICON[s.id] || DG_ICON.net)}${badge}</span>
       <span class="dg-lab">${esc(s.label)}</span>
@@ -855,23 +861,23 @@ function diagSheetHtml() {
   }).join("")}</div>` : "";
   let verdict;
   if (running) {
-    verdict = `<div class="dg-verdict run"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>正在逐项检查…</b><span>从网卡一路查到节点，十秒内出结果</span></div></div>`;
+    verdict = `<div class="dg-verdict run"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>${tr("正在逐项检查…")}</b><span>${tr("从网卡一路查到节点，十秒内出结果")}</span></div></div>`;
   } else if (!r) {
-    verdict = `<div class="dg-verdict"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>还没检查过</b><span>点下面的按钮开始</span></div></div>`;
+    verdict = `<div class="dg-verdict"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>${tr("还没检查过")}</b><span>${tr("点下面的按钮开始")}</span></div></div>`;
   } else if (r.ok) {
     const n = (r.steps || []).filter((s) => s.status === "ok").length;
-    verdict = `<div class="dg-verdict ok"><span class="dg-big">${svgI(DG_BADGE.ok, 22, 2.6)}</span><div><b>${esc(r.verdict || "网络正常")}</b><span>${n ? `${n} 项检查都通过了` : esc(r.advice || "")}${r.tookMs ? ` · 用时 ${(r.tookMs / 1000).toFixed(1)} 秒` : ""}</span></div></div>`;
+    verdict = `<div class="dg-verdict ok"><span class="dg-big">${svgI(DG_BADGE.ok, 22, 2.6)}</span><div><b>${esc(r.verdict || tr("网络正常"))}</b><span>${n ? `${tr("{0} 项检查都通过了", n)}` : esc(r.advice || "")}${r.tookMs ? ` ${tr("· 用时 {0} 秒", (r.tookMs / 1000).toFixed(1))}` : ""}</span></div></div>`;
   } else {
-    const since = r.downSince ? `<span class="dg-since">已持续 ${durText(Date.now() - r.downSince)}</span>` : "";
+    const since = r.downSince ? `<span class="dg-since">${tr("已持续 {0}", durText(Date.now() - r.downSince))}</span>` : "";
     verdict = `<div class="dg-verdict ${r.kind === "sysproxy" ? "warn" : "bad"}"><span class="dg-big">${svgI(r.kind === "sysproxy" ? DG_PATH.plug : DG_BADGE.fail, 22, 2.4)}</span>
       <div><b>${esc(r.verdict)}</b>${since}<span>${esc(r.advice || "")}</span></div></div>
       ${r.fixes?.length ? `<div class="dg-fixes">${r.fixes.map((f) => `<button class="${f.primary ? "primary" : "ghost"}" data-dg-fix="${esc(f.id)}">${esc(f.label)}</button>`).join("")}</div>` : ""}`;
   }
-  const when = r && !running ? (r.kind === "sysproxy" && r.ok ? `刚刚处理 · ${ago(r.at)}` : `${r.auto ? "自动发现" : "手动检测"} · ${ago(r.at)}`) : running ? "检测中" : "";
-  return `<div class="as-head dg-head" data-sheet-drag><span class="dg-logo">${svgI(DG_PATH.pulse, 18, 2.2)}</span><div class="as-title"><b>网络诊断</b><span>${esc(when)}</span></div>
-      <button class="ghost" data-sheet-do="close" title="关闭（Esc）">✕</button></div>
+  const when = r && !running ? (r.kind === "sysproxy" && r.ok ? `${tr("刚刚处理 · {0}", ago(r.at))}` : `${r.auto ? tr("自动发现") : tr("手动检测")} · ${ago(r.at)}`) : running ? tr("检测中") : "";
+  return `<div class="as-head dg-head" data-sheet-drag><span class="dg-logo">${svgI(DG_PATH.pulse, 18, 2.2)}</span><div class="as-title"><b>${tr("网络诊断")}</b><span>${esc(when)}</span></div>
+      <button class="ghost" data-sheet-do="close" title="${tr("关闭（Esc）")}">✕</button></div>
     ${chain}${verdict}
-    <div class="m-actions end dg-foot"><button class="ghost" data-dg-fix="retry" ${running ? "disabled" : ""}>${running ? "检测中…" : "重新检测"}</button></div>`;
+    <div class="m-actions end dg-foot"><button class="ghost" data-dg-fix="retry" ${running ? "disabled" : ""}>${running ? tr("检测中…") : tr("重新检测")}</button></div>`;
 }
 
 function diagSync() {
@@ -928,10 +934,10 @@ listen("netdiag", (e) => {
   if (!s.running) { diag.running = false; diag.prog = null; } else diag.running = true;
   if (was?.kind === "sysproxy" && !diag.problem) {
     // fixed (restored here, by the client, or "是我关的"): the sheet says so instead of going blank
-    diag.last = { at: Date.now(), ok: true, kind: "sysproxy", steps: [], verdict: "系统代理好了", advice: "浏览器等程序会重新经过代理软件。", tookMs: 0 };
+    diag.last = { at: Date.now(), ok: true, kind: "sysproxy", steps: [], verdict: tr("系统代理好了"), advice: tr("浏览器等程序会重新经过代理软件。"), tookMs: 0 };
   }
   if (was?.kind === "net" && !diag.problem && diag.last?.recoveredMs) {
-    fireFlash("recover", `网络恢复了 · 断了 ${durText(diag.last.recoveredMs)}`, "info");
+    fireFlash("recover", `${tr("网络恢复了 · 断了 {0}", durText(diag.last.recoveredMs))}`, "info");
   } else if (!was && diag.problem) {
     invoke("log_js", { msg: `netdiag problem: ${diag.problem.problem}` }).catch(() => {});
   }
@@ -956,14 +962,14 @@ function renderLiveBar() {
   const chips = [];
   if (diag.problem && sget("diag.on", true)) {
     const sys = diag.problem.kind === "sysproxy";
-    chips.push(`<button class="lv-chip dg ${sys ? "warn" : "bad"}${liveEnter("bar-dg")}" style="${livePhase()}" data-do="diag-open" title="${esc(diag.problem.verdict || "")}">${svgI(sys ? DG_PATH.plug : DG_PATH.wifiOff, 13, 2.2)}<span>${esc(diag.problem.problem || "网络异常")}</span></button>`);
+    chips.push(`<button class="lv-chip dg ${sys ? "warn" : "bad"}${liveEnter("bar-dg")}" style="${livePhase()}" data-do="diag-open" title="${esc(diag.problem.verdict || "")}">${svgI(sys ? DG_PATH.plug : DG_PATH.wifiOff, 13, 2.2)}<span>${esc(diag.problem.problem || tr("网络异常"))}</span></button>`);
   }
   if (sget("ai.live", true)) {
     const list = [...agents].sort((a, b) => (a.state === "ask") === (b.state === "ask") ? a.started - b.started : a.state === "ask" ? -1 : 1);
     const shown = list.slice(0, chips.length ? 1 : 2);
     for (const a of shown) {
-      chips.push(`<button class="lv-chip ag ${a.state}${liveEnter("bar-" + a.id)}" style="${livePhase()}" data-do="agent-focus" data-id="${esc(a.id)}" title="${esc(a.project)}：${a.state === "ask" ? esc(a.ask || "等你确认") : "正在工作"}\n点一下切到它的窗口">
-        <span class="ag-ic ${a.state}">${brandIcon(a.tool, 13)}<i class="ag-orbit"></i></span><span class="lv-name">${esc(a.project)}</span>${a.state === "ask" ? `<span class="ag-ask">等你</span>` : `<span class="mono lv-t">${elapsed(Date.now() - a.started)}</span>`}</button>`);
+      chips.push(`<button class="lv-chip ag ${a.state}${liveEnter("bar-" + a.id)}" style="${livePhase()}" data-do="agent-focus" data-id="${esc(a.id)}" title="${tr("{0}：{1}\n点一下切到它的窗口", esc(a.project), a.state === "ask" ? esc(a.ask || tr("等你确认")) : tr("正在工作"))}">
+        <span class="ag-ic ${a.state}">${brandIcon(a.tool, 13)}<i class="ag-orbit"></i></span><span class="lv-name">${esc(a.project)}</span>${a.state === "ask" ? `<span class="ag-ask">${tr("等你")}</span>` : `<span class="mono lv-t">${elapsed(Date.now() - a.started)}</span>`}</button>`);
     }
     const more = agents.length - shown.length;
     if (more > 0) chips.push(`<button class="lv-chip more" data-do="page-ai">+${more}</button>`);
@@ -982,11 +988,11 @@ function agentsSectionHtml() {
   const rows = [...agents].sort((a, b) => (a.state === "ask") === (b.state === "ask") ? a.started - b.started : a.state === "ask" ? -1 : 1).map((a) => `
     <div class="ag-row ${a.state}" style="${livePhase()}">
       <span class="ag-ic big ${a.state}">${brandIcon(a.tool, 20)}<i class="ag-orbit"></i></span>
-      <div class="ag-main"><b>${esc(a.project)}</b><span>${a.state === "ask" ? esc(a.ask || "等你确认") : "正在工作"}</span></div>
+      <div class="ag-main"><b>${esc(a.project)}</b><span>${a.state === "ask" ? esc(a.ask || tr("等你确认")) : tr("正在工作")}</span></div>
       <span class="ag-time mono">${elapsed(Date.now() - a.started)}</span>
-      <button class="${a.state === "ask" ? "primary" : "ghost"}" data-do="agent-focus" data-id="${esc(a.id)}">${a.state === "ask" ? "去确认" : "切过去"}</button>
+      <button class="${a.state === "ask" ? "primary" : "ghost"}" data-do="agent-focus" data-id="${esc(a.id)}">${a.state === "ask" ? tr("去确认") : tr("切过去")}</button>
     </div>`).join("");
-  return `<div class="ag-list"><div class="ag-h">进行中<span>${agents.length}</span></div>${rows}</div>`;
+  return `<div class="ag-list"><div class="ag-h">${tr("进行中")}<span>${agents.length}</span></div>${rows}</div>`;
 }
 
 // ---------- threshold flashes (5 s message in the pill) ----------
@@ -1008,7 +1014,7 @@ function checkFlashes(s) {
   const proxyOn = s.proxy?.detected;
   const ip = (proxyOn ? s.exit?.proxy?.ip : s.exit?.direct?.ip) || null;
   if (sget("flash.exitChange", true) && ip && flash.prevExit && ip !== flash.prevExit) {
-    fireFlash("exit", `出口 IP 变了：${flash.prevExit} → ${ip}`, "warn");
+    fireFlash("exit", `${tr("出口 IP 变了：{0} → {1}", flash.prevExit, ip)}`, "warn");
   }
   if (ip) flash.prevExit = ip;
 
@@ -1017,9 +1023,9 @@ function checkFlashes(s) {
     flash.latAt = L.at;
     const limit = sget("flash.latencyMs", 800);
     if (L.ms == null) {
-      if (sget("flash.nodeDown", true) && flash.latOk) fireFlash("down", `节点无响应：${L.node || ""}`, "bad");
+      if (sget("flash.nodeDown", true) && flash.latOk) fireFlash("down", `${tr("节点无响应：{0}", L.node || "")}`, "bad");
     } else if (sget("flash.latencyHigh", true) && L.ms > limit && !(flash.latMs > limit)) {
-      fireFlash("lat", `节点延迟 ${L.ms} ms：${L.node || ""}`, "warn");
+      fireFlash("lat", `${tr("节点延迟 {0} ms：{1}", L.ms, L.node || "")}`, "warn");
     }
     flash.latOk = L.ms != null;
     flash.latMs = L.ms;
@@ -1033,7 +1039,7 @@ function checkFlashes(s) {
   const avg = before.length ? before.reduce((a, b) => a + b, 0) / before.length : tot;
   if (sget("flash.speedSpike", true) && before.length >= 6 && tot > limitB && avg < limitB / 3) {
     const top = (s.apps || []).filter((a) => !a.isProxy).sort((a, b) => b.up + b.down - (a.up + a.down))[0];
-    fireFlash("speed", `网速突增 ↓${shortRate(s.down)}/s ↑${shortRate(s.up)}/s${top ? " · " + top.name : ""}`, "info");
+    fireFlash("speed", `${tr("网速突增 ↓{0}/s ↑{1}/s{2}", shortRate(s.down), shortRate(s.up), top ? " · " + top.name : "")}`, "info");
   }
 }
 
@@ -1189,7 +1195,7 @@ function noteText(n) {
   const h = noteHidden(n);
   if (!h) return { title: n.title, body: n.body, sub: n.sub };
   // without the text: a neutral line (AI notes say what happened, not what they wrote)
-  const body = n.kind === "done" ? n.sub || "任务完成" : n.kind === "ask" ? "等你确认" : n.count > 1 ? `${n.count} 条新消息` : n.source === "flash" && n.app !== "微信" ? "需要你注意" : "新消息";
+  const body = n.kind === "done" ? n.sub || tr("任务完成") : n.kind === "ask" ? tr("等你确认") : n.count > 1 ? `${tr("{0} 条新消息", n.count)}` : n.source === "flash" && n.app !== "微信" ? tr("需要你注意") : tr("新消息");
   return { title: h === 2 ? n.app : n.title, body, sub: "" };
 }
 
@@ -1204,9 +1210,9 @@ function noteCardHtml(n, close) {
       <div class="n-body">${esc(t.body)}</div>
       ${t.sub ? `<div class="n-sub">${n.kind === "done" ? "✓ " : n.kind === "ask" ? "● " : ""}${esc(t.sub)}</div>` : ""}
       ${n.actions?.length ? `<div class="n-acts">${n.actions.map((a) => `<button class="n-act ${esc(a.style)}" data-nact="${esc(a.id)}">${esc(a.label)}</button>`).join("")}</div>`
-        : n.done ? `<div class="n-done ${n.done}${n.doneWarn ? " warn" : ""}">${n.doneWarn ? "⚠ " : n.done === "block" ? "⛔ " : "✓ "}${esc(n.doneMsg || (n.done === "block" ? "已阻止联网" : "已允许"))}</div>` : ""}
+        : n.done ? `<div class="n-done ${n.done}${n.doneWarn ? " warn" : ""}">${n.doneWarn ? "⚠ " : n.done === "block" ? "⛔ " : "✓ "}${esc(n.doneMsg || (n.done === "block" ? tr("已阻止联网") : tr("已允许")))}</div>` : ""}
     </div>
-    ${close ? `<button class="n-x" data-nclose="${n.id}" title="关闭" aria-label="关闭">✕</button>` : ""}
+    ${close ? `<button class="n-x" data-nclose="${n.id}" title="${tr("关闭")}" aria-label="${tr("关闭")}">✕</button>` : ""}
   </div>`;
 }
 
@@ -1262,7 +1268,7 @@ function renderNote() {
   const el = $("note");
   nst.fan = nst.hover && list.length > 1;
   el.innerHTML = nst.fan
-    ? `<div class="nfan">${list.slice(0, 4).map((n) => noteCardHtml(n, true)).join("")}${list.length > 4 ? `<div class="n-more">还有 ${list.length - 4} 条，在通知页里</div>` : ""}</div>`
+    ? `<div class="nfan">${list.slice(0, 4).map((n) => noteCardHtml(n, true)).join("")}${list.length > 4 ? `<div class="n-more">${tr("还有 {0} 条，在通知页里", list.length - 4)}</div>` : ""}</div>`
     : noteCardHtml(list[0], nst.hover);
   el.style.width = Math.min(window.innerWidth - 16, NOTE_W) + "px";
   nst.h = Math.ceil(el.offsetHeight);
@@ -1312,8 +1318,10 @@ function noteAction(btn) {
     n.done = act;
     // the outcome goes on the card itself (a flash in the pill would hide behind it); a rule that
     // can't take effect yet (firewall off…) is a warning and stays readable longer
-    n.doneMsg = msg || "";
-    n.doneWarn = /但|还要/.test(msg || "");
+    // "warn:" = a rule that cannot take effect yet (firewall off, system proxy without exit control)
+    n.doneWarn = /^warn:/.test(msg || "");
+    msg = (msg || "").replace(/^warn:/, "");
+    n.doneMsg = msg;
     if (nst.on && noteById(nst.active[0])?.id === id) { renderNote(); armNoteTimer(n.doneWarn ? 8000 : 2500); }
     else if (msg) say(msg, n.doneWarn);
     fnLoad(true);
@@ -1436,16 +1444,16 @@ function loadNotifyInfo() {
 
 function notesPageHtml() {
   if (!notifyInfo) loadNotifyInfo();
-  if (!sget("notify.on", true)) return `<div class="empty">通知已关闭（设置 → 通知）</div>`;
+  if (!sget("notify.on", true)) return `<div class="empty">${tr("通知已关闭（设置 → 通知）")}</div>`;
   const unread = unreadCount();
-  const head = `<div class="viz-head"><span class="viz-sel">${notes.length ? `今天 ${notes.length} 条${unread ? ` · ${unread} 条未读` : ""}` : "通知"}</span>
-    ${notifyInfo?.quiet ? `<span class="tag">勿扰中：只收进这里，不在岛上弹出</span>` : ""}<span class="sp"></span>
-    ${notes.length ? `${unread ? `<button class="ghost" data-do="notes-read">全部已读</button>` : ""}<button class="ghost" data-do="notes-clear">全部清除</button>` : ""}</div>`;
+  const head = `<div class="viz-head"><span class="viz-sel">${notes.length ? `${tr("今天 {0} 条{1}", notes.length, unread ? ` ${tr("· {0} 条未读", unread)}` : "")}` : tr("通知")}</span>
+    ${notifyInfo?.quiet ? `<span class="tag">${tr("勿扰中：只收进这里，不在岛上弹出")}</span>` : ""}<span class="sp"></span>
+    ${notes.length ? `${unread ? `<button class="ghost" data-do="notes-read">${tr("全部已读")}</button>` : ""}<button class="ghost" data-do="notes-clear">${tr("全部清除")}</button>` : ""}</div>`;
   if (!notes.length) {
     return `<div class="viz">${head}<div class="nc-empty">
       <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="${BELL}"/></svg>
-      <div class="nc-e1">没有通知</div>
-      <div class="m-hint">微信、Telegram、邮件等程序的提醒，Claude Code / Codex 完成任务或等你确认时，会在岛上弹出并收在这里。<br>设置 → 通知 里可以发一条测试通知看看样子。</div></div></div>`;
+      <div class="nc-e1">${tr("没有通知")}</div>
+      <div class="m-hint">${tr("微信、Telegram、邮件等程序的提醒，Claude Code / Codex 完成任务或等你确认时，会在岛上弹出并收在这里。")}<br>${tr("设置 → 通知 里可以发一条测试通知看看样子。")}</div></div></div>`;
   }
   const groups = new Map();
   for (const n of notes) {
@@ -1459,14 +1467,14 @@ function notesPageHtml() {
       : noteCardHtml(list[0]) + `<div class="ng-edges n${Math.min(2, list.length - 1)}"><i></i><i></i></div>`;
     const muted = !!(sget("notify.apps", {})?.[key] || {}).mute;
     return `<div class="ng ${open ? "open" : "stacked"}">
-      <div class="ng-head" data-ngkey="${esc(key)}"><span class="ng-app">${esc(list[0].app)}</span>${list.length > 1 ? `<span class="ng-n mono">${list.length}</span>` : ""}${muted ? `<span class="tag">已静音</span>` : ""}<span class="sp"></span>
-        ${list.length > 1 ? `<button class="link" data-ngtoggle="${esc(key)}">${open ? "收起" : "展开"}</button>` : ""}
-        <button class="link" data-ngmute="${esc(key)}" title="${muted ? "恢复这个程序的提醒" : "这个程序的通知只收进这里：不弹出、不亮红点"}">${muted ? "取消静音" : "静音"}</button>
-        <button class="ng-x" data-ngclear="${esc(key)}" title="清除这一组" aria-label="清除这一组">✕</button></div>
+      <div class="ng-head" data-ngkey="${esc(key)}"><span class="ng-app">${esc(list[0].app)}</span>${list.length > 1 ? `<span class="ng-n mono">${list.length}</span>` : ""}${muted ? `<span class="tag">${tr("已静音")}</span>` : ""}<span class="sp"></span>
+        ${list.length > 1 ? `<button class="link" data-ngtoggle="${esc(key)}">${open ? tr("收起") : tr("展开")}</button>` : ""}
+        <button class="link" data-ngmute="${esc(key)}" title="${muted ? tr("恢复这个程序的提醒") : tr("这个程序的通知只收进这里：不弹出、不亮红点")}">${muted ? tr("取消静音") : tr("静音")}</button>
+        <button class="ng-x" data-ngclear="${esc(key)}" title="${tr("清除这一组")}" aria-label="${tr("清除这一组")}">✕</button></div>
       <div class="ng-cards" ${open ? "" : `data-ngtoggle="${esc(key)}"`}>${cards}</div></div>`;
   }).join("");
   return `<div class="viz nc">${head}${body}
-    <div class="m-hint">点一条打开对应的程序。通知只在内存里，重启 MicaBar 后清空；消息内容不写硬盘、不写日志。</div></div>`;
+    <div class="m-hint">${tr("点一条打开对应的程序。通知只在内存里，重启 MicaBar 后清空；消息内容不写硬盘、不写日志。")}</div></div>`;
 }
 
 // mute / unmute a program's notes; muting also marks what is already there read (no red dot)
@@ -1479,7 +1487,7 @@ function toggleAppMute(key) {
         const ids = notes.filter((n) => n.key === key && !n.read).map((n) => n.id);
         if (ids.length) readNotes(ids);
       }
-      toast(on ? `已静音 ${name}：以后它的通知只收进通知页，不弹出、不亮红点` : `已恢复 ${name} 的提醒`);
+      toast(on ? `${tr("已静音 {0}：以后它的通知只收进通知页，不弹出、不亮红点", name)}` : `${tr("已恢复 {0} 的提醒", name)}`);
       afterNotesChange();
       renderList(true);
     })
@@ -1496,8 +1504,8 @@ function notesContext(e) {
   const name = notes.find((n) => n.key === key)?.app || key;
   const muted = !!(sget("notify.apps", {})?.[key] || {}).mute;
   openMenu(el, `<div class="m-title">${esc(name)}</div>
-    <button class="m-item" data-do="note-mute" data-key="${esc(key)}">${muted ? "取消静音" : "静音这个程序（不弹出、不亮红点）"}</button>
-    <button class="m-item" data-do="note-clear" data-key="${esc(key)}">清除这一组</button>`);
+    <button class="m-item" data-do="note-mute" data-key="${esc(key)}">${muted ? tr("取消静音") : tr("静音这个程序（不弹出、不亮红点）")}</button>
+    <button class="m-item" data-do="note-clear" data-key="${esc(key)}">${tr("清除这一组")}</button>`);
   return true;
 }
 
@@ -1537,10 +1545,10 @@ function notesClick(e) {
 
 // ---- registered organisation + network type of an exit IP (backend iporg.rs) ----
 const IP_KIND = {
-  home: ["家宽", "家庭宽带（住宅 IP）"],
-  business: ["商宽", "企业 / 商业宽带"],
-  hosting: ["机房", "数据中心 / 云服务器"],
-  mobile: ["手机网络", "手机流量（蜂窝网络）"],
+  home: [tr("家宽"), tr("家庭宽带（住宅 IP）")],
+  business: [tr("商宽"), tr("企业 / 商业宽带")],
+  hosting: [tr("机房"), tr("数据中心 / 云服务器")],
+  mobile: [tr("手机网络"), tr("手机流量（蜂窝网络）")],
 };
 const regOf = (r) => (sget("exit.ipOrg", true) !== false && r?.reg?.v >= 2 && r.reg) || null;
 // who to show: the Chinese carrier name for mainland IPs; for home / mobile lines the access
@@ -1561,15 +1569,15 @@ function ipTip(r) {
   const g = regOf(r);
   const k = g?.kind && IP_KIND[g.kind];
   return [
-    k ? `类型：${k[0]} · ${k[1]}` : g ? "类型：未知" : "",
-    g?.proxy ? "被标代理：有 IP 库把它列为代理 / VPN 出口，部分网站可能风控" : "",
-    g?.carrier ? `运营商：${g.carrier}` : "",
-    g?.isp ? `接入商：${g.isp}` : "",
-    g?.org && g.org !== g.isp ? `注册组织：${g.org}` : "",
-    r?.asn || r?.org ? `ASN：${[r.asn ? "AS" + r.asn : "", r.org || ""].filter(Boolean).join(" ")}` : "",
-    g?.host ? `反查域名：${g.host}` : "",
-    r?.cc ? `地区：${[country(r.cc), g?.region].filter(Boolean).join(" ")}` : "",
-    g ? `来源：${(g.src || []).join("、") || "—"}（免费库，仅供参考）${g.error ? "\n部分失败：" + g.error : ""}` : "",
+    k ? `${tr("类型：{0} · {1}", k[0], k[1])}` : g ? tr("类型：未知") : "",
+    g?.proxy ? tr("被标代理：有 IP 库把它列为代理 / VPN 出口，部分网站可能风控") : "",
+    g?.carrier ? `${tr("运营商：{0}", g.carrier)}` : "",
+    g?.isp ? `${tr("接入商：{0}", g.isp)}` : "",
+    g?.org && g.org !== g.isp ? `${tr("注册组织：{0}", g.org)}` : "",
+    r?.asn || r?.org ? `${tr("ASN：{0}", [r.asn ? "AS" + r.asn : "", r.org || ""].filter(Boolean).join(" "))}` : "",
+    g?.host ? `${tr("反查域名：{0}", g.host)}` : "",
+    r?.cc ? `${tr("地区：{0}", [country(r.cc), g?.region].filter(Boolean).join(" "))}` : "",
+    g ? `${tr("来源：{0}（免费库，仅供参考）{1}", (g.src || []).join(tr("、")) || "—", g.error ? tr("\n部分失败：") + g.error : "")}` : "",
   ].filter(Boolean).join("\n");
 }
 function kindTag(r) {
@@ -1577,7 +1585,7 @@ function kindTag(r) {
   if (!g) return "";
   const tip = esc(ipTip(r));
   const k = g.kind && IP_KIND[g.kind] ? `<span class="ipk k-${g.kind}" title="${tip}">${IP_KIND[g.kind][0]}</span>` : "";
-  return k + (g.proxy ? `<span class="ipk k-proxy" title="${tip}">被标代理</span>` : "");
+  return k + (g.proxy ? `<span class="ipk k-proxy" title="${tip}">${tr("被标代理")}</span>` : "");
 }
 
 // "AS4837 · adsl-pool.jx.chinaunicom.com": the reverse name without its IP-number labels
@@ -1591,18 +1599,18 @@ function hostLine(r) {
 
 function exitCard(title, r, opts = {}) {
   if (!r) {
-    return `<div class="exit-card"><div class="label">${esc(title)}</div><div class="ip mono">—</div><div class="meta">${opts.checking ? "检测中…" : "未检测"}</div></div>`;
+    return `<div class="exit-card"><div class="label">${esc(title)}</div><div class="ip mono">—</div><div class="meta">${opts.checking ? tr("检测中…") : tr("未检测")}</div></div>`;
   }
   const geo = regOf(r) ? placeText(r) : [r.cc ? country(r.cc) : "", r.asn ? `AS${r.asn}` : "", r.org || ""].filter(Boolean).join(" · ");
   let route = "";
   if (r.node) {
-    route = `<div class="route">${r.node.toUpperCase() === "DIRECT" ? "直连 DIRECT" : decorate(r.node)}${r.group ? " · " + decorate(r.group) : ""}</div>`;
+    route = `<div class="route">${r.node.toUpperCase() === "DIRECT" ? tr("直连 DIRECT") : decorate(r.node)}${r.group ? " · " + decorate(r.group) : ""}</div>`;
   } else if (opts.direct && r.via) {
-    route = `<div class="route" style="color:var(--green)">绕过代理 · 网卡 ${esc(r.via.split(" ")[0])}</div>`;
+    route = `<div class="route" style="color:var(--green)">${tr("绕过代理 · 网卡 {0}", esc(r.via.split(" ")[0]))}</div>`;
   } else if (opts.direct) {
-    route = `<div class="route" style="color:var(--dimmer)">未经代理</div>`;
+    route = `<div class="route" style="color:var(--dimmer)">${tr("未经代理")}</div>`;
   }
-  const same = opts.sameAs && r.ip && opts.sameAs === r.ip ? `<span class="same">· 与直连相同</span>` : "";
+  const same = opts.sameAs && r.ip && opts.sameAs === r.ip ? `<span class="same">${tr("· 与直连相同")}</span>` : "";
   return `<div class="exit-card${opts.direct ? " direct" : ""}">
     <div class="label">${esc(title)} ${r.ip ? kindTag(r) : ""} ${same}</div>
     ${r.ip ? `<div class="ip mono" title="${esc(ipTip(r))}">${flagImg(r.cc)}${esc(r.ip)}</div>` : `<div class="ip mono">—</div>`}
@@ -1610,7 +1618,7 @@ function exitCard(title, r, opts = {}) {
     ${route}
     ${hostLine(r)}
     ${r.error ? `<div class="error">${esc(r.error)}</div>` : ""}
-    ${opts.when ? `<div class="ex-when">${opts.checking ? "检测中…" : `${esc(opts.when)}检测`}</div>` : ""}
+    ${opts.when ? `<div class="ex-when">${opts.checking ? tr("检测中…") : `${tr("{0}检测", esc(opts.when))}`}</div>` : ""}
   </div>`;
 }
 
@@ -1644,17 +1652,17 @@ function groupExitCard(groups) {
   const exits = exitsByIp(groups);
   const rows = exits.map((x) => {
     const org = (regOf(x) ? placeText(x, false) : x.org) || (x.cc ? country(x.cc) : "");
-    const chips = x.groups.map((g) => `<span class="gx-chip" data-gname="${esc(g.group || "")}">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</span>`).join("");
+    const chips = x.groups.map((g) => `<span class="gx-chip" data-gname="${esc(g.group || "")}">${decorate(g.group)}${g.isDefault ? `<span class="tag">${tr("默认")}</span>` : ""}</span>`).join("");
     const key = x.ip || "err";
     // row 1: IP + tags, the groups on the right; row 2: node · region · who
     return `<div class="gx-row">
-      <div class="gx-ip mono" title="${esc(ipTip(x))}">${x.ip ? `<span class="ip-t">${flagImg(x.cc)}${esc(x.ip)}</span>${kindTag(x)}` : `<span class="crit">${esc(x.error ? "检测失败" : "—")}</span>`}</div>
+      <div class="gx-ip mono" title="${esc(ipTip(x))}">${x.ip ? `<span class="ip-t">${flagImg(x.cc)}${esc(x.ip)}</span>${kindTag(x)}` : `<span class="crit">${esc(x.error ? tr("检测失败") : "—")}</span>`}</div>
       <div class="gx-groups${gxOpen.has(key) ? " open" : ""}" data-gx="${esc(key)}">${chips}</div>
-      <div class="gx-meta" title="${esc(ipTip(x))}">${x.nodes.map(decorate).join("、")}${org ? `${x.nodes.length ? " · " : ""}${esc(org)}` : ""}</div>
+      <div class="gx-meta" title="${esc(ipTip(x))}">${x.nodes.map(decorate).join(tr("、"))}${org ? `${x.nodes.length ? " · " : ""}${esc(org)}` : ""}</div>
     </div>`;
   }).join("");
   const n = (groups || []).length;
-  return `<div class="exit-card gx"><div class="label">代理出口<span class="gx-sum">${exits.length} 个 IP · ${n} 个分组</span></div>${rows}</div>`;
+  return `<div class="exit-card gx"><div class="label">${tr("代理出口")}<span class="gx-sum">${tr("{0} 个 IP · {1} 个分组", exits.length, n)}</span></div>${rows}</div>`;
 }
 
 // keeps each chip line to one row: hides what doesn't fit and adds a "+N" chip
@@ -1676,7 +1684,7 @@ function foldBox(box) {
     const chips = [...box.querySelectorAll(".gx-chip")];
     chips.forEach((c) => (c.hidden = false));
     if (box.classList.contains("open")) {
-      if (chips.length > 1) box.insertAdjacentHTML("beforeend", `<span class="gx-chip gx-more" title="收起">收起</span>`);
+      if (chips.length > 1) box.insertAdjacentHTML("beforeend", `<span class="gx-chip gx-more" title="${tr("收起")}">${tr("收起")}</span>`);
       return true;
     }
     // the line doesn't wrap: a chip is out when its right edge passes the box's
@@ -1696,7 +1704,7 @@ function foldBox(box) {
       visible.pop().hidden = true;
       more.textContent = `+${++hidden}`;
     }
-    more.title = "还有：" + chips.filter((c) => c.hidden).map((c) => c.dataset.gname).join("、") + "（点开看全部）";
+    more.title = tr("还有：") + chips.filter((c) => c.hidden).map((c) => c.dataset.gname).join(tr("、")) + tr("（点开看全部）");
     return !out(more);
   }
 }
@@ -1716,16 +1724,16 @@ function renderExit() {
   const when = ex.lastCheck ? ago(ex.lastCheck) : "";
   if (p?.detected && ex.groups?.length) {
     html += groupExitCard(ex.groups);
-    html += exitCard("直连出口", ex.direct, { checking: ex.checking, direct: true, when });
+    html += exitCard(tr("直连出口"), ex.direct, { checking: ex.checking, direct: true, when });
   } else if (p?.detected) {
-    html += exitCard("代理出口", ex.proxy, { checking: ex.checking, sameAs: ex.direct?.ip });
-    html += exitCard("直连出口", ex.direct, { checking: ex.checking, direct: true, when });
+    html += exitCard(tr("代理出口"), ex.proxy, { checking: ex.checking, sameAs: ex.direct?.ip });
+    html += exitCard(tr("直连出口"), ex.direct, { checking: ex.checking, direct: true, when });
   } else {
-    html += exitCard("出口 IP（未检测到代理）", ex.direct, { checking: ex.checking, direct: true, when });
+    html += exitCard(tr("出口 IP（未检测到代理）"), ex.direct, { checking: ex.checking, direct: true, when });
   }
   html = `<div class="exit-wrap">${html}
-    <button id="diag-btn" class="${diag.problem ? "hot" : ""}" style="${livePhase()}" data-do="diag-open" title="网络诊断：从网卡一路查到节点">${svgI(DG_PATH.pulse, 13, 2.4)}</button>
-    <button id="refresh" class="${spin}" title="重新检测出口 IP${when ? "（上次 " + when + "）" : ""}">
+    <button id="diag-btn" class="${diag.problem ? "hot" : ""}" style="${livePhase()}" data-do="diag-open" title="${tr("网络诊断：从网卡一路查到节点")}">${svgI(DG_PATH.pulse, 13, 2.4)}</button>
+    <button id="refresh" class="${spin}" title="${tr("重新检测出口 IP{0}", when ? tr("（上次 ") + when + tr("）") : "")}">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
     </button></div>`;
   $("exit-row").innerHTML = html;
@@ -1736,15 +1744,15 @@ function renderProxyLine() {
   const p = snap?.proxy;
   const parts = [];
   if (!p || !p.detected) {
-    parts.push(`<span class="off">未检测到代理软件</span>`);
+    parts.push(`<span class="off">${tr("未检测到代理软件")}</span>`);
   } else {
-    parts.push(`<b>${esc(p.client || "代理")}</b>${p.coreVersion ? ` <span class="off">${esc(p.coreVersion)}</span>` : ""}`);
-    parts.push(p.systemProxy ? `系统代理 <span class="on">${esc(p.systemProxy)}</span>` : `系统代理 <span class="off">关</span>`);
-    parts.push(p.tun ? `TUN <span class="on">${esc(p.tun)}</span>` : `TUN <span class="off">关</span>`);
-    if (p.localPort) parts.push(`本地端口 <span class="mono">${p.localPort}</span>`);
+    parts.push(`<b>${esc(p.client || tr("代理"))}</b>${p.coreVersion ? ` <span class="off">${esc(p.coreVersion)}</span>` : ""}`);
+    parts.push(p.systemProxy ? `${tr("系统代理")} <span class="on">${esc(p.systemProxy)}</span>` : `${tr("系统代理")} <span class="off">${tr("关")}</span>`);
+    parts.push(p.tun ? `TUN <span class="on">${esc(p.tun)}</span>` : `TUN <span class="off">${tr("关")}</span>`);
+    if (p.localPort) parts.push(`${tr("本地端口")} <span class="mono">${p.localPort}</span>`);
     if (p.corePids?.length) {
-      if (p.mihomoOk) parts.push(`控制接口 <span class="on">已连接</span>`);
-      else if (p.mihomoError) parts.push(`控制接口 <span class="bad">${esc(p.mihomoError)}</span>`);
+      if (p.mihomoOk) parts.push(`${tr("控制接口")} <span class="on">${tr("已连接")}</span>`);
+      else if (p.mihomoError) parts.push(`${tr("控制接口")} <span class="bad">${esc(p.mihomoError)}</span>`);
     }
   }
   $("proxy-line").innerHTML = parts.map((x) => `<span>${x}</span>`).join("");
@@ -1762,7 +1770,7 @@ function matches(app, c) {
 
 // ---------- exit control helpers ----------
 
-const TARGET_LABEL = { proxy: "代理", direct: "直连", reject: "拦截" };
+const TARGET_LABEL = { proxy: tr("代理"), direct: tr("直连"), reject: tr("拦截") };
 let refs = []; // [app, conn] per rendered connection row, for the ⋯ menu
 let menuState = null;
 let nodesCache = null;
@@ -1786,13 +1794,13 @@ function findRule(kind, process, value) {
 
 function ruleText(r) {
   switch (r.kind) {
-    case "process": return `程序 <b>${esc(r.process)}</b>`;
-    case "domain": return `域名 <b>${esc(r.value)}</b>`;
-    case "suffix": return `主域 <b>*.${esc(r.value)}</b>`;
+    case "process": return `${tr("程序")} <b>${esc(r.process)}</b>`;
+    case "domain": return `${tr("域名")} <b>${esc(r.value)}</b>`;
+    case "suffix": return `${tr("主域")} <b>*.${esc(r.value)}</b>`;
     case "ip": return `IP <b class="mono">${esc(r.value)}</b>`;
-    case "process_domain": return `<b>${esc(r.process)}</b> 访问 <b>${esc(r.value)}</b>`;
-    case "process_suffix": return `<b>${esc(r.process)}</b> 访问 <b>*.${esc(r.value)}</b>`;
-    case "process_ip": return `<b>${esc(r.process)}</b> 访问 <b class="mono">${esc(r.value)}</b>`;
+    case "process_domain": return `<b>${esc(r.process)}</b> ${tr("访问")} <b>${esc(r.value)}</b>`;
+    case "process_suffix": return `<b>${esc(r.process)}</b> ${tr("访问")} <b>*.${esc(r.value)}</b>`;
+    case "process_ip": return `<b>${esc(r.process)}</b> ${tr("访问")} <b class="mono">${esc(r.value)}</b>`;
   }
   return esc(r.kind);
 }
@@ -1830,7 +1838,7 @@ function targetRow(label, kind, process, value) {
   const node = ctrl().node;
   const btn = (t) => {
     const on = cur && cur.target === t;
-    const title = t === "proxy" && node ? ` title="MicaBar 节点：${esc(node)}"` : "";
+    const title = t === "proxy" && node ? ` title="${esc(tr("MicaBar 节点：{0}", node))}"` : "";
     return `<button class="mt t-${t} ${on ? "on" : ""}"${title} data-set='${esc(JSON.stringify({ kind, process, value, target: on ? "default" : t }))}'>${TARGET_LABEL[t]}</button>`;
   };
   return `<div class="m-row"><div class="m-label">${label}</div><div class="m-btns">${btn("proxy")}${btn("direct")}${btn("reject")}</div></div>`;
@@ -1839,20 +1847,18 @@ function targetRow(label, kind, process, value) {
 function setupPrompt() {
   const c = ctrl();
   if (c.status === "unavailable") {
-    return `<div class="m-note">${esc(c.message || "出口控制需要 Clash Party / Mihomo Party。")}</div>`;
+    return `<div class="m-note">${esc(c.message || tr("出口控制需要 Clash Party / Mihomo Party。"))}</div>`;
   }
-  if (c.status === "working") return `<div class="m-note">${esc(c.message || "处理中…")}</div>`;
+  if (c.status === "working") return `<div class="m-note">${esc(c.message || tr("处理中…"))}</div>`;
   if (c.status === "pending") return `<div class="m-note">${esc(c.message || "")}</div>`;
-  return `<div class="m-note">${c.message && c.status === "available" ? esc(c.message) : "要按程序 / 域名指定出口，需要先给 Clash Party 加一个全局覆写，并重启它一次（断网约 3 秒）。"}${
-    c.status === "error" ? `<div class="m-err">${esc(c.message || "")}</div>` : ""
-  }</div><div class="m-actions"><button class="primary" data-do="enable">启用出口控制</button></div>`;
+  return `<div class="m-note">${c.message && c.status === "available" ? esc(c.message) : tr("要按程序 / 域名指定出口，需要先给 Clash Party 加一个全局覆写，并重启它一次（断网约 3 秒）。")}${c.status === "error" ? `<div class="m-err">${esc(c.message || "")}</div>` : ""}</div><div class="m-actions"><button class="primary" data-do="enable">${tr("启用出口控制")}</button></div>`;
 }
 
 function appMenu(app) {
   if (ctrl().status !== "active") return `<div class="m-title">${esc(app.name)}</div>${setupPrompt()}`;
-  return `<div class="m-title">整个程序走哪个出口</div>
+  return `<div class="m-title">${tr("整个程序走哪个出口")}</div>
     ${targetRow(`<b>${esc(app.exe)}</b>`, "process", app.exe, null)}
-    <div class="m-hint">再点一次已选中的按钮 = 恢复按规则</div>`;
+    <div class="m-hint">${tr("再点一次已选中的按钮 = 恢复按规则")}</div>`;
 }
 
 function connMenu(app, c) {
@@ -1860,24 +1866,24 @@ function connMenu(app, c) {
   const rows = [];
   if (c.host) {
     const md = mainDomain(c.host);
-    rows.push(targetRow(`域名 <b>${esc(c.host)}</b>`, "domain", null, c.host));
-    if (md !== c.host) rows.push(targetRow(`主域 <b>*.${esc(md)}</b>`, "suffix", null, md));
-    rows.push(targetRow(`仅 <b>${esc(app.exe)}</b> 访问 <b>*.${esc(md)}</b>`, "process_suffix", app.exe, md));
+    rows.push(targetRow(`${tr("域名")} <b>${esc(c.host)}</b>`, "domain", null, c.host));
+    if (md !== c.host) rows.push(targetRow(`${tr("主域")} <b>*.${esc(md)}</b>`, "suffix", null, md));
+    rows.push(targetRow(`${tr("仅")} <b>${esc(app.exe)}</b> ${tr("访问")} <b>*.${esc(md)}</b>`, "process_suffix", app.exe, md));
   } else if (c.remote) {
     rows.push(targetRow(`IP <b class="mono">${esc(c.remote)}</b>`, "ip", null, c.remote));
-    rows.push(targetRow(`仅 <b>${esc(app.exe)}</b> 访问这个 IP`, "process_ip", app.exe, c.remote));
+    rows.push(targetRow(`${tr("仅")} <b>${esc(app.exe)}</b> ${tr("访问这个 IP")}`, "process_ip", app.exe, c.remote));
   }
-  return `<div class="m-title">这条连接走哪个出口</div>${rows.join("")}<div class="m-hint">再点一次已选中的按钮 = 恢复按规则</div>`;
+  return `<div class="m-title">${tr("这条连接走哪个出口")}</div>${rows.join("")}<div class="m-hint">${tr("再点一次已选中的按钮 = 恢复按规则")}</div>`;
 }
 
 function exitChip(app) {
   const st = ctrl().status;
   if (st === "unavailable") return "";
   // the proxy client itself has no exit to choose: keep its place so the columns line up
-  if (app.isProxy) return `<span class="exit-chip ph" aria-hidden="true">出口</span>`;
+  if (app.isProxy) return `<span class="exit-chip ph" aria-hidden="true">${tr("出口")}</span>`;
   const r = findRule("process", app.exe, null);
   const t = r ? r.target : "";
-  return `<button class="exit-chip ${t ? "t-" + t : ""}" data-chip="${esc(app.key)}" title="选择这个程序的出口">${t ? TARGET_LABEL[t] : "出口"}</button>`;
+  return `<button class="exit-chip ${t ? "t-" + t : ""}" data-chip="${esc(app.key)}" title="${tr("选择这个程序的出口")}">${t ? TARGET_LABEL[t] : tr("出口")}</button>`;
 }
 
 function rulesTabHtml() {
@@ -1890,29 +1896,29 @@ function rulesTabHtml() {
       }).join("")}</div>`
     : "";
   const rules = c.rules.length
-    ? c.rules.slice().reverse().map((r) => `<div class="rule"><span class="rule-t t-${r.target}">${TARGET_LABEL[r.target]}</span><span class="rule-d">${ruleText(r)}</span><button class="rule-x" data-rm="${esc(r.id)}" title="删除">✕</button></div>`).join("")
-    : `<div class="empty">还没有出口规则。在「连接」页点程序右边的「出口」或连接右边的「⋯」来添加。</div>`;
+    ? c.rules.slice().reverse().map((r) => `<div class="rule"><span class="rule-t t-${r.target}">${TARGET_LABEL[r.target]}</span><span class="rule-d">${ruleText(r)}</span><button class="rule-x" data-rm="${esc(r.id)}" title="${tr("删除")}">✕</button></div>`).join("")
+    : `<div class="empty">${tr("还没有出口规则。在「连接」页点程序右边的「出口」或连接右边的「⋯」来添加。")}</div>`;
   return `<div class="node-bar">
-      <span>「代理」使用节点</span><b class="node-now">${c.node ? decorate(c.node) : "—"}</b>
-      <button data-do="nodes">${nodesCache ? "收起" : "换节点"}</button>
-      ${nodesCache ? `<button data-do="test">测速</button>` : ""}
+      <span>${tr("「代理」使用节点")}</span><b class="node-now">${c.node ? decorate(c.node) : "—"}</b>
+      <button data-do="nodes">${nodesCache ? tr("收起") : tr("换节点")}</button>
+      ${nodesCache ? `<button data-do="test">${tr("测速")}</button>` : ""}
     </div>${nodeList}
     <div class="rules">${rules}</div>
-    <div class="m-actions end"><button class="${confirmDisable ? "danger" : "ghost"}" data-do="disable">${confirmDisable ? "再点一次：移除覆写并重启 Clash Party（代理会断开几秒）" : "停用出口控制"}</button></div>`;
+    <div class="m-actions end"><button class="${confirmDisable ? "danger" : "ghost"}" data-do="disable">${confirmDisable ? tr("再点一次：移除覆写并重启 Clash Party（代理会断开几秒）") : tr("停用出口控制")}</button></div>`;
 }
 
 function bannerHtml() {
   const c = ctrl();
   let dismissed = false;
   try { dismissed = localStorage.getItem("ni-setup-dismissed") === "1"; } catch { /* ignore */ }
-  if (c.status === "working") return `<div class="banner">${esc(c.message || "处理中…")}</div>`;
-  if (c.status === "error") return `<div class="banner bad">${esc(c.message || "出错了")} <button data-do="enable">重试</button></div>`;
+  if (c.status === "working") return `<div class="banner">${esc(c.message || tr("处理中…"))}</div>`;
+  if (c.status === "error") return `<div class="banner bad">${esc(c.message || tr("出错了"))} <button data-do="enable">${tr("重试")}</button></div>`;
   if (c.status === "available" && c.message) {
-    return `<div class="banner">${esc(c.message)} <button class="primary" data-do="enable">更新</button></div>`;
+    return `<div class="banner">${esc(c.message)} <button class="primary" data-do="enable">${tr("更新")}</button></div>`;
   }
   if (c.status === "available" && !dismissed) {
-    return `<div class="banner">检测到 ${esc(c.client || "Clash Party")}：可以启用「出口控制」，按程序 / 域名指定走代理、直连或拦截。
-      <button class="primary" data-do="enable">启用</button><button class="ghost" data-do="dismiss">不再提示</button></div>`;
+    return `<div class="banner">${tr("检测到 {0}：可以启用「出口控制」，按程序 / 域名指定走代理、直连或拦截。", esc(c.client || "Clash Party"))}
+      <button class="primary" data-do="enable">${tr("启用")}</button><button class="ghost" data-do="dismiss">${tr("不再提示")}</button></div>`;
   }
   return "";
 }
@@ -1959,8 +1965,8 @@ function recordSpeed(s) {
 
 // flag emoji (regional-indicator pairs) can't be drawn in SVG text on Windows: drop them there
 const noFlags = (s) => String(s ?? "").replace(/[\u{1F1E6}-\u{1F1FF}]{2}\s*/gu, "");
-const hms = (t) => new Date(t).toLocaleTimeString("zh-CN", { hour12: false });
-const hm = (t) => new Date(t).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+const hms = (t) => new Date(t).toLocaleTimeString(I18N.lang, { hour12: false });
+const hm = (t) => new Date(t).toLocaleTimeString(I18N.lang, { hour12: false, hour: "2-digit", minute: "2-digit" });
 
 function fmtBytes(b) {
   if (!b || b < 1) return "0 B";
@@ -1999,14 +2005,14 @@ function speedRead(i) {
   const w = document.querySelector(".sp-when-t");
   // the crosshair carries the clock time; up here: how long ago
   const back = Math.round((v.xs[v.xs.length - 1] - v.xs[k]) / 1000);
-  if (w) w.textContent = i == null || back <= 0 ? "现在" : back < 60 ? `${back} 秒前` : `${Math.floor(back / 60)} 分 ${back % 60} 秒前`;
+  if (w) w.textContent = i == null || back <= 0 ? tr("现在") : back < 60 ? `${tr("{0} 秒前", back)}` : `${tr("{0} 分 {1} 秒前", Math.floor(back / 60), back % 60)}`;
   document.querySelector(".sp-hero")?.classList.toggle("scrubbing", i != null);
 }
 Charts.onScrub("speed", (i) => speedRead(i));
 
 function speedTabHtml() {
   const n = Math.min(speedRange, speedHist.t.length);
-  if (n < 2) return `<div class="empty">正在收集网速数据…</div>`;
+  if (n < 2) return `<div class="empty">${tr("正在收集网速数据…")}</div>`;
   const src = speedApp ? appHist.get(speedApp) : null;
   if (speedApp && !src) speedApp = null;
   const xs = speedHist.t.slice(-n);
@@ -2015,7 +2021,7 @@ function speedTabHtml() {
   speedView = { xs, up, down };
   const chart = Charts.line({
     id: "speed", width: chartW() - 28, height: 140, xs,
-    series: [{ name: "下载", cls: "s1", values: down }, { name: "上传", cls: "s2", values: up }],
+    series: [{ name: tr("下载"), cls: "s1", values: down }, { name: tr("上传"), cls: "s2", values: up }],
     fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, binary: true, area: true, scrub: true, slide: true,
   });
   const peakD = Math.max(...down, 0), peakU = Math.max(...up, 0);
@@ -2026,26 +2032,26 @@ function speedTabHtml() {
     .slice(0, 15);
   const rows = apps.map((a) => {
     const series = a.up.slice(-n).map((u, i) => u + a.down.slice(-n)[i]);
-    return `<div class="sp-row ${a.key === speedApp ? "sel" : ""} ${a.key === sheetApp ? "open" : ""}" data-sheet-app="${esc(a.key)}" tabindex="0" title="点一下看详情">
+    return `<div class="sp-row ${a.key === speedApp ? "sel" : ""} ${a.key === sheetApp ? "open" : ""}" data-sheet-app="${esc(a.key)}" tabindex="0" title="${tr("点一下看详情")}">
       ${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span>${Charts.spark(series, 110, 24, "s1", true)}
       <span class="speed mono">${speedHtml(a.up[a.up.length - 1], a.down[a.down.length - 1])}</span><span class="chev">›</span></div>`;
   }).join("");
-  const range = { 60: "1 分钟", 120: "2 分钟", 300: "5 分钟" }[speedRange] || "";
+  const range = { 60: tr("1 分钟"), 120: tr("2 分钟"), 300: tr("5 分钟") }[speedRange] || "";
   return `<div class="viz sp-viz">
-    <div class="viz-head">${segmented("srange", speedRange, [[60, "1 分钟"], [120, "2 分钟"], [300, "5 分钟"]])}
-      <span class="viz-sel">${src ? `只看 <b>${esc(src.name)}</b> <button data-sapp="">✕ 看全部</button>` : "全部程序"}</span></div>
+    <div class="viz-head">${segmented("srange", speedRange, [[60, tr("1 分钟")], [120, tr("2 分钟")], [300, tr("5 分钟")]])}
+      <span class="viz-sel">${src ? `${tr("只看")} <b>${esc(src.name)}</b> <button data-sapp="">${tr("✕ 看全部")}</button>` : tr("全部程序")}</span></div>
     <div class="hero-wrap"><i class="hero-glow"></i>
       <div class="sp-hero glow-card">
         <div class="sp-read">
-          <div class="sp-num"><span class="sp-k"><i class="key s1"></i>下载</span>${Odo.slot("sp-down", "big")}</div>
-          <div class="sp-num"><span class="sp-k"><i class="key s2"></i>上传</span>${Odo.slot("sp-up", "big")}</div>
-          <div class="sp-when"><span class="sp-when-t">现在</span><span class="sp-peak">${range}峰值 ↓${esc(fmtRate(peakD) || "0")} · ↑${esc(fmtRate(peakU) || "0")}</span></div>
+          <div class="sp-num"><span class="sp-k"><i class="key s1"></i>${tr("下载")}</span>${Odo.slot("sp-down", "big")}</div>
+          <div class="sp-num"><span class="sp-k"><i class="key s2"></i>${tr("上传")}</span>${Odo.slot("sp-up", "big")}</div>
+          <div class="sp-when"><span class="sp-when-t">${tr("现在")}</span><span class="sp-peak">${tr("{0}峰值 ↓{1} · ↑{2}", range, esc(fmtRate(peakD) || "0"), esc(fmtRate(peakU) || "0"))}</span></div>
         </div>
         ${chart}
       </div>
     </div>
-    <div class="g-head">按程序<span class="g-note">点一下看详情</span></div>
-    <div class="sp-rows cascade-items">${rows || `<div class="empty">这段时间没有程序在传数据</div>`}</div>
+    <div class="g-head">${tr("按程序")}<span class="g-note">${tr("点一下看详情")}</span></div>
+    <div class="sp-rows cascade-items">${rows || `<div class="empty">${tr("这段时间没有程序在传数据")}</div>`}</div>
   </div>`;
 }
 
@@ -2061,26 +2067,26 @@ function appSheetHtml(key) {
   const sum = (a) => a.reduce((s, v) => s + v, 0);
   const live = snap?.apps?.find((a) => a.key === key);
   const w = Math.max(300, (Sheet.body()?.clientWidth || $("panel").clientWidth - 16) - 32);
-  const range = { 60: "1 分钟", 120: "2 分钟", 300: "5 分钟" }[speedRange] || "这段时间";
+  const range = { 60: tr("1 分钟"), 120: tr("2 分钟"), 300: tr("5 分钟") }[speedRange] || tr("这段时间");
   const stat = (k, v) => `<div class="as-stat"><span>${k}</span><b>${v}</b></div>`;
   return `<div class="as-head" data-sheet-drag>${iconHtml(h)}<div class="as-title"><b>${esc(h.name)}</b><span>${esc(h.path || h.exe || "")}</span></div>
-      <button class="ghost" data-sheet-do="close" title="关闭（Esc）">✕</button></div>
+      <button class="ghost" data-sheet-do="close" title="${tr("关闭（Esc）")}">✕</button></div>
     <div class="as-read">
-      <div class="sp-num"><span class="sp-k"><i class="key s1"></i>下载</span>${Odo.slot("as-down", "big")}</div>
-      <div class="sp-num"><span class="sp-k"><i class="key s2"></i>上传</span>${Odo.slot("as-up", "big")}</div>
+      <div class="sp-num"><span class="sp-k"><i class="key s1"></i>${tr("下载")}</span>${Odo.slot("as-down", "big")}</div>
+      <div class="sp-num"><span class="sp-k"><i class="key s2"></i>${tr("上传")}</span>${Odo.slot("as-up", "big")}</div>
     </div>
-    ${n >= 2 ? Charts.line({ id: "app-sheet", width: w, height: 120, xs, series: [{ name: "下载", cls: "s1", values: down }, { name: "上传", cls: "s2", values: up }], fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, binary: true, area: true }) : ""}
+    ${n >= 2 ? Charts.line({ id: "app-sheet", width: w, height: 120, xs, series: [{ name: tr("下载"), cls: "s1", values: down }, { name: tr("上传"), cls: "s2", values: up }], fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, binary: true, area: true }) : ""}
     <div class="as-stats">
-      ${stat(`${range}下载`, fmtBytes(sum(down)))}
-      ${stat(`${range}上传`, fmtBytes(sum(up)))}
-      ${stat("下载峰值", fmtRate(Math.max(...down, 0)) || "0")}
-      ${stat("上传峰值", fmtRate(Math.max(...up, 0)) || "0")}
-      ${stat("当前连接", live ? live.conns.length : 0)}
-      ${live ? stat("出口", live.viaProxy ? "代理" : "直连") : ""}
+      ${stat(`${tr("{0}下载", range)}`, fmtBytes(sum(down)))}
+      ${stat(`${tr("{0}上传", range)}`, fmtBytes(sum(up)))}
+      ${stat(tr("下载峰值"), fmtRate(Math.max(...down, 0)) || "0")}
+      ${stat(tr("上传峰值"), fmtRate(Math.max(...up, 0)) || "0")}
+      ${stat(tr("当前连接"), live ? live.conns.length : 0)}
+      ${live ? stat(tr("出口"), live.viaProxy ? tr("代理") : tr("直连")) : ""}
     </div>
     <div class="m-actions end">
-      <button class="ghost" data-sheet-do="conns">看它的连接</button>
-      <button class="primary" data-sheet-do="focus">${speedApp === key ? "回到全部程序" : "在大图里只看它"}</button>
+      <button class="ghost" data-sheet-do="conns">${tr("看它的连接")}</button>
+      <button class="primary" data-sheet-do="focus">${speedApp === key ? tr("回到全部程序") : tr("在大图里只看它")}</button>
     </div>`;
 }
 
@@ -2157,15 +2163,15 @@ function loadTraffic(force) {
 }
 
 const dayName = (date, last) => {
-  if (date === last) return "今天";
+  if (date === last) return tr("今天");
   const d = new Date(date + "T00:00:00");
-  return `${d.getMonth() + 1}月${d.getDate()}日 周${"日一二三四五六"[d.getDay()]}`;
+  return d.toLocaleDateString(I18N.lang, { month: "short", day: "numeric", weekday: "short" });
 };
 
 function trafficTabHtml() {
   loadTraffic(false);
   const r = trafficData;
-  if (!r) return `<div class="empty">正在读取流量记录…</div>`;
+  if (!r) return `<div class="empty">${tr("正在读取流量记录…")}</div>`;
   const P = (x) => x.pu + x.pd, D = (x) => x.du + x.dd;
   const last = r.days[r.days.length - 1]?.date;
   const picked = trafficDays > 1 && trafficDay ? r.days.find((d) => d.date === trafficDay) : null;
@@ -2174,20 +2180,20 @@ function trafficTabHtml() {
   const tp = span.reduce((s, d) => s + P(d), 0), td = span.reduce((s, d) => s + D(d), 0);
   const tot = tp + td;
   const pct = (v) => (tot ? Math.round((v / tot) * 100) : 0);
-  const rangeLabel = picked ? dayName(picked.date, last) : trafficDays > 1 ? `最近 ${trafficDays} 天` : "今天";
-  const head = `<div class="viz-head">${segmented("tdays", trafficDays, [[1, "今天"], [7, "7 天"], [30, "30 天"]])}
-    <span class="legend"><span class="lg"><i class="key s1"></i>代理 ${fmtBytes(tp)}（${pct(tp)}%）</span><span class="lg"><i class="key s2"></i>直连 ${fmtBytes(td)}（${pct(td)}%）</span></span></div>`;
+  const rangeLabel = picked ? dayName(picked.date, last) : trafficDays > 1 ? `${tr("最近 {0} 天", trafficDays)}` : tr("今天");
+  const head = `<div class="viz-head">${segmented("tdays", trafficDays, [[1, tr("今天")], [7, tr("7 天")], [30, tr("30 天")]])}
+    <span class="legend"><span class="lg"><i class="key s1"></i>${tr("代理 {0}（{1}%）", fmtBytes(tp), pct(tp))}</span><span class="lg"><i class="key s2"></i>${tr("直连 {0}（{1}%）", fmtBytes(td), pct(td))}</span></span></div>`;
   const used = r.days.filter((d) => P(d) + D(d) > 0);
   const avg = trafficDays > 1 && used.length ? r.days.reduce((s, d) => s + P(d) + D(d), 0) / used.length : 0;
   const peak = trafficDays > 1 && used.length ? used.reduce((a, b) => (P(b) + D(b) > P(a) + D(a) ? b : a)) : null;
   const summary = `<div class="t-total"><span class="t-label">${esc(rangeLabel)}</span><span class="t-value">${fmtBytes(tot)}</span>
-    ${Charts.segbar([{ value: tp, cls: "s1" }, { value: td, cls: "s2" }], `代理 ${fmtBytes(tp)} · 直连 ${fmtBytes(td)}`)}</div>
-    ${!picked && peak ? `<div class="t-stats"><span>有流量的 ${used.length} 天平均 <b class="mono">${fmtBytes(avg)}</b>/天</span><span>最多 <button class="link" data-tday="${esc(peak.date)}">${esc(dayName(peak.date, last))}</button> <b class="mono">${fmtBytes(P(peak) + D(peak))}</b></span></div>` : ""}`;
+    ${Charts.segbar([{ value: tp, cls: "s1" }, { value: td, cls: "s2" }], `${tr("代理 {0} · 直连 {1}", fmtBytes(tp), fmtBytes(td))}`)}</div>
+    ${!picked && peak ? `<div class="t-stats"><span>${tr("有流量的 {0} 天平均", used.length)} <b class="mono">${fmtBytes(avg)}</b>${tr("/天")}</span><span>${tr("最多")} <button class="link" data-tday="${esc(peak.date)}">${esc(dayName(peak.date, last))}</button> <b class="mono">${fmtBytes(P(peak) + D(peak))}</b></span></div>` : ""}`;
   const chart = trafficDays > 1
     ? Charts.columns({
         id: "traffic", width: chartW(), height: trafficDays > 7 ? 170 : 160, cats: r.days.map((d) => d.date),
-        stacks: [{ name: "代理", cls: "s1", values: r.days.map(P) }, { name: "直连", cls: "s2", values: r.days.map(D) }],
-        fmtY: fmtBytes, fmtTick: tickRate, binary: true, fmtCat: (d) => (d === last ? "今天" : d.slice(5)),
+        stacks: [{ name: tr("代理"), cls: "s1", values: r.days.map(P) }, { name: tr("直连"), cls: "s2", values: r.days.map(D) }],
+        fmtY: fmtBytes, fmtTick: tickRate, binary: true, fmtCat: (d) => (d === last ? tr("今天") : d.slice(5)),
         pick: "tday", selected: picked?.date ?? null,
       })
     : "";
@@ -2195,18 +2201,17 @@ function trafficTabHtml() {
   const apps = r.apps.filter((a) => key(a) > 0).sort((a, b) => key(b) - key(a));
   const rows = apps.slice(0, 40).map((a) => `<div class="t-row">
       ${iconHtml({ path: a.path, name: a.name })}<span class="sp-name">${esc(a.name)}</span>
-      ${Charts.segbar([{ value: P(a), cls: "s1" }, { value: D(a), cls: "s2" }], `代理 ${fmtBytes(P(a))} · 直连 ${fmtBytes(D(a))}`)}
+      ${Charts.segbar([{ value: P(a), cls: "s1" }, { value: D(a), cls: "s2" }], `${tr("代理 {0} · 直连 {1}", fmtBytes(P(a)), fmtBytes(D(a)))}`)}
       <span class="t-num mono">${fmtBytes(key(a))}</span>
       <span class="t-sub mono">↑${fmtBytes(a.pu + a.du)} ↓${fmtBytes(a.pd + a.dd)}</span></div>`).join("");
-  const appHead = `<div class="g-head t-apphead">按程序（${esc(rangeLabel)}${picked || trafficDays === 1 ? "" : "合计"}）
-    ${picked ? `<button class="link" data-tday="">看全部 ${trafficDays} 天</button>` : ""}<span class="sp"></span>
-    ${segmented("tsort", trafficSort, [["total", "总量"], ["proxy", "代理"], ["direct", "直连"], ["down", "下载"], ["up", "上传"]])}</div>`;
+  const appHead = `<div class="g-head t-apphead">${tr("按程序（{0}{1}） {2}", esc(rangeLabel), picked || trafficDays === 1 ? "" : tr("合计"), picked ? `<button class="link" data-tday="">${tr("看全部 {0} 天", trafficDays)}</button>` : "")}<span class="sp"></span>
+    ${segmented("tsort", trafficSort, [["total", tr("总量")], ["proxy", tr("代理")], ["direct", tr("直连")], ["down", tr("下载")], ["up", tr("上传")]])}</div>`;
   return `<div class="viz">${head}${summary}${chart}
-    ${trafficDays > 1 && !picked ? `<div class="m-hint t-pick">点柱子看那一天的明细</div>` : ""}
+    ${trafficDays > 1 && !picked ? `<div class="m-hint t-pick">${tr("点柱子看那一天的明细")}</div>` : ""}
     ${appHead}
-    ${rows || `<div class="empty">${picked ? "这一天没有流量记录" : "还没有流量记录"}</div>`}
-    ${apps.length > 40 ? `<div class="m-hint">只列出前 40 个程序（共 ${apps.length} 个）</div>` : ""}
-    <div class="m-hint">「代理」= 经过代理节点的字节；其余算「直连」。数据每分钟存一次，存在本机，保留最近 30 天，更早的自动删除。</div></div>`;
+    ${rows || `<div class="empty">${picked ? tr("这一天没有流量记录") : tr("还没有流量记录")}</div>`}
+    ${apps.length > 40 ? `<div class="m-hint">${tr("只列出前 40 个程序（共 {0} 个）", apps.length)}</div>` : ""}
+    <div class="m-hint">${tr("「代理」= 经过代理节点的字节；其余算「直连」。数据每分钟存一次，存在本机，保留最近 30 天，更早的自动删除。")}</div></div>`;
 }
 
 // ---------- node quality tab ----------
@@ -2257,10 +2262,10 @@ function nodesTabHtml() {
   const main = latStats(hourOf(L?.node));
   const tile = (label, value, note = "") => `<div class="tile"><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
   const tiles = `<div class="tiles">
-    ${tile("主出口当前延迟", L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">✕ ${esc(L.error || "超时")}</span>`) : "—", L?.node ? decorate(L.node) : "")}
-    ${tile("1 小时平均", main.avg != null ? `${main.avg} ms` : "—")}
-    ${tile("1 小时 P95", main.p95 != null ? `${main.p95} ms` : "—")}
-    ${tile("1 小时丢包", main.loss != null ? `${main.loss}%` : "—", main.n ? `${main.n} 次测速` : "")}
+    ${tile(tr("主出口当前延迟"), L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">✕ ${esc(L.error || tr("超时"))}</span>`) : "—", L?.node ? decorate(L.node) : "")}
+    ${tile(tr("1 小时平均"), main.avg != null ? `${main.avg} ms` : "—")}
+    ${tile(tr("1 小时 P95"), main.p95 != null ? `${main.p95} ms` : "—")}
+    ${tile(tr("1 小时丢包"), main.loss != null ? `${main.loss}%` : "—", main.n ? `${tr("{0} 次测速", main.n)}` : "")}
   </div>`;
   // one line per node over the shared round timestamps
   const ats = [...new Set(pts.map((s) => s.at))].sort((a, b) => a - b);
@@ -2272,32 +2277,32 @@ function nodesTabHtml() {
         series,
         markers: ats.map((t, i) => {
           const down = nodes.filter((n) => byKey.get(`${n}|${t}`)?.ms === null);
-          return down.length ? { i, label: `${down.map(noFlags).join("、")} 无响应` } : null;
+          return down.length ? { i, label: `${tr("{0} 无响应", down.map(noFlags).join(tr("、")))}` } : null;
         }).filter(Boolean),
-        ref: { value: sget("flash.latencyMs", 800), label: `提示阈值 ${sget("flash.latencyMs", 800)} ms` },
+        ref: { value: sget("flash.latencyMs", 800), label: `${tr("提示阈值 {0} ms", sget("flash.latencyMs", 800))}` },
         fmtY: (v) => `${Math.round(v)} ms`, fmtTick: (v) => `${v}`, fmtX: (x) => hm(x.at),
       })
-    : `<div class="empty">${snap?.proxy?.mihomoOk ? "测速数据还不够，稍等一会儿" : "需要 mihomo 控制接口和代理出口节点才能测速"}</div>`;
+    : `<div class="empty">${snap?.proxy?.mihomoOk ? tr("测速数据还不够，稍等一会儿") : tr("需要 mihomo 控制接口和代理出口节点才能测速")}</div>`;
   // per node: which groups use it, now / average / P95 / loss over the last hour
   const groupsOf = (n) => (exitState?.groups || []).filter((g) => g.node === n).map((g) => shortGroup(g.group, g.isDefault));
   const table = nodes.length > 1 ? `<div class="lat-table">
-      <div class="lt-row lt-head"><span>节点</span><span>现在</span><span>平均</span><span>P95</span><span>丢包</span></div>
+      <div class="lt-row lt-head"><span>${tr("节点")}</span><span>${tr("现在")}</span><span>${tr("平均")}</span><span>P95</span><span>${tr("丢包")}</span></div>
       ${nodes.map((n) => {
         const st = latStats(hourOf(n));
         const cur = byKey.get(`${n}|${lastAt}`) || latHist.filter((s) => s.node === n).pop();
         const g = groupsOf(n);
-        return `<div class="lt-row"><span class="lt-node"><i class="key ${nodeCls(n)}"></i>${decorate(n)}${g.length ? `<span class="lt-groups">${esc(g.join("、"))}</span>` : ""}</span>
+        return `<div class="lt-row"><span class="lt-node"><i class="key ${nodeCls(n)}"></i>${decorate(n)}${g.length ? `<span class="lt-groups">${esc(g.join(tr("、")))}</span>` : ""}</span>
           <span class="mono">${cur ? (cur.ms != null ? `${cur.ms} ms` : `<span class="crit">✕</span>`) : "—"}</span>
           <span class="mono">${st.avg != null ? `${st.avg} ms` : "—"}</span><span class="mono">${st.p95 != null ? `${st.p95} ms` : "—"}</span>
           <span class="mono">${st.loss != null ? `${st.loss}%` : "—"}</span></div>`;
       }).join("")}
     </div>` : "";
   return `<div class="viz">
-    <div class="viz-head">${segmented("nrange", nodeRange, [[30, "30 分钟"], [120, "2 小时"], [100000, "全部"]])}
-      <span class="viz-sel">各出口节点的延迟（${{ saver: 60, balanced: 30, smooth: 15 }[sget("general.profile", "balanced")]} 秒测一次）</span>
-      <button class="ghost" data-do="lat-probe">立即测速</button></div>
+    <div class="viz-head">${segmented("nrange", nodeRange, [[30, tr("30 分钟")], [120, tr("2 小时")], [100000, tr("全部")]])}
+      <span class="viz-sel">${tr("各出口节点的延迟（{0} 秒测一次）", { saver: 60, balanced: 30, smooth: 15 }[sget("general.profile", "balanced")])}</span>
+      <button class="ghost" data-do="lat-probe">${tr("立即测速")}</button></div>
     ${tiles}${chart}${table}
-    <div class="m-hint">每个分组正在用的节点都会测（最多 4 个）。✕ 表示那次测速没有响应。主出口（默认分组）无响应 / 延迟超过阈值时会在胶囊上提示（设置里可改）。</div></div>`;
+    <div class="m-hint">${tr("每个分组正在用的节点都会测（最多 4 个）。✕ 表示那次测速没有响应。主出口（默认分组）无响应 / 延迟超过阈值时会在胶囊上提示（设置里可改）。")}</div></div>`;
 }
 
 // ---------- AI quota page ----------
@@ -2305,13 +2310,13 @@ function nodesTabHtml() {
 function untilText(ms) {
   if (!ms) return "";
   const s = Math.round((ms - Date.now()) / 1000);
-  if (s <= 0) return "已重置";
+  if (s <= 0) return tr("已重置");
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  const left = d ? `${d} 天 ${h} 小时` : h ? `${h} 小时 ${m} 分` : `${Math.max(1, m)} 分钟`;
+  const left = d ? `${tr("{0} 天 {1} 小时", d, h)}` : h ? `${tr("{0} 小时 {1} 分", h, m)}` : `${tr("{0} 分钟", Math.max(1, m))}`;
   const at = new Date(ms);
-  const day = ["日", "一", "二", "三", "四", "五", "六"][at.getDay()];
+  const day = at.toLocaleDateString(I18N.lang, { weekday: "short" });
   const same = at.toDateString() === new Date().toDateString();
-  return `${left}后重置（${same ? "今天" : "周" + day} ${hm(ms)}）`;
+  return `${tr("{0}后重置（{1} {2}）", left, same ? tr("今天") : day, hm(ms))}`;
 }
 
 // one meter per usage window: the share used, coloured only past the warning thresholds
@@ -2327,9 +2332,9 @@ function groupWindows(ws) {
   return [...groups.values()].map((g) => {
     const labels = g.members.map((w) => w.label);
     const families = [...new Set(labels.map((l) => l.replace(/\s*[(（].*$/, "").trim() || l))];
-    const label = labels.length === 1 ? labels[0] : families.length === 1 ? families[0] : `${families[0]} 等`;
-    const count = labels.length === 1 ? "" : families.length === 1 ? `${labels.length} 档` : `${labels.length} 个模型`;
-    return { label, count, used: g.used, resetsAt: g.resetsAt, members: g.members, title: labels.join("、") };
+    const label = labels.length === 1 ? labels[0] : families.length === 1 ? families[0] : `${tr("{0} 等", families[0])}`;
+    const count = labels.length === 1 ? "" : families.length === 1 ? `${tr("{0} 档", labels.length)}` : `${tr("{0} 个模型", labels.length)}`;
+    return { label, count, used: g.used, resetsAt: g.resetsAt, members: g.members, title: labels.join(tr("、")) };
   }).sort((a, b) => b.used - a.used);
 }
 
@@ -2345,15 +2350,15 @@ function quotaBars(q, compact, ringed = []) {
     rows = groups.slice(0, 3);
     const hidden = groups.slice(3).reduce((n, g) => n + g.members.length, 0);
     if (!compact) {
-      more = `<button class="q-more" data-ai-more="${esc(q.tool)}">${hidden ? `还有 ${hidden} 个模型，` : ""}展开全部 ${q.windows.length} 个模型</button>`;
+      more = `<button class="q-more" data-ai-more="${esc(q.tool)}">${tr("{0}展开全部 {1} 个模型", hidden ? `${tr("还有 {0} 个模型，", hidden)}` : "", q.windows.length)}</button>`;
     }
   } else if (q.windows.length >= GROUP_FROM && !compact) {
-    more = `<button class="q-more" data-ai-more="${esc(q.tool)}">收起</button>`;
+    more = `<button class="q-more" data-ai-more="${esc(q.tool)}">${tr("收起")}</button>`;
   }
   return rows.map((w) => {
     const pct = Math.max(0, Math.min(100, w.used));
     const pos = ringed.findIndex((r) => w.members.includes(r));
-    const where = pos < 0 ? "" : ringed.length > 1 ? (pos ? " · 内圈" : " · 外圈") : " · 环";
+    const where = pos < 0 ? "" : ringed.length > 1 ? (pos ? tr(" · 内圈") : tr(" · 外圈")) : tr(" · 环");
     return `<div class="qrow ${compact ? "compact" : ""}">
       <span class="q-name" title="${esc(w.title + where)}"><span class="q-lab">${esc(w.label)}</span>${w.count ? `<span class="q-cnt">${esc(w.count)}</span>` : ""}${where ? `<span class="q-where">${where}</span>` : ""}</span>
       <span class="meter" role="meter" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100"><i class="${quotaClass(pct)}" style="width:${pct}%"></i></span>
@@ -2364,11 +2369,11 @@ function quotaBars(q, compact, ringed = []) {
 }
 
 function aiCard(q, compact) {
-  const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">上次数据 · ${ago(q.at)}</span>` : "";
+  const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">${tr("上次数据 · {0}", ago(q.at))}</span>` : "";
   const ringed = !compact && q.windows?.length ? ringWindows(q) : [];
   const bars = q.windows?.length
     ? quotaBars(q, compact, ringed)
-    : `<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || "暂无数据")}</div>`;
+    : `<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || tr("暂无数据"))}</div>`;
   // big ring on the left (the share used of its outer window in the middle), the windows on the right
   const body = ringed.length
     ? `<div class="ai-body">${ringSvg(q, 88, ringed.length > 1 ? 7 : 9, `${Math.round(ringed[0].used)}%`)}<div class="ai-rows">${bars}</div></div>`
@@ -2382,17 +2387,15 @@ function aiCard(q, compact) {
 
 function aiTabHtml() {
   const live = agentsSectionHtml();
-  if (!sget("ai.on", true)) return live + `<div class="empty">AI 额度已关闭（设置 → 额度与圆环）</div>`;
-  const list = aiState.length ? aiState.map((q) => aiCard(q, false)).join("") : `<div class="empty">正在查询…</div>`;
+  if (!sget("ai.on", true)) return live + `<div class="empty">${tr("AI 额度已关闭（设置 → 额度与圆环）")}</div>`;
+  const list = aiState.length ? aiState.map((q) => aiCard(q, false)).join("") : `<div class="empty">${tr("正在查询…")}</div>`;
   const last = aiState.reduce((m, q) => Math.max(m, q.at || 0), 0);
   const via = [...new Set(aiState.filter((q) => q.via).map((q) => q.via))];
   return `${live}<div class="viz">
-    <div class="viz-head"><span class="viz-sel">订阅额度：用了多少、什么时候重置${last ? ` · 更新于 ${ago(last)}` : ""}${via.length ? ` · 经代理 127.0.0.1:${via.join("/")}` : ""}</span>
-      <button class="ghost" data-do="ai-refresh">立即刷新</button></div>
+    <div class="viz-head"><span class="viz-sel">${tr("订阅额度：用了多少、什么时候重置{0}{1}", last ? ` ${tr("· 更新于 {0}", ago(last))}` : "", via.length ? ` ${tr("· 经代理 127.0.0.1:{0}", via.join("/"))}` : "")}</span>
+      <button class="ghost" data-do="ai-refresh">${tr("立即刷新")}</button></div>
     <div class="ai-grid">${list}</div>
-    <div class="m-hint">用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方；
-      查询一律经代理软件的本地端口发出，找不到端口就先不查，不会直连；
-      登录过期时请打开对应工具用一下，它会自己续期。每 ${sget("ai.interval", 10)} 分钟查一次（Claude 至少 10 分钟一次，点「立即刷新」也一样：官方接口限流很严，可能还和 Claude Code 自己共用）；结果会保存，重启 MicaBar 不会重新查。</div>
+    <div class="m-hint">${tr("用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方； 查询一律经代理软件的本地端口发出，找不到端口就先不查，不会直连； 登录过期时请打开对应工具用一下，它会自己续期。每 {0} 分钟查一次（Claude 至少 10 分钟一次，点「立即刷新」也一样：官方接口限流很严，可能还和 Claude Code 自己共用）；结果会保存，重启 MicaBar 不会重新查。", sget("ai.interval", 10))}</div>
   </div>`;
 }
 
@@ -2449,19 +2452,19 @@ function sysPageHtml() {
       </div>
       <div class="sm-bars" id="sm-bars"></div>
       <div class="sm-legend" id="sm-legend"></div>
-      <div class="sm-meter"><span class="sm-k">内存</span><b class="mono" id="sm-mem">–</b><span class="meter"><i id="sm-mem-bar"></i></span></div>
-      <div class="sm-meter" id="sm-vram-row"><span class="sm-k">显存</span><b class="mono" id="sm-vram">–</b><span class="meter"><i id="sm-vram-bar"></i></span></div>
+      <div class="sm-meter"><span class="sm-k">${tr("内存")}</span><b class="mono" id="sm-mem">–</b><span class="meter"><i id="sm-mem-bar"></i></span></div>
+      <div class="sm-meter" id="sm-vram-row"><span class="sm-k">${tr("显存")}</span><b class="mono" id="sm-vram">–</b><span class="meter"><i id="sm-vram-bar"></i></span></div>
       <div class="sm-net">
         <div><span class="sm-k">↓</span><b class="mono" id="sm-down">–</b><span id="sm-down-line" class="sm-line"></span></div>
         <div><span class="sm-k">↑</span><b class="mono" id="sm-up">–</b><span id="sm-up-line" class="sm-line"></span></div>
       </div>
     </div>
     <div class="sm-apps">
-      <div class="viz-head">${segmented("sys-view", sysView, [["apps", "占用最多的程序"], ["startup", "开机自启"]])}${sysView === "apps"
-        ? `<span id="sm-name" class="sm-name"></span><span class="sp"></span>${segmented("sys-sort", sysSort, [["cpu", "CPU"], ["mem", "内存"]])}`
-        : `<span id="su-count" class="sm-name"></span><span class="sp"></span><button data-do="startup-refresh">刷新</button>`}</div>
-      <div id="sm-list" class="sm-list ${sysView === "startup" ? "su-list" : ""}"><div class="empty">正在读取…</div></div>
-      ${sysView === "startup" ? `<div class="m-hint">关掉 = 下次开机不自动启动它，和任务管理器「启动应用」是同一个开关，随时能再打开，不删除任何东西。计划任务和系统服务的自启不在这里。</div>` : ""}
+      <div class="viz-head">${segmented("sys-view", sysView, [["apps", tr("占用最多的程序")], ["startup", tr("开机自启")]])}${sysView === "apps"
+        ? `<span id="sm-name" class="sm-name"></span><span class="sp"></span>${segmented("sys-sort", sysSort, [["cpu", "CPU"], ["mem", tr("内存")]])}`
+        : `<span id="su-count" class="sm-name"></span><span class="sp"></span><button data-do="startup-refresh">${tr("刷新")}</button>`}</div>
+      <div id="sm-list" class="sm-list ${sysView === "startup" ? "su-list" : ""}"><div class="empty">${tr("正在读取…")}</div></div>
+      ${sysView === "startup" ? `<div class="m-hint">${tr("关掉 = 下次开机不自动启动它，和任务管理器「启动应用」是同一个开关，随时能再打开，不删除任何东西。计划任务和系统服务的自启不在这里。")}</div>` : ""}
     </div>
   </div>`;
 }
@@ -2488,15 +2491,15 @@ function renderStartup() {
   const self = sget("general.autostart", false);
   const n = startupItems.filter((i) => i.enabled).length + (self ? 1 : 0);
   const c = $("su-count");
-  if (c) c.textContent = ` · ${n} 个会开机启动`;
+  if (c) c.textContent = ` ${tr("· {0} 个会开机启动", n)}`;
   // rows hold still under the pointer (the switch just clicked already shows its new state)
   if (list.matches(":hover") && !list.querySelector(".empty")) return measurePanel();
   const row = (i) => `<div class="sm-app su-row ${i.enabled ? "" : "off"}">
       ${iconHtml({ name: i.name, path: i.path })}
-      <span class="sm-app-name" title="${esc(i.command)}">${esc(i.name)}<span class="sub">${i.desc ? esc(i.desc) + " · " : ""}${esc(i.source)}${i.missing ? ` · <span class="su-miss">程序文件已不存在</span>` : ""}</span></span>
-      <input type="checkbox" class="su-sw" data-su="${esc(i.id)}" ${i.enabled ? "checked" : ""} title="${i.enabled ? "开机自启：开" : "开机自启：关"}">
+      <span class="sm-app-name" title="${esc(i.command)}">${esc(i.name)}<span class="sub">${i.desc ? esc(i.desc) + " · " : ""}${esc(i.source)}${i.missing ? ` · <span class="su-miss">${tr("程序文件已不存在")}</span>` : ""}</span></span>
+      <input type="checkbox" class="su-sw" data-su="${esc(i.id)}" ${i.enabled ? "checked" : ""} title="${i.enabled ? tr("开机自启：开") : tr("开机自启：关")}">
     </div>`;
-  const mine = row({ id: "self", name: "MicaBar", desc: null, source: "计划任务 · 登录 10 秒后以管理员权限启动", command: "设置 → 常规 → 开机自启", path: appInfo?.exe || null, enabled: self, missing: false });
+  const mine = row({ id: "self", name: "MicaBar", desc: null, source: tr("计划任务 · 登录 10 秒后以管理员权限启动"), command: tr("设置 → 常规 → 开机自启"), path: appInfo?.exe || null, enabled: self, missing: false });
   list.innerHTML = mine + startupItems.map(row).join("");
   measurePanel();
 }
@@ -2514,7 +2517,7 @@ document.addEventListener("change", async (e) => {
       if (it) it.enabled = on;
     }
     el.closest(".su-row")?.classList.toggle("off", !on);
-    toast(on ? "已设为开机自启" : "已关闭开机自启（随时能再打开）");
+    toast(on ? tr("已设为开机自启") : tr("已关闭开机自启（随时能再打开）"));
   } catch (err) {
     el.checked = !on;
     toast(String(err), true);
@@ -2540,17 +2543,17 @@ function updateSys() {
     bars.innerHTML = d.cores.map((_, i) => `<div class="sm-bar ${kind(i)}"><i></i><s></s></div>`).join("") +
       (d.gpu != null ? `<div class="sm-bar gpu"><i></i><span>GPU</span></div>` : "");
     $("sm-legend").innerHTML = hybrid
-      ? `<span><i class="key sk-p"></i>性能核</span><span><i class="key sk-e"></i>能效核</span><span class="sm-dim">每根柱子一个逻辑核心，横线是最近的峰值</span>`
-      : `<span class="sm-dim">每根柱子一个逻辑核心，横线是最近的峰值</span>`;
+      ? `<span><i class="key sk-p"></i>${tr("性能核")}</span><span><i class="key sk-e"></i>${tr("能效核")}</span><span class="sm-dim">${tr("每根柱子一个逻辑核心，横线是最近的峰值")}</span>`
+      : `<span class="sm-dim">${tr("每根柱子一个逻辑核心，横线是最近的峰值")}</span>`;
   }
   [...bars.children].forEach((b, i) => {
     const v = i < d.cores.length ? d.cores[i] : d.gpu;
     b.firstElementChild.style.height = `${Math.max(2, v)}%`;
     if (i < d.cores.length) {
       b.querySelector("s").style.bottom = `${Math.min(98, corePeak[i] ?? v)}%`;
-      b.title = `${kind(i) === "e" ? "能效核" : hybrid ? "性能核" : "核心"} ${i}：${Math.round(v)}%`;
+      b.title = `${tr("{0} {1}：{2}%", kind(i) === "e" ? tr("能效核") : hybrid ? tr("性能核") : tr("核心"), i, Math.round(v))}`;
     } else {
-      b.title = `GPU：${Math.round(v)}%${d.gpuName ? " · " + d.gpuName : ""}`;
+      b.title = `${tr("GPU：{0}%{1}", Math.round(v), d.gpuName ? " · " + d.gpuName : "")}`;
     }
   });
   set("sm-name", d.cpuName ? ` · ${d.cpuName}` : "");
@@ -2581,10 +2584,10 @@ function updateSys() {
   if (list.matches(":hover") || !$("menu").hidden) return measurePanel();
   const rows = [...d.apps].sort((a, b) => (sysSort === "mem" ? b.mem - a.mem : b.cpu - a.cpu || b.mem - a.mem)).slice(0, MANAGER ? 16 : 8);
   list.innerHTML = rows.map((a) => `<div class="sm-app">
-      ${iconHtml(a)}<span class="sm-app-name">${esc(a.name)}${a.procs > 1 ? `<span class="sub">${a.procs} 个进程</span>` : ""}</span>
+      ${iconHtml(a)}<span class="sm-app-name">${esc(a.name)}${a.procs > 1 ? `<span class="sub">${tr("{0} 个进程", a.procs)}</span>` : ""}</span>
       <span class="mono sm-num ${sysSort === "cpu" ? "on" : ""}">${a.cpu.toFixed(1)}%</span><span class="mono sm-num ${sysSort === "mem" ? "on" : ""}">${fmtMem(a.mem)}</span>
-      ${a.killable ? `<button class="sm-end" data-do="proc-end" data-name="${esc(a.name)}" data-n="${a.procs}" title="结束 ${esc(a.name)}">✕</button>` : `<span></span>`}
-    </div>`).join("") || `<div class="empty">正在读取…</div>`;
+      ${a.killable ? `<button class="sm-end" data-do="proc-end" data-name="${esc(a.name)}" data-n="${a.procs}" title="${tr("结束 {0}", esc(a.name))}">✕</button>` : `<span></span>`}
+    </div>`).join("") || `<div class="empty">${tr("正在读取…")}</div>`;
   measurePanel();
 }
 
@@ -2600,8 +2603,8 @@ const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart
 function musicPageHtml() {
   const m = media;
   musicKey = m ? `${m.title}|${m.artist}|${m.playing}|${m.cover ? m.cover.length : 0}|${m.duration > 0}` : "";
-  if (!sget("media.on", true)) return `<div class="empty">正在播放已关闭（设置 → 正在播放）</div>`;
-  if (!m?.title) return `<div class="music empty-music"><div class="mu-cover none">♪</div><div class="mu-info"><div class="mu-title">没有正在播放的内容</div><div class="mu-artist">网易云、QQ 音乐、Spotify、浏览器里的视频等开始播放后会显示在这里</div></div></div>`;
+  if (!sget("media.on", true)) return `<div class="empty">${tr("正在播放已关闭（设置 → 正在播放）")}</div>`;
+  if (!m?.title) return `<div class="music empty-music"><div class="mu-cover none">♪</div><div class="mu-info"><div class="mu-title">${tr("没有正在播放的内容")}</div><div class="mu-artist">${tr("网易云、QQ 音乐、Spotify、浏览器里的视频等开始播放后会显示在这里")}</div></div></div>`;
   const cover = m.cover && sget("media.cover", true) ? m.cover : null;
   const pos = mediaPos(m);
   return `<div class="music" id="music">
@@ -2614,9 +2617,9 @@ function musicPageHtml() {
       ${m.duration > 0 ? `<div class="mu-bar"><i id="mu-fill" style="width:${(pos / m.duration) * 100}%"></i></div>
         <div class="mu-time mono"><span id="mu-pos">${mmss(pos)}</span><span>${mmss(m.duration)}</span></div>` : ""}
       <div class="mu-ctl">
-        <button data-do="media-prev" title="上一首">${ICON.prev}</button>
-        <button class="main" data-do="media-toggle" title="播放 / 暂停">${m.playing ? ICON.pause : ICON.play}</button>
-        <button data-do="media-next" title="下一首">${ICON.next}</button>
+        <button data-do="media-prev" title="${tr("上一首")}">${ICON.prev}</button>
+        <button class="main" data-do="media-toggle" title="${tr("播放 / 暂停")}">${m.playing ? ICON.pause : ICON.play}</button>
+        <button data-do="media-next" title="${tr("下一首")}">${ICON.next}</button>
       </div>
       ${m.playing ? vizBars(12, true) : ""}
     </div>
@@ -2634,11 +2637,11 @@ setInterval(() => {
 // ---------- pages of the open island (icons at its top) ----------
 
 const PAGE_DEFS = {
-  net: ["网络", "M3 17l5-6 4 4 8-9"],
-  sys: ["系统监控", "M6 20V12M10 20V6M14 20V10M18 20V4"],
-  music: ["音乐", "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
-  ai: ["AI 额度", "M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5"],
-  notes: ["通知", "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
+  net: [tr("网络"), "M3 17l5-6 4 4 8-9"],
+  sys: [tr("系统监控"), "M6 20V12M10 20V6M14 20V10M18 20V4"],
+  music: [tr("音乐"), "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
+  ai: [tr("AI 额度"), "M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5"],
+  notes: [tr("通知"), "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
 };
 const PAGE_TABS = new Set(["sys", "music", "ai", "notes"]);
 let netTab = "conns";
@@ -2693,10 +2696,10 @@ const ICON = {
 // (Antigravity: Gemini, Claude / GPT; others: one row), columns = windows (5 小时, 每周…), so the
 // block grows by pools, not by windows, and many tools spread sideways instead of downwards.
 function aiMini(q) {
-  const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">上次数据 · ${ago(q.at)}</span>` : "";
+  const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">${tr("上次数据 · {0}", ago(q.at))}</span>` : "";
   const head = `<div class="am-head"><b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}</div>`;
   const ws = (q.windows || []).filter((w) => w && w.used != null);
-  if (!ws.length) return `<div class="am">${head}<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || "暂无数据")}</div></div>`;
+  if (!ws.length) return `<div class="am">${head}<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || tr("暂无数据"))}</div></div>`;
   if (ws.length >= GROUP_FROM) return `<div class="am">${head}${quotaBars(q, true)}</div>`;
   const kindOf = (w) => (w.group && w.label.startsWith(w.group + " · ") ? w.label.slice(w.group.length + 3) : w.label);
   const kinds = [...new Set(ws.map(kindOf))];
@@ -2706,7 +2709,7 @@ function aiMini(q) {
   const cell = (w) => {
     if (!w) return `<span class="am-cell none">—</span>`;
     const pct = Math.max(0, Math.min(100, w.used));
-    return `<span class="am-cell" title="${esc(`${w.label}：已用 ${Math.round(pct)}%，${untilText(w.resetsAt)}`)}"><span class="meter"><i class="${quotaClass(pct)}" style="width:${pct}%"></i></span><span class="q-pct mono">${Math.round(pct)}%</span></span>`;
+    return `<span class="am-cell" title="${esc(`${tr("{0}：已用 {1}%，{2}", w.label, Math.round(pct), untilText(w.resetsAt))}`)}"><span class="meter"><i class="${quotaClass(pct)}" style="width:${pct}%"></i></span><span class="q-pct mono">${Math.round(pct)}%</span></span>`;
   };
   const top = `${named ? "<span></span>" : ""}${kinds.map((k) => `<span class="am-kind">${esc(k)}</span>`).join("")}`;
   const rows = pools.map((p) => `${named ? `<span class="am-pool" title="${esc(p)}">${esc(p)}</span>` : ""}${kinds.map((k) => cell(ws.find((w) => (w.group || "") === p && kindOf(w) === k))).join("")}`).join("");
@@ -2714,7 +2717,7 @@ function aiMini(q) {
 }
 
 function homeHtml() {
-  if (!snap) return `<div class="empty">正在读取…</div>`;
+  if (!snap) return `<div class="empty">${tr("正在读取…")}</div>`;
   loadTraffic(false);
   loadLatency();
   const ex = exitState || {};
@@ -2725,24 +2728,24 @@ function homeHtml() {
     for (const g of groups) {
       const geo = placeText(g);
       exitCards.push(`<div class="hx tilt" data-tilt="5">
-        <div class="hx-g">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}${g.ip ? kindTag(g) : ""}</div>
-        <div class="hx-ip mono">${g.ip ? `${flagImg(g.cc)}${esc(g.ip)}` : `<span class="crit">${g.error ? "检测失败" : "—"}</span>`}</div>
+        <div class="hx-g">${decorate(g.group)}${g.isDefault ? `<span class="tag">${tr("默认")}</span>` : ""}${g.ip ? kindTag(g) : ""}</div>
+        <div class="hx-ip mono">${g.ip ? `${flagImg(g.cc)}${esc(g.ip)}` : `<span class="crit">${g.error ? tr("检测失败") : "—"}</span>`}</div>
         <div class="hx-m">${esc(geo)}</div>
         ${g.node ? `<div class="hx-n">${decorate(g.node)}</div>` : ""}
       </div>`);
     }
   } else if (p.detected && ex.proxy) {
     const r = ex.proxy;
-    exitCards.push(`<div class="hx tilt" data-tilt="5"><div class="hx-g">代理出口${r.ip ? kindTag(r) : ""}</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc(placeText(r))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
+    exitCards.push(`<div class="hx tilt" data-tilt="5"><div class="hx-g">${tr("代理出口{0}", r.ip ? kindTag(r) : "")}</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc(placeText(r))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
   }
   const d = ex.direct;
-  exitCards.push(`<div class="hx direct tilt" data-tilt="5"><div class="hx-g">直连出口${p.detected ? "" : "（未检测到代理）"}${d?.ip ? kindTag(d) : ""}</div>
+  exitCards.push(`<div class="hx direct tilt" data-tilt="5"><div class="hx-g">${tr("直连出口{0}{1}", p.detected ? "" : tr("（未检测到代理）"), d?.ip ? kindTag(d) : "")}</div>
     <div class="hx-ip mono">${d?.ip ? `${flagImg(d.cc)}${esc(d.ip)}` : "—"}</div>
     <div class="hx-m">${esc(d ? placeText(d) : "")}</div></div>`);
   const groupNote = p.detected && !groups.length
     ? ctrl().status === "active"
-      ? `<div class="m-hint">分组出口要等覆写更新后才有：在「出口」页点「更新」</div>`
-      : `<div class="m-hint">启用「出口控制」后，可以分别看到每个分组（AI、流媒体…）的出口 IP</div>`
+      ? `<div class="m-hint">${tr("分组出口要等覆写更新后才有：在「出口」页点「更新」")}</div>`
+      : `<div class="m-hint">${tr("启用「出口控制」后，可以分别看到每个分组（AI、流媒体…）的出口 IP")}</div>`
     : "";
 
   const r = trafficData;
@@ -2752,99 +2755,99 @@ function homeHtml() {
   const leaks = snap.guard?.unacked || 0;
   const tile = (label, value, note = "", go = "") => `<div class="tile tilt ${go ? "go" : ""}" ${go ? `data-tab="${go}"` : ""}><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
   const tiles = `<div class="tiles home-tiles">
-    ${tile("网速", `<span class="mono">${speedHtml(snap.up, snap.down)}</span>`, "", "speed")}
-    ${tile("连接", `<span class="mono">${snap.connCount}</span>`, `${snap.apps.filter((a) => a.conns.length).length} 个程序`, "conns")}
-    ${tile("今日流量", r ? fmtBytes(tp + td) : "—", r && tp + td ? `代理 ${Math.round((tp / (tp + td)) * 100)}% · 直连 ${Math.round((td / (tp + td)) * 100)}%` : "", "traffic")}
-    ${tile("节点延迟", L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">无响应</span>`) : "—", L?.node ? decorate(L.node) : "", "nodes")}
-    ${tile("泄漏预警", leaks ? `<span class="crit">${leaks}</span>` : "0", leaks ? "点击查看" : "没有泄漏", "guard")}
+    ${tile(tr("网速"), `<span class="mono">${speedHtml(snap.up, snap.down)}</span>`, "", "speed")}
+    ${tile(tr("连接"), `<span class="mono">${snap.connCount}</span>`, `${tr("{0} 个程序", snap.apps.filter((a) => a.conns.length).length)}`, "conns")}
+    ${tile(tr("今日流量"), r ? fmtBytes(tp + td) : "—", r && tp + td ? `${tr("代理 {0}% · 直连 {1}%", Math.round((tp / (tp + td)) * 100), Math.round((td / (tp + td)) * 100))}` : "", "traffic")}
+    ${tile(tr("节点延迟"), L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">${tr("无响应")}</span>`) : "—", L?.node ? decorate(L.node) : "", "nodes")}
+    ${tile(tr("泄漏预警"), leaks ? `<span class="crit">${leaks}</span>` : "0", leaks ? tr("点击查看") : tr("没有泄漏"), "guard")}
   </div>`;
 
   const n = Math.min(120, speedHist.t.length);
   const chart = n >= 2
     ? Charts.line({
         id: "home-speed", width: chartW(), height: 130, xs: speedHist.t.slice(-n),
-        series: [{ name: "下载", cls: "s1", values: speedHist.down.slice(-n) }, { name: "上传", cls: "s2", values: speedHist.up.slice(-n) }],
+        series: [{ name: tr("下载"), cls: "s1", values: speedHist.down.slice(-n) }, { name: tr("上传"), cls: "s2", values: speedHist.up.slice(-n) }],
         fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, endLabels: true, binary: true, area: true,
       })
     : "";
 
   const top = snap.apps.filter((a) => !a.isProxy && a.conns.length).slice(0, 8).map((a) => `<div class="top-row" data-tab="conns">
       ${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span>
-      <span class="route-tag ${a.viaProxy ? "proxy" : "direct"}">${a.viaProxy ? "代理" : "直连"}</span>
+      <span class="route-tag ${a.viaProxy ? "proxy" : "direct"}">${a.viaProxy ? tr("代理") : tr("直连")}</span>
       <span class="app-count mono">${a.conns.length}</span>
       <span class="speed mono">${speedHtml(a.up, a.down)}</span></div>`).join("");
 
   const ai = sget("ai.on", true) && aiState.length
-    ? `<div class="h-sec"><div class="h-head"><b>AI 额度</b><span class="sp"></span><button class="link" data-tab="ai">详情</button></div>
-        ${(() => { const l = aiState.filter((q) => q.status !== "absent"); return l.length ? `<div class="am-list">${l.map(aiMini).join("")}</div>` : `<div class="q-msg">没找到已登录的 AI 工具</div>`; })()}</div>`
+    ? `<div class="h-sec"><div class="h-head"><b>${tr("AI 额度")}</b><span class="sp"></span><button class="link" data-tab="ai">${tr("详情")}</button></div>
+        ${(() => { const l = aiState.filter((q) => q.status !== "absent"); return l.length ? `<div class="am-list">${l.map(aiMini).join("")}</div>` : `<div class="q-msg">${tr("没找到已登录的 AI 工具")}</div>`; })()}</div>`
     : "";
 
   return `<div class="home">
-    <div class="h-sec"><div class="h-head"><b>出口</b><span class="sp"></span>${ex.lastCheck ? `<span class="h-note">${ex.checking ? "检测中…" : "上次检测 " + ago(ex.lastCheck)}</span>` : ""}<button class="ghost" data-do="exit-refresh">重新检测</button></div>
+    <div class="h-sec"><div class="h-head"><b>${tr("出口")}</b><span class="sp"></span>${ex.lastCheck ? `<span class="h-note">${ex.checking ? tr("检测中…") : tr("上次检测 ") + ago(ex.lastCheck)}</span>` : ""}<button class="ghost" data-do="exit-refresh">${tr("重新检测")}</button></div>
       <div class="hx-grid">${exitCards.join("")}</div>${groupNote}</div>
     ${tiles}
     <div class="h-sec">${chart}</div>
     ${ai}
-    <div class="h-sec"><div class="h-head"><b>正在联网的程序</b><span class="h-note">走代理的排在前面</span><span class="sp"></span><button class="link" data-tab="conns">全部连接</button></div>${top || `<div class="empty">没有连接</div>`}</div>
+    <div class="h-sec"><div class="h-head"><b>${tr("正在联网的程序")}</b><span class="h-note">${tr("走代理的排在前面")}</span><span class="sp"></span><button class="link" data-tab="conns">${tr("全部连接")}</button></div>${top || `<div class="empty">${tr("没有连接")}</div>`}</div>
   </div>`;
 }
 
 // ---------- settings page ----------
 
 const ROT_LABEL = {
-  exits: "各分组的出口 IP", media: "正在播放的歌（播放时）", ai: "AI 额度", speed: "实时网速", latency: "节点延迟",
+  exits: tr("各分组的出口 IP"), media: tr("正在播放的歌（播放时）"), ai: tr("AI 额度"), speed: tr("实时网速"), latency: tr("节点延迟"),
 };
 const PILL_ITEM_LABEL = {
-  exits: "出口 IP（每个分组一个，并排显示）", speed: "实时网速",
-  "ai-claude": "Claude 额度环", "ai-codex": "Codex 额度环", "ai-antigravity": "Antigravity 额度环", "ai-grok": "Grok 额度环",
-  media: "正在播放的歌（播放时）", leaks: "泄漏数（有泄漏时才显示）", conns: "连接数", latency: "节点延迟",
-  cpu: "CPU 占用", mem: "内存占用", clock: "时钟", exit: "主出口 IP（只显示一个）",
-  rotate: "轮换区（下面勾选的内容轮流显示）",
-  notes: "未读通知（有未读时才显示程序图标 / 数量）",
+  exits: tr("出口 IP（每个分组一个，并排显示）"), speed: tr("实时网速"),
+  "ai-claude": tr("Claude 额度环"), "ai-codex": tr("Codex 额度环"), "ai-antigravity": tr("Antigravity 额度环"), "ai-grok": tr("Grok 额度环"),
+  media: tr("正在播放的歌（播放时）"), leaks: tr("泄漏数（有泄漏时才显示）"), conns: tr("连接数"), latency: tr("节点延迟"),
+  cpu: tr("CPU 占用"), mem: tr("内存占用"), clock: tr("时钟"), exit: tr("主出口 IP（只显示一个）"),
+  rotate: tr("轮换区（下面勾选的内容轮流显示）"),
+  notes: tr("未读通知（有未读时才显示程序图标 / 数量）"),
 };
 
 const HOURS = Array.from({ length: 24 }, (_, h) => [h, `${String(h).padStart(2, "0")}:00`]);
-const SRC_LABEL = { toast: "系统通知", flash: "任务栏闪烁", popup: "程序弹窗", ai: "AI 钩子", test: "测试" };
+const SRC_LABEL = { toast: tr("系统通知"), flash: tr("任务栏闪烁"), popup: tr("程序弹窗"), ai: tr("AI 钩子"), test: tr("测试") };
 
 function notifySettingsHtml() {
   // the tools' configs can change outside MicaBar: re-read when the page is built again later
   if (!notifyInfo || !notifyApps || Date.now() - notifyInfoAt > 10_000) loadNotifyInfo();
   const hooks = (notifyInfo?.hooks || []).map((h) => {
-    const state = !h.found ? `没找到 ${esc(h.name)} 的配置文件夹` : h.installed ? "已接入：完成任务、等你确认时会通知" : h.conflict ? "已有别的 notify 设置，MicaBar 不覆盖" : "未接入";
+    const state = !h.found ? `${tr("没找到 {0} 的配置文件夹", esc(h.name))}` : h.installed ? tr("已接入：完成任务、等你确认时会通知") : h.conflict ? tr("已有别的 notify 设置，MicaBar 不覆盖") : tr("未接入");
     const btn = !h.found || (h.conflict && !h.installed) ? ""
-      : h.installed ? `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="0">移除</button>`
-        : hookConfirm === h.tool ? `<button class="primary" data-do="hook" data-tool="${h.tool}" data-on="1">确认：修改 ${esc(h.path.replace(/^.*\\(\.[^\\]+\\[^\\]+)$/, "~\\$1"))}（先自动备份）</button>`
-          : `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="1">接入</button>`;
+      : h.installed ? `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="0">${tr("移除")}</button>`
+        : hookConfirm === h.tool ? `<button class="primary" data-do="hook" data-tool="${h.tool}" data-on="1">${tr("确认：修改 {0}（先自动备份）", esc(h.path.replace(/^.*\\(\.[^\\]+\\[^\\]+)$/, "~\\$1")))}</button>`
+          : `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="1">${tr("接入")}</button>`;
     return `<div class="s-row"><span class="s-label">${esc(h.name)}<span class="s-note">${state}</span></span>${btn}</div>`;
   }).join("");
   const apps = (notifyApps || []).filter((a) => a.source !== "test").map((a) => {
     const cfg = sget("notify.apps", {})?.[a.key] || {};
     const icon = a.iconUrl ? `<img class="app-icon" src="${a.iconUrl}" alt="">` : iconHtml({ path: a.icon, name: a.app });
-    return `<div class="na-row">${icon}<span class="na-name" title="${esc(a.key)}">${esc(a.app)}</span><span class="na-src">${SRC_LABEL[a.source] || ""} · ${a.count} 条</span>
-      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="island" ${cfg.island !== false ? "checked" : ""}> 岛上弹出</label>
-      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="mute" ${cfg.mute ? "checked" : ""}> 静音</label>
-      ${a.source === "toast" ? `<label title="关掉 Windows 自己右下角的弹窗，只在岛上显示（随时可以还原）"><input type="checkbox" data-ntake="${esc(a.key)}" ${a.takeover ? "checked" : ""}> 接管弹窗</label>`
-        : a.source === "popup" ? `<label title="${esc(a.app)} 自己的右下角小窗一出现就藏起来，只在岛上显示"><input type="checkbox" data-napp="${esc(a.key)}" data-f="takeover" ${cfg.takeover ? "checked" : ""}> 接管弹窗</label>` : "<span></span>"}</div>`;
+    return `<div class="na-row">${icon}<span class="na-name" title="${esc(a.key)}">${esc(a.app)}</span><span class="na-src">${tr("{0} · {1} 条", SRC_LABEL[a.source] || "", a.count)}</span>
+      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="island" ${cfg.island !== false ? "checked" : ""}> ${tr("岛上弹出")}</label>
+      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="mute" ${cfg.mute ? "checked" : ""}> ${tr("静音")}</label>
+      ${a.source === "toast" ? `<label title="${tr("关掉 Windows 自己右下角的弹窗，只在岛上显示（随时可以还原）")}"><input type="checkbox" data-ntake="${esc(a.key)}" ${a.takeover ? "checked" : ""}> ${tr("接管弹窗")}</label>`
+        : a.source === "popup" ? `<label title="${tr("{0} 自己的右下角小窗一出现就藏起来，只在岛上显示", esc(a.app))}"><input type="checkbox" data-napp="${esc(a.key)}" data-f="takeover" ${cfg.takeover ? "checked" : ""}> ${tr("接管弹窗")}</label>` : "<span></span>"}</div>`;
   }).join("");
-  return `<div class="s-sec"><div class="s-title">通知<span class="s-note">其他程序的提醒在岛上弹出，收进「通知」页；内容只在内存里</span></div>
-    ${sToggle("notify.on", "在岛上显示通知")}
-    ${sSelect("notify.style", "　提示方式", [["icon", "胶囊右边一格，只显示程序图标"], ["inline", "胶囊里的内容暂时让开，显示一行消息"], ["card", "胶囊展开成卡片"]], "胶囊里有「未读通知」这一项时才显示图标（设置 → 收起外观 → 显示内容）")}
-    ${sNumber("notify.duration", "　每次停留", 2, 30, 1, "秒", "鼠标放在通知上时一直停着；同时来几条会叠起来，放上去就展开")}
-    ${sSelect("notify.privacy", "　显示内容", [["source", "不显示内容，只显示程序和发送人"], ["smart", "显示全文；全屏、录屏时只显示程序"], ["full", "始终显示全文"]], "岛上和通知页都按这个显示")}
-    ${sToggle("notify.followDnd", "　跟随 Windows 勿扰", "Windows 开着勿扰 / 专注时，通知只收进通知页，不在岛上弹出")}
-    ${sToggle("notify.quiet.on", "　免打扰时段")}
-    ${sget("notify.quiet.on", false) ? `${sSelect("notify.quiet.from", "　　从", HOURS)}${sSelect("notify.quiet.to", "　　到", HOURS)}` : ""}
-    ${sToggle("notify.toast", "　读取系统通知", "Telegram、邮件、浏览器等弹出 Windows 通知的程序，能显示发送人和内容")}
-    ${sToggle("notify.flash", "　任务栏闪烁和程序自己的弹窗", "微信 4.x 来消息只闪任务栏，只能显示「微信 · N 条新消息」；Telegram 关了系统通知后用自己的小窗提醒，岛上能显示会话、发送人和内容（从它的聊天列表读）")}
-    <div class="m-actions end"><button class="ghost" data-do="notify-test">发一条测试通知</button></div>
-    <div class="s-sub">AI 完成提醒<span class="s-note">往工具自己的配置里加一个钩子，任务完成或等你批准时通知本机 127.0.0.1:${notifyInfo?.port ?? 47900}（带随机口令）</span></div>
-    ${hooks || `<div class="s-note">正在读取…</div>`}
-    <div class="s-sub">各个程序<span class="s-note">发过通知的程序会出现在这里</span></div>
-    ${apps ? `<div class="na-list">${apps}</div>` : `<div class="s-note">还没有收到过通知</div>`}
+  return `<div class="s-sec"><div class="s-title">${tr("通知")}<span class="s-note">${tr("其他程序的提醒在岛上弹出，收进「通知」页；内容只在内存里")}</span></div>
+    ${sToggle("notify.on", tr("在岛上显示通知"))}
+    ${sSelect("notify.style", tr("　提示方式"), [["icon", tr("胶囊右边一格，只显示程序图标")], ["inline", tr("胶囊里的内容暂时让开，显示一行消息")], ["card", tr("胶囊展开成卡片")]], tr("胶囊里有「未读通知」这一项时才显示图标（设置 → 收起外观 → 显示内容）"))}
+    ${sNumber("notify.duration", tr("　每次停留"), 2, 30, 1, tr("秒"), tr("鼠标放在通知上时一直停着；同时来几条会叠起来，放上去就展开"))}
+    ${sSelect("notify.privacy", tr("　显示内容"), [["source", tr("不显示内容，只显示程序和发送人")], ["smart", tr("显示全文；全屏、录屏时只显示程序")], ["full", tr("始终显示全文")]], tr("岛上和通知页都按这个显示"))}
+    ${sToggle("notify.followDnd", tr("　跟随 Windows 勿扰"), tr("Windows 开着勿扰 / 专注时，通知只收进通知页，不在岛上弹出"))}
+    ${sToggle("notify.quiet.on", tr("　免打扰时段"))}
+    ${sget("notify.quiet.on", false) ? `${sSelect("notify.quiet.from", tr("　　从"), HOURS)}${sSelect("notify.quiet.to", tr("　　到"), HOURS)}` : ""}
+    ${sToggle("notify.toast", tr("　读取系统通知"), tr("Telegram、邮件、浏览器等弹出 Windows 通知的程序，能显示发送人和内容"))}
+    ${sToggle("notify.flash", tr("　任务栏闪烁和程序自己的弹窗"), tr("微信 4.x 来消息只闪任务栏，只能显示「微信 · N 条新消息」；Telegram 关了系统通知后用自己的小窗提醒，岛上能显示会话、发送人和内容（从它的聊天列表读）"))}
+    <div class="m-actions end"><button class="ghost" data-do="notify-test">${tr("发一条测试通知")}</button></div>
+    <div class="s-sub">${tr("AI 完成提醒")}<span class="s-note">${tr("往工具自己的配置里加一个钩子，任务完成或等你批准时通知本机 127.0.0.1:{0}（带随机口令）", notifyInfo?.port ?? 47900)}</span></div>
+    ${hooks || `<div class="s-note">${tr("正在读取…")}</div>`}
+    <div class="s-sub">${tr("各个程序")}<span class="s-note">${tr("发过通知的程序会出现在这里")}</span></div>
+    ${apps ? `<div class="na-list">${apps}</div>` : `<div class="s-note">${tr("还没有收到过通知")}</div>`}
   </div>`;
 }
 const PAGE_LABEL = Object.fromEntries(Object.entries(PAGE_DEFS).map(([k, v]) => [k, v[0]]));
-const RING_MODES = [["both", "两圈：外圈短周期，内圈长周期"], ["first", "只看短周期（如 5 小时）"], ["second", "只看长周期（如每周）"], ["max", "用得最多的那个"]];
+const RING_MODES = [["both", tr("两圈：外圈短周期，内圈长周期")], ["first", tr("只看短周期（如 5 小时）")], ["second", tr("只看长周期（如每周）")], ["max", tr("用得最多的那个")]];
 
 let monitorsCache = [];
 let hotkeyRec = false;
@@ -2870,14 +2873,14 @@ document.addEventListener("keydown", async (e) => {
   const combo = [...mods, key].join("+");
   const [, valid] = await invoke("hotkey_check", { candidate: combo });
   if (!mods.length || !valid) {
-    toast(`${combo} 不行：要带 Ctrl / Alt / Shift / Win，且是字母、数字、F1~F24 等键`, true);
+    toast(`${tr("{0} 不行：要带 Ctrl / Alt / Shift / Win，且是字母、数字、F1~F24 等键", combo)}`, true);
     return;
   }
   hotkeyRec = false;
   await setPath("interaction.hotkey", combo);
   setTimeout(async () => {
     const [ok] = await invoke("hotkey_check", { candidate: null });
-    toast(ok ? `快捷键改成了 ${combo}` : `${combo} 被别的程序占用了，换一个吧`, !ok);
+    toast(ok ? `${tr("快捷键改成了 {0}", combo)}` : `${tr("{0} 被别的程序占用了，换一个吧", combo)}`, !ok);
     renderList(true);
   }, 300);
 }, true);
@@ -2906,6 +2909,9 @@ function sToggle(path, label, note = "") {
     <input type="checkbox" data-sp="${path}" ${sget(path, false) ? "checked" : ""}></label>`;
 }
 
+// each language in its own name
+const LANG_NAMES = [["zh-CN", "简体中文"], ["zh-TW", "繁體中文"], ["en", "English"], ["ja", "日本語"], ["ko", "한국어"], ["ru", "Русский"], ["es", "Español"], ["pt-BR", "Português (Brasil)"], ["fr", "Français"], ["de", "Deutsch"]];
+
 function sSelect(path, label, options, note = "") {
   const cur = String(sget(path, ""));
   return `${sRowOpen(label, note)}
@@ -2927,9 +2933,9 @@ let groupOptions = null;
 function groupPickerHtml() {
   if (!groupOptions) {
     invoke("exit_group_options").then((g) => { groupOptions = g || []; if (tab === "settings") renderList(true); }).catch(() => { groupOptions = []; });
-    return `<div class="s-note">正在读取分组…</div>`;
+    return `<div class="s-note">${tr("正在读取分组…")}</div>`;
   }
-  if (!groupOptions.length) return `<div class="s-note">没有可选的分组：需要先启用出口控制（覆写里才有每个分组的专用端口）</div>`;
+  if (!groupOptions.length) return `<div class="s-note">${tr("没有可选的分组：需要先启用出口控制（覆写里才有每个分组的专用端口）")}</div>`;
   const chosen = new Set(sget("exit.groups", []) || []);
   return `<div class="s-groups">${groupOptions.map((g) => `<label class="s-grp"><input type="checkbox" data-grp="${esc(g)}" ${chosen.has(g) ? "checked" : ""}> ${decorate(g)}</label>`).join("")}</div>`;
 }
@@ -2947,17 +2953,17 @@ function refreshFonts() {
 // ---------- settings pages (manager window: the sidebar turns into these categories) ----------
 
 const SET_NAV = [
-  ["基础设置", [
-    ["general", "常规", "M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4"],
-    ["collapsed", "收起外观", "M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 4v1.5a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V4"],
-    ["expanded", "展开外观", "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"],
-    ["theme", "面板主题", "M12 3a9 9 0 1 0 0 18c1 0 1.5-.8 1.5-1.5 0-.8-.6-1.2-.6-2 0-.8.7-1.5 1.6-1.5H17a4 4 0 0 0 4-4c0-5-4-9-9-9zM7.5 11.5h0M10 7.5h0M14.5 7.5h0"],
+  [tr("基础设置"), [
+    ["general", tr("常规"), "M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4"],
+    ["collapsed", tr("收起外观"), "M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 4v1.5a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V4"],
+    ["expanded", tr("展开外观"), "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"],
+    ["theme", tr("面板主题"), "M12 3a9 9 0 1 0 0 18c1 0 1.5-.8 1.5-1.5 0-.8-.6-1.2-.6-2 0-.8.7-1.5 1.6-1.5H17a4 4 0 0 0 4-4c0-5-4-9-9-9zM7.5 11.5h0M10 7.5h0M14.5 7.5h0"],
   ]],
-  ["网络", [["network", "出口与提示", "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9"]]],
-  ["AI 用量", [["ai", "额度与圆环", "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"]]],
-  ["音乐", [["music", "正在播放", "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"]]],
-  ["通知", [["notify", "通知", "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"]]],
-  ["其他", [["about", "关于", "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16v-5M12 8h0"]]],
+  [tr("网络"), [["network", tr("出口与提示"), "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9"]]],
+  [tr("AI 用量"), [["ai", tr("额度与圆环"), "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"]]],
+  [tr("音乐"), [["music", tr("正在播放"), "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"]]],
+  [tr("通知"), [["notify", tr("通知"), "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"]]],
+  [tr("其他"), [["about", tr("关于"), "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16v-5M12 8h0"]]],
 ];
 const SET_CATS = SET_NAV.flatMap(([, items]) => items.map((x) => x[0]));
 let setCat = (() => { try { const c = localStorage.getItem("mb-set-cat"); return SET_CATS.includes(c) ? c : "general"; } catch { return "general"; } })();
@@ -2966,7 +2972,7 @@ let setBack = "home"; // the page the back button returns to
 const navIcon = (d) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
 
 function settingsNavHtml() {
-  return `<button class="tab nav back" data-setback title="回到${esc((NAV.find((n) => n[0] === setBack) || NAV[0])[1])}">${navIcon("M15 6l-6 6 6 6")}<span>返回</span></button>
+  return `<button class="tab nav back" data-setback title="${tr("回到{0}", esc((NAV.find((n) => n[0] === setBack) || NAV[0])[1]))}">${navIcon("M15 6l-6 6 6 6")}<span>${tr("返回")}</span></button>
     ${SET_NAV.map(([group, items]) => `<div class="nav-group">${group}</div>
       ${items.map(([id, label, d]) => `<button class="tab nav ${id === setCat ? "active" : ""}" data-setcat="${id}">${navIcon(d)}<span>${label}</span></button>`).join("")}`).join("")}`;
 }
@@ -3001,9 +3007,9 @@ const GRIP_SVG = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentC
 function sDragList(path, labels) {
   const list = (sget(path, []) || []).filter((i) => labels[i.id]);
   return `<div class="s-drag" data-dl="${path}">${list.map((i) => `<div class="s-drag-row ${i.on ? "" : "off"}" data-id="${esc(i.id)}">
-      <button class="grip" data-grip title="拖动调整顺序（选中后也可以按 Alt+↑ / ↓）" aria-label="调整「${esc(labels[i.id])}」的顺序">${GRIP_SVG}</button>
+      <button class="grip" data-grip title="${tr("拖动调整顺序（选中后也可以按 Alt+↑ / ↓）")}" aria-label="${tr("调整「{0}」的顺序", esc(labels[i.id]))}">${GRIP_SVG}</button>
       <span class="s-drag-name">${labels[i.id]}</span>
-      <input type="checkbox" class="sw" data-ol="${path}" data-id="${esc(i.id)}" ${i.on ? "checked" : ""} aria-label="显示「${esc(labels[i.id])}」">
+      <input type="checkbox" class="sw" data-ol="${path}" data-id="${esc(i.id)}" ${i.on ? "checked" : ""} aria-label="${tr("显示「{0}」", esc(labels[i.id]))}">
     </div>`).join("")}</div>`;
 }
 
@@ -3015,13 +3021,13 @@ function shapeCardsHtml() {
   const card = (id, name) => `<button class="pick-card ${cur === id ? "on" : ""}" data-pick="shape.style" data-val="${id}" aria-pressed="${cur === id}">
       <div class="sc-mock tilt" data-tilt="9"><div class="sc-win"><i></i><i></i><i></i><i></i></div><div class="sc-shape ${id}"><b></b><b></b><b></b><b></b></div></div>
       <div class="pick-name"><span>${name}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
-  return `<div class="pick-grid">${card("notch", "刘海")}${card("capsule", "胶囊")}${card("line", "指示条")}</div>`;
+  return `<div class="pick-grid">${card("notch", tr("刘海"))}${card("capsule", tr("胶囊"))}${card("line", tr("指示条"))}</div>`;
 }
 
 // a small pill in a theme's colours: flag, exit IP, speed, clock
 const BASE_THEMES = {
-  "glass-dark": { name: "黑色磨砂", bg: "#0c0c10", text: "#f2f2f5", dim: "#9a9aa6", green: "#34d399", amber: "#fbbf24" },
-  "glass-light": { name: "白色磨砂", bg: "#f6f6f9", text: "#15151a", dim: "#4b4b57", green: "#059669", amber: "#b45309" },
+  "glass-dark": { name: tr("黑色磨砂"), bg: "#0c0c10", text: "#f2f2f5", dim: "#9a9aa6", green: "#34d399", amber: "#fbbf24" },
+  "glass-light": { name: tr("白色磨砂"), bg: "#f6f6f9", text: "#15151a", dim: "#4b4b57", green: "#059669", amber: "#b45309" },
 };
 function themePill(t) {
   return `<div class="tp-pill" style="--p-bg:${t.bg};--p-text:${t.text};--p-dim:${t.dim || t.text};--p-up:${t.amber || "#fbbf24"};--p-down:${t.green || "#34d399"}">
@@ -3033,183 +3039,186 @@ function themeCardsHtml(ids) {
   const sys = lightQuery.matches ? "glass-light" : "glass-dark";
   return `<div class="pick-grid">${ids.map((id) => {
     let t, name;
-    if (id === "auto") { t = BASE_THEMES[sys]; name = `跟随系统（现在是${lightQuery.matches ? "白" : "黑"}）`; }
+    if (id === "auto") { t = BASE_THEMES[sys]; name = `${tr("跟随系统（现在是{0}）", lightQuery.matches ? tr("白") : tr("黑"))}`; }
     else if (BASE_THEMES[id]) { t = BASE_THEMES[id]; name = t.name; }
-    else if (id === "custom") { const c = sget("appearance.custom", {}) || {}; t = { bg: c.bg || "#16161c", text: c.text || "#f2f2f5", dim: mixHex(c.text || "#f2f2f5", c.bg || "#16161c", 0.3) }; name = "自定义"; }
+    else if (id === "custom") { const c = sget("appearance.custom", {}) || {}; t = { bg: c.bg || "#16161c", text: c.text || "#f2f2f5", dim: mixHex(c.text || "#f2f2f5", c.bg || "#16161c", 0.3) }; name = tr("自定义"); }
     else { t = PRESETS[id]; name = t.name; }
     return `<button class="pick-card theme ${cur === id ? "on" : ""}" data-pick="appearance.theme" data-val="${id}" aria-pressed="${cur === id}">
       <div class="tp-stage tilt" data-tilt="9">${themePill(t)}</div><div class="pick-name"><span>${esc(name)}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
   }).join("")}</div>`;
 }
 
-const sizeButtons = `<div class="m-actions end"><button class="ghost" data-do="size-reset">恢复默认大小</button><button class="primary" data-do="layout-edit">在屏幕上拖动调整</button></div>`;
+const sizeButtons = `<div class="m-actions end"><button class="ghost" data-do="size-reset">${tr("恢复默认大小")}</button><button class="primary" data-do="layout-edit">${tr("在屏幕上拖动调整")}</button></div>`;
 
 const SET_PAGES = {
   general: () => `
-  <div class="s-sec"><div class="s-title">启动与屏幕</div>
-    ${sToggle("general.autostart", "开机自启", "登录 10 秒后以管理员权限启动（计划任务，不弹 UAC）")}
-    ${sSelect("general.monitor", "显示在哪块屏幕", [["primary", "主屏幕"], ["cursor", "跟随鼠标所在的屏幕"], ...monitorsCache.map((m) => [m.name, `${m.name.replace("\\\\.\\", "")}（${m.w}×${m.h}${m.primary ? "，主屏" : ""}）`])])}
-    ${sSelect("general.profile", "资源档位", [["saver", "省电"], ["balanced", "均衡"], ["smooth", "流畅"]], "影响节点测速等后台任务的频率")}
+  <div class="s-sec"><div class="s-title">${tr("语言")}${tr("语言") === "Language" ? "" : " · Language"}</div>
+    ${sSelect("general.lang", tr("界面语言"), [["auto", tr("跟随系统")], ...LANG_NAMES], tr("改完所有窗口会刷新一下；托盘菜单也会换"))}
   </div>
-  <div class="s-sec"><div class="s-title">交互</div>
-    <div class="s-row"><span class="s-label">快捷键（展开 / 收起）${snap && !snap.hotkeyOk ? `<span class="s-note bad">没注册成功：可能被别的程序占用了</span>` : ""}</span>
-      <button class="hk ${hotkeyRec ? "rec" : ""}" data-do="hotkey-rec">${hotkeyRec ? "请按下新的组合键…（Esc 取消）" : esc(sget("interaction.hotkey", "Ctrl+Alt+N"))}</button></div>
-    ${sSelect("interaction.expand", "怎么展开", [["hover", "鼠标停留（收起时不挡点击）"], ["click", "点击（收起时胶囊会挡住下面的点击）"]])}
-    ${sToggle("interaction.peek", "　鼠标停在胶囊上时变透明", "能看见被挡住的标签页等；点一下下面的东西就不会展开")}
-    ${sNumber("interaction.hoverDelay", "　鼠标停留多久展开", 0, 2000, 50, "ms")}
-    ${sNumber("interaction.holdMs", "　长按多久抓起岛", 150, 1000, 10, "ms", "按住面板或胶囊这么久就能拖着甩到左右，往屏幕中间拉开还能拖到别的边；太短的话普通点击也可能被当成长按")}
-    ${sToggle("interaction.passthrough", "穿透模式", "鼠标完全不触发，点击穿透到下面的窗口；只能用快捷键打开")}
-    ${sSelect("interaction.fullscreen", "全屏程序（游戏、视频）在前台时", [["pill", "显示胶囊，不自动展开"], ["hide", "完全隐藏"]])}
+  <div class="s-sec"><div class="s-title">${tr("启动与屏幕")}</div>
+    ${sToggle("general.autostart", trc("setting", "开机自启"), tr("登录 10 秒后以管理员权限启动（计划任务，不弹 UAC）"))}
+    ${sSelect("general.monitor", tr("显示在哪块屏幕"), [["primary", tr("主屏幕")], ["cursor", tr("跟随鼠标所在的屏幕")], ...monitorsCache.map((m) => [m.name, `${tr("{0}（{1}×{2}{3}）", m.name.replace("\\\\.\\", ""), m.w, m.h, m.primary ? tr("，主屏") : "")}`])])}
+    ${sSelect("general.profile", tr("资源档位"), [["saver", tr("省电")], ["balanced", tr("均衡")], ["smooth", tr("流畅")]], tr("影响节点测速等后台任务的频率"))}
+  </div>
+  <div class="s-sec"><div class="s-title">${tr("交互")}</div>
+    <div class="s-row"><span class="s-label">${tr("快捷键（展开 / 收起）{0}", snap && !snap.hotkeyOk ? `<span class="s-note bad">${tr("没注册成功：可能被别的程序占用了")}</span>` : "")}</span>
+      <button class="hk ${hotkeyRec ? "rec" : ""}" data-do="hotkey-rec">${hotkeyRec ? tr("请按下新的组合键…（Esc 取消）") : esc(sget("interaction.hotkey", "Ctrl+Alt+N"))}</button></div>
+    ${sSelect("interaction.expand", tr("怎么展开"), [["hover", tr("鼠标停留（收起时不挡点击）")], ["click", tr("点击（收起时胶囊会挡住下面的点击）")]])}
+    ${sToggle("interaction.peek", tr("　鼠标停在胶囊上时变透明"), tr("能看见被挡住的标签页等；点一下下面的东西就不会展开"))}
+    ${sNumber("interaction.hoverDelay", tr("　鼠标停留多久展开"), 0, 2000, 50, "ms")}
+    ${sNumber("interaction.holdMs", tr("　长按多久抓起岛"), 150, 1000, 10, "ms", tr("按住面板或胶囊这么久就能拖着甩到左右，往屏幕中间拉开还能拖到别的边；太短的话普通点击也可能被当成长按"))}
+    ${sToggle("interaction.passthrough", tr("穿透模式"), tr("鼠标完全不触发，点击穿透到下面的窗口；只能用快捷键打开"))}
+    ${sSelect("interaction.fullscreen", tr("全屏程序（游戏、视频）在前台时"), [["pill", tr("显示胶囊，不自动展开")], ["hide", tr("完全隐藏")]])}
   </div>`,
 
   collapsed: () => `
-  <div class="s-sec"><div class="s-title">收起样式</div>
+  <div class="s-sec"><div class="s-title">${tr("收起样式")}</div>
     ${shapeCardsHtml()}
-    ${sSelect("shape.dock", "停靠位置", [["top", "屏幕上边"], ["bottom", "屏幕下边（任务栏上方）"], ["left", "屏幕左边"], ["right", "屏幕右边"]], "左右两边时，胶囊会变成竖着的刘海；也可以长按岛往屏幕中间拉开，拖到另一条边松手")}
-    ${sSelect("shape.anchor", "在这条边上的位置", [["start", "靠左（停靠左右两边时为靠上）"], ["center", "居中"], ["end", "靠右（停靠左右两边时为靠下）"]], "也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊")}
-    ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成指示条", "和岛在同一块屏幕上的最大化窗口在前台时，胶囊 / 刘海临时变成指示条；切到别的窗口就变回来。每次启动后第一次变的时候，胶囊上会先提示一下")}
+    ${sSelect("shape.dock", tr("停靠位置"), [["top", tr("屏幕上边")], ["bottom", tr("屏幕下边（任务栏上方）")], ["left", tr("屏幕左边")], ["right", tr("屏幕右边")]], tr("左右两边时，胶囊会变成竖着的刘海；也可以长按岛往屏幕中间拉开，拖到另一条边松手"))}
+    ${sSelect("shape.anchor", tr("在这条边上的位置"), [["start", tr("靠左（停靠左右两边时为靠上）")], ["center", tr("居中")], ["end", tr("靠右（停靠左右两边时为靠下）")]], tr("也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊"))}
+    ${sToggle("shape.lineWhenMaximized", tr("前台窗口最大化时缩成指示条"), tr("和岛在同一块屏幕上的最大化窗口在前台时，胶囊 / 刘海临时变成指示条；切到别的窗口就变回来。每次启动后第一次变的时候，胶囊上会先提示一下"))}
   </div>
-  <div class="s-sec"><div class="s-title">显示内容<span class="s-note">拖动 ⠿ 调整顺序；宽度放不下时，排在后面的几项和轮换区合成最后一格轮流显示（指示条只显示状态色）</span></div>
+  <div class="s-sec"><div class="s-title">${tr("显示内容")}<span class="s-note">${tr("拖动 ⠿ 调整顺序；宽度放不下时，排在后面的几项和轮换区合成最后一格轮流显示（指示条只显示状态色）")}</span></div>
     ${sDragList("pill.items", PILL_ITEM_LABEL)}
-    ${sSelect("pill.clockStyle", "时钟样式", [["simple", "简洁"], ["digital", "数码管"], ["serif", "衬线"]])}
-    ${sToggle("pill.clockSeconds", "时钟显示秒")}
+    ${sSelect("pill.clockStyle", tr("时钟样式"), [["simple", tr("简洁")], ["digital", tr("数码管")], ["serif", tr("衬线")]])}
+    ${sToggle("pill.clockSeconds", tr("时钟显示秒"))}
   </div>
-  <div class="s-sec"><div class="s-title">轮换区<span class="s-note">胶囊里的「轮换区」依次显示这些内容；没有数据的、胶囊里已经单独显示的自动跳过，不会重复</span></div>
+  <div class="s-sec"><div class="s-title">${tr("轮换区")}<span class="s-note">${tr("胶囊里的「轮换区」依次显示这些内容；没有数据的、胶囊里已经单独显示的自动跳过，不会重复")}</span></div>
     ${sDragList("rotate.items", ROT_LABEL)}
-    ${sNumber("rotate.interval", "每项显示", 2, 60, 1, "秒")}
+    ${sNumber("rotate.interval", tr("每项显示"), 2, 60, 1, tr("秒"))}
   </div>
-  <div class="s-sec"><div class="s-title">大小与透明度<span class="s-note">也可以在屏幕上直接拖动边缘调整</span></div>
-    ${sRange("size.pillH", "胶囊高度", 28, 64, 2, "px")}
-    ${sRange("size.pillW", "胶囊宽度", 0, 1400, 10, "px", "0 = 跟着内容自动变宽")}
-    ${sRange("size.pillMaxW", "　自动宽度最多", 200, 1400, 10, "px")}
-    ${sRange("appearance.pillOpacity", "收起时胶囊的不透明度", 10, 100, 5, "%", "整颗胶囊连文字一起变淡，不那么显眼；展开后总是完全不透明")}
+  <div class="s-sec"><div class="s-title">${tr("大小与透明度")}<span class="s-note">${tr("也可以在屏幕上直接拖动边缘调整")}</span></div>
+    ${sRange("size.pillH", tr("胶囊高度"), 28, 64, 2, "px")}
+    ${sRange("size.pillW", tr("胶囊宽度"), 0, 1400, 10, "px", tr("0 = 跟着内容自动变宽"))}
+    ${sRange("size.pillMaxW", tr("　自动宽度最多"), 200, 1400, 10, "px")}
+    ${sRange("appearance.pillOpacity", tr("收起时胶囊的不透明度"), 10, 100, 5, "%", tr("整颗胶囊连文字一起变淡，不那么显眼；展开后总是完全不透明"))}
     ${sizeButtons}
   </div>`,
 
   expanded: () => `
-  <div class="s-sec"><div class="s-title">展开后的页面<span class="s-note">岛顶部的图标切换；拖动 ⠿ 调整顺序，会记住上次停在哪一页</span></div>
+  <div class="s-sec"><div class="s-title">${tr("展开后的页面")}<span class="s-note">${tr("岛顶部的图标切换；拖动 ⠿ 调整顺序，会记住上次停在哪一页")}</span></div>
     ${sDragList("panel.pages", PAGE_LABEL)}
   </div>
-  <div class="s-sec"><div class="s-title">网络页的页签<span class="s-note">拖动 ⠿ 调整顺序</span></div>
+  <div class="s-sec"><div class="s-title">${tr("网络页的页签")}<span class="s-note">${tr("拖动 ⠿ 调整顺序")}</span></div>
     ${sDragList("panel.tabs", Object.fromEntries(Object.entries(TAB_DEFS).map(([k, v]) => [k, v.label])))}
   </div>
-  <div class="s-sec"><div class="s-title">面板大小</div>
-    ${sRange("size.panelW", "展开面板宽度", 480, 1100, 10, "px")}
-    ${sRange("size.panelH", "展开面板最大高度", 360, 900, 10, "px", "内容少时会矮一些")}
-    ${sSelect("appearance.scale", "界面缩放", [[90, "90%"], [100, "100%"], [110, "110%"], [125, "125%"], [150, "150%"]])}
+  <div class="s-sec"><div class="s-title">${tr("面板大小")}</div>
+    ${sRange("size.panelW", tr("展开面板宽度"), 480, 1100, 10, "px")}
+    ${sRange("size.panelH", tr("展开面板最大高度"), 360, 900, 10, "px", tr("内容少时会矮一些"))}
+    ${sSelect("appearance.scale", tr("界面缩放"), [[90, "90%"], [100, "100%"], [110, "110%"], [125, "125%"], [150, "150%"]])}
     ${sizeButtons}
   </div>`,
 
   theme: () => `
-  <div class="s-sec"><div class="s-title">基础</div>
+  <div class="s-sec"><div class="s-title">${tr("基础")}</div>
     ${themeCardsHtml(["auto", "glass-dark", "glass-light"])}
   </div>
-  <div class="s-sec"><div class="s-title">主题扩展</div>
+  <div class="s-sec"><div class="s-title">${tr("主题扩展")}</div>
     ${themeCardsHtml([...Object.keys(PRESETS), "custom"])}
     ${sget("appearance.theme") === "custom" ? `
-      ${sSelect("appearance.custom.base", "基调", [["dark", "深色"], ["light", "浅色"]])}
-      ${sColor("appearance.custom.bg", "底色")}
-      ${sColor("appearance.custom.text", "文字颜色")}
-      ${sColor("appearance.custom.accent", "强调色")}` : ""}
+      ${sSelect("appearance.custom.base", tr("基调"), [["dark", tr("深色")], ["light", tr("浅色")]])}
+      ${sColor("appearance.custom.bg", tr("底色"))}
+      ${sColor("appearance.custom.text", tr("文字颜色"))}
+      ${sColor("appearance.custom.accent", tr("强调色"))}` : ""}
   </div>
-  <div class="s-sec"><div class="s-title">磨砂与文字</div>
-    ${sToggle("appearance.glass", "实时磨砂", "关掉后用纯色背景，同时停止截取屏幕（更省资源）")}
-    ${sRange("appearance.opacity", "背景不透明度", 20, 100, 5, "", "50 = 默认；往右更不透明，往左更通透")}
-    ${sSelect("appearance.legible", "背景亮度限制", [["normal", "标准（默认）"], ["strong", "强"], ["off", "关"]], "白磨砂下把背后的深色区域提亮、黑磨砂下把亮色区域压暗，背景一半亮一半暗时文字也看得清")}
-    <label class="s-row"><span class="s-label">字体<span class="s-note">留空 = 系统默认</span></span>
-      <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="例如 微软雅黑" spellcheck="false"></span></label>
+  <div class="s-sec"><div class="s-title">${tr("磨砂与文字")}</div>
+    ${sToggle("appearance.glass", tr("实时磨砂"), tr("关掉后用纯色背景，同时停止截取屏幕（更省资源）"))}
+    ${sRange("appearance.opacity", tr("背景不透明度"), 20, 100, 5, "", tr("50 = 默认；往右更不透明，往左更通透"))}
+    ${sSelect("appearance.legible", tr("背景亮度限制"), [["normal", tr("标准（默认）")], ["strong", tr("强")], ["off", tr("关")]], tr("白磨砂下把背后的深色区域提亮、黑磨砂下把亮色区域压暗，背景一半亮一半暗时文字也看得清"))}
+    <label class="s-row"><span class="s-label">${tr("字体")}<span class="s-note">${tr("留空 = 系统默认")}</span></span>
+      <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="${tr("例如 微软雅黑")}" spellcheck="false"></span></label>
     <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
   </div>
-  <div class="s-sec"><div class="s-title">动效</div>
-    ${sSelect("appearance.motion", "界面动效", [["auto", "跟随 Windows（设置 → 辅助功能 → 动画效果）"], ["on", "总是打开"], ["off", "关闭"]], "胶囊展开变形、卡片倾斜、按钮回弹、数字滚动、列表依次出现这些动画")}
+  <div class="s-sec"><div class="s-title">${tr("动效")}</div>
+    ${sSelect("appearance.motion", tr("界面动效"), [["auto", tr("跟随 Windows（设置 → 辅助功能 → 动画效果）")], ["on", tr("总是打开")], ["off", tr("关闭")]], tr("胶囊展开变形、卡片倾斜、按钮回弹、数字滚动、列表依次出现这些动画"))}
   </div>`,
 
   network: () => `
-  <div class="s-sec"><div class="s-title">分组出口<span class="s-note">每个分组单独测一次出口 IP（经覆写里只监听本机的专用端口）</span></div>
-    ${sSelect("exit.mode", "显示哪些分组", [["auto", "自动：每个不同的出口节点测一次（兜底分组和有流量的分组优先）"], ["manual", "手动勾选"]])}
-    ${sNumber("exit.max", "　最多测", 1, 12, 1, "个出口", "用同一个节点的分组共用一次检测，不占名额")}
+  <div class="s-sec"><div class="s-title">${tr("分组出口")}<span class="s-note">${tr("每个分组单独测一次出口 IP（经覆写里只监听本机的专用端口）")}</span></div>
+    ${sSelect("exit.mode", tr("显示哪些分组"), [["auto", tr("自动：每个不同的出口节点测一次（兜底分组和有流量的分组优先）")], ["manual", tr("手动勾选")]])}
+    ${sNumber("exit.max", tr("　最多测"), 1, 12, 1, tr("个出口"), tr("用同一个节点的分组共用一次检测，不占名额"))}
     ${sget("exit.mode") === "manual" ? groupPickerHtml() : ""}
-    ${sToggle("exit.ipOrg", "查 IP 的类型和归属", "家宽 / 商宽 / 机房 / 手机网络，被列为代理的另外标出；国内 IP 显示中文运营商和省份。每个出口 IP（包括直连）经代理端口问 proxycheck.io 和 ip-api.com，同一个 IP 缓存 24 小时；来自免费库，仅供参考")}
+    ${sToggle("exit.ipOrg", tr("查 IP 的类型和归属"), tr("家宽 / 商宽 / 机房 / 手机网络，被列为代理的另外标出；国内 IP 显示中文运营商和省份。每个出口 IP（包括直连）经代理端口问 proxycheck.io 和 ip-api.com，同一个 IP 缓存 24 小时；来自免费库，仅供参考"))}
   </div>
-  <div class="s-sec"><div class="s-title">短暂提示<span class="s-note">发生时在胶囊上显示 5 秒，同类 1 分钟内只提示一次</span></div>
-    ${sToggle("flash.exitChange", "出口 IP 变了")}
-    ${sToggle("flash.nodeDown", "节点无响应")}
-    ${sToggle("flash.latencyHigh", "节点延迟变高")}
-    ${sNumber("flash.latencyMs", "　延迟超过", 100, 5000, 50, "ms")}
-    ${sToggle("flash.speedSpike", "网速突增")}
-    ${sNumber("flash.speedMBps", "　突增到超过", 1, 1000, 1, "MB/s")}
+  <div class="s-sec"><div class="s-title">${tr("短暂提示")}<span class="s-note">${tr("发生时在胶囊上显示 5 秒，同类 1 分钟内只提示一次")}</span></div>
+    ${sToggle("flash.exitChange", tr("出口 IP 变了"))}
+    ${sToggle("flash.nodeDown", tr("节点无响应"))}
+    ${sToggle("flash.latencyHigh", tr("节点延迟变高"))}
+    ${sNumber("flash.latencyMs", tr("　延迟超过"), 100, 5000, 50, "ms")}
+    ${sToggle("flash.speedSpike", tr("网速突增"))}
+    ${sNumber("flash.speedMBps", tr("　突增到超过"), 1, 1000, 1, "MB/s")}
   </div>
-  <div class="s-sec"><div class="s-title">断网诊断<span class="s-note">后台每 10 秒轻轻探一次，连着两次不通就从网卡一路查到节点</span></div>
-    ${sToggle("diag.on", "自动发现断网", "胶囊最前面显示哪一环断了（网卡 / 路由器 / DNS / 宽带 / 代理软件 / 节点），点开有修复按钮；系统代理被别的软件关掉或改掉也会提醒")}
+  <div class="s-sec"><div class="s-title">${tr("断网诊断")}<span class="s-note">${tr("后台每 10 秒轻轻探一次，连着两次不通就从网卡一路查到节点")}</span></div>
+    ${sToggle("diag.on", tr("自动发现断网"), tr("胶囊最前面显示哪一环断了（网卡 / 路由器 / DNS / 宽带 / 代理软件 / 节点），点开有修复按钮；系统代理被别的软件关掉或改掉也会提醒"))}
   </div>
-  <div class="s-sec"><div class="s-title">新程序联网<span class="s-note">程序第一次连上公网时提醒，可以一键阻止</span></div>
-    ${sToggle("firstNet.on", "提醒第一次联网的程序", "第一次开启时先花 10 分钟熟悉常用程序，不会一下子弹一堆；程序更新换了版本号目录也认得出来")}
-    ${sToggle("firstNet.system", "　也提醒 Windows 自带的程序", "C:\\Windows 下的系统组件，数量多，一般不用开")}
+  <div class="s-sec"><div class="s-title">${tr("新程序联网")}<span class="s-note">${tr("程序第一次连上公网时提醒，可以一键阻止")}</span></div>
+    ${sToggle("firstNet.on", tr("提醒第一次联网的程序"), tr("第一次开启时先花 10 分钟熟悉常用程序，不会一下子弹一堆；程序更新换了版本号目录也认得出来"))}
+    ${sToggle("firstNet.system", tr("　也提醒 Windows 自带的程序"), tr("C:\\Windows 下的系统组件，数量多，一般不用开"))}
   </div>`,
 
   ai: () => `
-  <div class="s-sec"><div class="s-title">AI 额度<span class="s-note">用本机已登录的凭据向各家官方查询，只读，不保存、不外传</span></div>
-    ${sToggle("ai.live", "正在跑的 AI 任务", "Claude Code 干活时胶囊最前面显示项目名和用时，等你批准时变成橙色；点一下切到它的终端。需要在「通知」里接好 Claude Code 钩子")}
-    ${sToggle("ai.on", "显示 AI 额度")}
-    ${sToggle("ai.claude", "　Claude Code")}
-    ${sToggle("ai.codex", "　Codex", "需要用 ChatGPT 账号登录的 Codex")}
-    ${sToggle("ai.antigravity", "　Antigravity", "Antigravity 打开着时才能读到（只问本机的语言服务器）")}
-    ${sToggle("ai.grok", "　Grok", "需要用 grok CLI 登录过")}
-    ${sNumber("ai.interval", "　每隔多久查一次", 1, 120, 1, "分钟", "Claude 最少 10 分钟一次，设得更短也按 10 分钟")}
-    ${sNumber("ai.proxyPort", "　走哪个代理端口", 0, 65535, 1, "", "0 = 自动用代理软件的端口（Clash 的 mixed/http 端口或系统代理）。额度只经代理查询，找不到端口就不查，绝不直连；Antigravity 只问本机，不出网")}
+  <div class="s-sec"><div class="s-title">${tr("AI 额度")}<span class="s-note">${tr("用本机已登录的凭据向各家官方查询，只读，不保存、不外传")}</span></div>
+    ${sToggle("ai.live", tr("正在跑的 AI 任务"), tr("Claude Code 干活时胶囊最前面显示项目名和用时，等你批准时变成橙色；点一下切到它的终端。需要在「通知」里接好 Claude Code 钩子"))}
+    ${sToggle("ai.on", tr("显示 AI 额度"))}
+    ${sToggle("ai.claude", tr("　Claude Code"))}
+    ${sToggle("ai.codex", tr("　Codex"), tr("需要用 ChatGPT 账号登录的 Codex"))}
+    ${sToggle("ai.antigravity", tr("　Antigravity"), tr("Antigravity 打开着时才能读到（只问本机的语言服务器）"))}
+    ${sToggle("ai.grok", tr("　Grok"), tr("需要用 grok CLI 登录过"))}
+    ${sNumber("ai.interval", tr("　每隔多久查一次"), 1, 120, 1, tr("分钟"), tr("Claude 最少 10 分钟一次，设得更短也按 10 分钟"))}
+    ${sNumber("ai.proxyPort", tr("　走哪个代理端口"), 0, 65535, 1, "", tr("0 = 自动用代理软件的端口（Clash 的 mixed/http 端口或系统代理）。额度只经代理查询，找不到端口就不查，绝不直连；Antigravity 只问本机，不出网"))}
   </div>
-  <div class="s-sec"><div class="s-title">额度环<span class="s-note">胶囊和「AI 额度」页里的圆环</span></div>
-    ${sSelect("ai.ring.mode.claude", "Claude 显示", RING_MODES)}
-    ${sSelect("ai.ring.mode.codex", "Codex 显示", RING_MODES)}
-    ${sSelect("ai.ring.mode.antigravity", "Antigravity 显示", RING_MODES, "两组模型（Gemini、Claude / GPT）各有 5 小时和每周额度，环显示用得多的那一组")}
-    ${sSelect("ai.ring.mode.grok", "Grok 显示", RING_MODES)}
-    ${sNumber("ai.ring.warn", "用到多少变成提醒色", 1, 99, 1, "%")}
-    ${sNumber("ai.ring.crit", "用到多少变成警告色", 1, 100, 1, "%")}
-    ${sColor("ai.ring.colors.ok", "　正常")}
-    ${sColor("ai.ring.colors.warn", "　提醒")}
-    ${sColor("ai.ring.colors.crit", "　警告")}
-    <div class="m-actions end"><button class="ghost" data-do="ring-reset">恢复默认颜色和阈值</button></div>
+  <div class="s-sec"><div class="s-title">${tr("额度环")}<span class="s-note">${tr("胶囊和「AI 额度」页里的圆环")}</span></div>
+    ${sSelect("ai.ring.mode.claude", tr("Claude 显示"), RING_MODES)}
+    ${sSelect("ai.ring.mode.codex", tr("Codex 显示"), RING_MODES)}
+    ${sSelect("ai.ring.mode.antigravity", tr("Antigravity 显示"), RING_MODES, tr("两组模型（Gemini、Claude / GPT）各有 5 小时和每周额度，环显示用得多的那一组"))}
+    ${sSelect("ai.ring.mode.grok", tr("Grok 显示"), RING_MODES)}
+    ${sNumber("ai.ring.warn", tr("用到多少变成提醒色"), 1, 99, 1, "%")}
+    ${sNumber("ai.ring.crit", tr("用到多少变成警告色"), 1, 100, 1, "%")}
+    ${sColor("ai.ring.colors.ok", tr("　正常"))}
+    ${sColor("ai.ring.colors.warn", tr("　提醒"))}
+    ${sColor("ai.ring.colors.crit", tr("　警告"))}
+    <div class="m-actions end"><button class="ghost" data-do="ring-reset">${tr("恢复默认颜色和阈值")}</button></div>
   </div>`,
 
   music: () => `
-  <div class="s-sec"><div class="s-title">正在播放</div>
-    ${sToggle("media.on", "显示正在播放的歌", "读取 Windows 媒体控制（网易云、QQ 音乐、Spotify、浏览器等）")}
-    ${sToggle("media.cover", "　显示封面")}
-    ${sSelect("media.pillStyle", "　胶囊里的歌显示成", [["viz", "封面 + 随音乐跳动的线条"], ["title", "封面 + 歌名和歌手"]], "跳动的线条读的是正在播放的声音大小（只在本机算音量，不录音、不保存）")}
+  <div class="s-sec"><div class="s-title">${tr("正在播放")}</div>
+    ${sToggle("media.on", tr("显示正在播放的歌"), tr("读取 Windows 媒体控制（网易云、QQ 音乐、Spotify、浏览器等）"))}
+    ${sToggle("media.cover", tr("　显示封面"))}
+    ${sSelect("media.pillStyle", tr("　胶囊里的歌显示成"), [["viz", tr("封面 + 随音乐跳动的线条")], ["title", tr("封面 + 歌名和歌手")]], tr("跳动的线条读的是正在播放的声音大小（只在本机算音量，不录音、不保存）"))}
   </div>`,
 
   notify: () => notifySettingsHtml(),
 
   about: () => `
-  <div class="s-sec"><div class="s-title">关于</div>
-    <div class="s-row"><span class="s-label">MicaBar ${esc(appInfo?.version || "")}<span class="s-note">${appInfo ? (appInfo.installed ? "安装版" : "便携版（不能自动更新）") : ""}</span></span>
-      <button class="ghost" data-do="update-check">检查更新</button></div>
+  <div class="s-sec"><div class="s-title">${tr("关于")}</div>
+    <div class="s-row"><span class="s-label">MicaBar ${esc(appInfo?.version || "")}<span class="s-note">${appInfo ? (appInfo.installed ? tr("安装版") : tr("便携版（不能自动更新）")) : ""}</span></span>
+      <button class="ghost" data-do="update-check">${tr("检查更新")}</button></div>
     ${updateInfo?.available ? updateCardHtml() : ""}
-    ${sToggle("general.autoUpdate", "自动检查更新", "每天检查一次 GitHub 上的新版本，有新版本时在胶囊上提示")}
-    <div class="s-row"><span class="s-label">日志与数据<span class="s-note">${esc(appInfo?.logDir || "")}</span></span>
-      <button class="ghost" data-do="open-logs">打开目录</button></div>
-    <div class="s-row"><span class="s-label">新手教程<span class="s-note">在岛上重新走一遍第一次启动时的引导</span></span>
-      <button class="ghost" data-do="tour-restart">重新看教程</button></div>
+    ${sToggle("general.autoUpdate", tr("自动检查更新"), tr("每天检查一次 GitHub 上的新版本，有新版本时在胶囊上提示"))}
+    <div class="s-row"><span class="s-label">${tr("日志与数据")}<span class="s-note">${esc(appInfo?.logDir || "")}</span></span>
+      <button class="ghost" data-do="open-logs">${tr("打开目录")}</button></div>
+    <div class="s-row"><span class="s-label">${tr("新手教程")}<span class="s-note">${tr("在岛上重新走一遍第一次启动时的引导")}</span></span>
+      <button class="ghost" data-do="tour-restart">${tr("重新看教程")}</button></div>
   </div>
-  <div class="s-sec"><div class="s-title">作者与仓库</div>
-    <div class="s-row"><span class="s-label">作者<span class="s-note">${AUTHOR}</span></span>
-      <button class="ghost" data-do="open-author">GitHub 主页</button></div>
-    <div class="s-row"><span class="s-label">源代码<span class="s-note mono">${REPO.replace("https://", "")}</span></span>
-      <span><button class="ghost" data-do="open-issues">反馈问题</button> <button class="ghost" data-do="open-home">打开仓库</button></span></div>
-    <div class="s-row"><span class="s-label">许可<span class="s-note">MIT 开源许可：可以自由使用、修改和分发，需保留版权声明</span></span></div>
+  <div class="s-sec"><div class="s-title">${tr("作者与仓库")}</div>
+    <div class="s-row"><span class="s-label">${tr("作者")}<span class="s-note">${AUTHOR}</span></span>
+      <button class="ghost" data-do="open-author">${tr("GitHub 主页")}</button></div>
+    <div class="s-row"><span class="s-label">${tr("源代码")}<span class="s-note mono">${REPO.replace("https://", "")}</span></span>
+      <span><button class="ghost" data-do="open-issues">${tr("反馈问题")}</button> <button class="ghost" data-do="open-home">${tr("打开仓库")}</button></span></div>
+    <div class="s-row"><span class="s-label">${tr("许可")}<span class="s-note">${tr("MIT 开源许可：可以自由使用、修改和分发，需保留版权声明")}</span></span></div>
   </div>
-  <div class="s-sec"><div class="s-title">免责声明</div>
+  <div class="s-sec"><div class="s-title">${tr("免责声明")}</div>
     <div class="legal">${DISCLAIMER.map((p) => `<p>${p}</p>`).join("")}</div>
   </div>
-  <div class="s-sec"><div class="s-title">恢复默认</div>
-    <div class="s-row"><span class="s-label">所有设置<span class="s-note">这几页里的所有设置回到第一次打开时的样子</span></span>
-      <button class="ghost" data-do="settings-reset">恢复默认设置</button></div>
+  <div class="s-sec"><div class="s-title">${tr("恢复默认")}</div>
+    <div class="s-row"><span class="s-label">${tr("所有设置")}<span class="s-note">${tr("这几页里的所有设置回到第一次打开时的样子")}</span></span>
+      <button class="ghost" data-do="settings-reset">${tr("恢复默认设置")}</button></div>
   </div>`,
 };
 
 function settingsHtml() {
-  if (!S) return `<div class="empty">正在读取设置…</div>`;
-  const label = SET_NAV.flatMap(([, items]) => items).find((x) => x[0] === setCat)?.[1] || "设置";
+  if (!S) return `<div class="empty">${tr("正在读取设置…")}</div>`;
+  const label = SET_NAV.flatMap(([, items]) => items).find((x) => x[0] === setCat)?.[1] || tr("设置");
   return `<div class="set-page"><h1 class="set-h">${label}</h1>${(SET_PAGES[setCat] || SET_PAGES.general)()}</div>`;
 }
 
@@ -3228,19 +3237,19 @@ function updateCardHtml() {
   const installed = u.installed;
   return `<div class="upd">
     <div class="upd-head">
-      <span class="upd-badge">新版本</span>
-      <span class="upd-ver"><b>MicaBar ${esc(u.version)}</b><span class="upd-cur">当前 ${esc(appInfo?.version || u.current || "")}</span></span>
+      <span class="upd-badge">${tr("新版本")}</span>
+      <span class="upd-ver"><b>MicaBar ${esc(u.version)}</b><span class="upd-cur">${tr("当前 {0}", esc(appInfo?.version || u.current || ""))}</span></span>
       <span class="upd-btns">
-        ${!installed ? `<button class="primary" data-do="open-releases">去下载</button>`
-          : updProgress ? `<button class="primary" disabled>${updProgress.phase === "install" ? "正在安装…" : "下载中…"}</button>`
-          : `<button class="primary" data-do="update-install">${updFailed ? "重试" : "下载并更新"}</button>`}
+        ${!installed ? `<button class="primary" data-do="open-releases">${tr("去下载")}</button>`
+          : updProgress ? `<button class="primary" disabled>${updProgress.phase === "install" ? tr("正在安装…") : tr("下载中…")}</button>`
+          : `<button class="primary" data-do="update-install">${updFailed ? tr("重试") : tr("下载并更新")}</button>`}
       </span>
     </div>
     ${updProgress ? updProgressHtml() : ""}
     ${notes.length ? `<ul class="upd-notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
     <div class="upd-foot">${installed
-      ? "下载后会校验签名并自动安装，MicaBar 会重启一次"
-      : `便携版不能自动更新：下载新的 <span class="mono">MicaBar_${esc(u.version)}_portable.exe</span> 换掉现在这个即可，设置和记录都会保留；也可以改用安装版，以后自动更新`}</div>
+      ? tr("下载后会校验签名并自动安装，MicaBar 会重启一次")
+      : `${tr("便携版不能自动更新：下载新的")} <span class="mono">MicaBar_${esc(u.version)}_portable.exe</span> ${tr("换掉现在这个即可，设置和记录都会保留；也可以改用安装版，以后自动更新")}`}</div>
   </div>`;
 }
 // download / install progress of the update, from the backend's "update-progress" events
@@ -3249,9 +3258,9 @@ let updFailed = false;
 const fmtMB = (b) => (b / 1048576).toFixed(1);
 function updProgressParts() {
   const p = updProgress;
-  if (p.phase === "install") return { pct: 100, text: "已下载并校验签名，正在安装；MicaBar 会关掉再自己打开（可能弹一次 UAC）" };
+  if (p.phase === "install") return { pct: 100, text: tr("已下载并校验签名，正在安装；MicaBar 会关掉再自己打开（可能弹一次 UAC）") };
   const pct = p.total ? Math.min(100, Math.round((p.got / p.total) * 100)) : null;
-  return { pct, text: p.total ? `下载中 ${pct}% · ${fmtMB(p.got)} / ${fmtMB(p.total)} MB` : `下载中 · ${fmtMB(p.got || 0)} MB` };
+  return { pct, text: p.total ? `${tr("下载中 {0}% · {1} / {2} MB", pct, fmtMB(p.got), fmtMB(p.total))}` : `${tr("下载中 · {0} MB", fmtMB(p.got || 0))}` };
 }
 function updProgressHtml() {
   const { pct, text } = updProgressParts();
@@ -3278,10 +3287,10 @@ function refreshAppInfo() {
 const REPO = "https://github.com/aileboeth/MicaBar";
 const AUTHOR = "aileboeth";
 const DISCLAIMER = [
-  "MicaBar 是作者个人业余开发的免费开源软件（MIT 许可），按「现状」提供，不附带任何明示或暗示的担保，包括但不限于对适销性、特定用途适用性和不侵权的担保。",
-  "它在本机读取网络连接、进程、系统通知、正在播放的媒体和 AI 工具的登录状态，这些数据只在本机使用，不会上传给作者；查询出口 IP、AI 额度、检查更新时会访问对应的服务（完整清单见仓库的 README）。「出口控制」「防泄漏」会修改代理软件的覆写配置、添加防火墙规则，并可能重启代理软件。",
-  "因使用或无法使用本软件造成的任何直接或间接损失（包括但不限于数据丢失、断网、代理配置被改动、账号受限），作者不承担责任。请在遵守当地法律法规和各服务使用条款的前提下使用。",
-  "MicaBar 与 Clash、mihomo、Anthropic、OpenAI、Google、xAI 等项目和公司没有任何关联，文中提到的名称和商标归各自的所有者。",
+  tr("MicaBar 是作者个人业余开发的免费开源软件（MIT 许可），按「现状」提供，不附带任何明示或暗示的担保，包括但不限于对适销性、特定用途适用性和不侵权的担保。"),
+  tr("它在本机读取网络连接、进程、系统通知、正在播放的媒体和 AI 工具的登录状态，这些数据只在本机使用，不会上传给作者；查询出口 IP、AI 额度、检查更新时会访问对应的服务（完整清单见仓库的 README）。「出口控制」「防泄漏」会修改代理软件的覆写配置、添加防火墙规则，并可能重启代理软件。"),
+  tr("因使用或无法使用本软件造成的任何直接或间接损失（包括但不限于数据丢失、断网、代理配置被改动、账号受限），作者不承担责任。请在遵守当地法律法规和各服务使用条款的前提下使用。"),
+  tr("MicaBar 与 Clash、mihomo、Anthropic、OpenAI、Google、xAI 等项目和公司没有任何关联，文中提到的名称和商标归各自的所有者。"),
 ];
 
 $("list").addEventListener("change", (e) => {
@@ -3304,7 +3313,7 @@ $("list").addEventListener("change", (e) => {
     invoke("settings_set", { patch: { notify: { apps: { [el.dataset.napp]: { [el.dataset.f]: el.checked } } } } }).catch((err) => toast(String(err), true));
   } else if (el.dataset.ntake) {
     invoke("notify_takeover", { key: el.dataset.ntake, on: el.checked })
-      .then(() => { toast(el.checked ? "已关掉这个程序的 Windows 弹窗，只在岛上显示" : "已还原这个程序的 Windows 弹窗"); loadNotifyInfo(); })
+      .then(() => { toast(el.checked ? tr("已关掉这个程序的 Windows 弹窗，只在岛上显示") : tr("已还原这个程序的 Windows 弹窗")); loadNotifyInfo(); })
       .catch((err) => { toast(String(err), true); loadNotifyInfo(); });
   } else if (el.dataset.grp != null) {
     const cur = new Set(sget("exit.groups", []) || []);
@@ -3432,10 +3441,10 @@ function firstNetHtml() {
   const learning = v && v.learnUntil > Date.now();
   const rows = (v?.apps || []).map((k) => {
     const st = k.blocked ? "blocked" : k.allowed ? "allowed" : "new";
-    const badge = { blocked: `<span class="fn-st blocked">已阻止</span>`, allowed: `<span class="fn-st allowed">已允许</span>`, new: `<span class="fn-st new">待处理</span>` }[st];
+    const badge = { blocked: `<span class="fn-st blocked">${tr("已阻止")}</span>`, allowed: `<span class="fn-st allowed">${tr("已允许")}</span>`, new: `<span class="fn-st new">${tr("待处理")}</span>` }[st];
     const acts = k.blocked
-      ? `<button data-do="fn" data-fn="unblock" data-path="${esc(k.path)}">恢复联网</button>`
-      : `${st === "new" ? `<button data-do="fn" data-fn="allow" data-path="${esc(k.path)}">允许</button>` : ""}<button class="danger" data-do="fn" data-fn="block" data-path="${esc(k.path)}">阻止联网</button>`;
+      ? `<button data-do="fn" data-fn="unblock" data-path="${esc(k.path)}">${tr("恢复联网")}</button>`
+      : `${st === "new" ? `<button data-do="fn" data-fn="allow" data-path="${esc(k.path)}">${tr("允许")}</button>` : ""}<button class="danger" data-do="fn" data-fn="block" data-path="${esc(k.path)}">${tr("阻止联网")}</button>`;
     return `<div class="fn-row ${st}">
       ${iconHtml({ path: k.path, name: k.name, exe: k.exe })}
       <div class="fn-main"><div class="fn-top"><b>${esc(k.name)}</b>${badge}<span class="fn-when">${ago(k.first)}</span></div>
@@ -3443,12 +3452,12 @@ function firstNetHtml() {
       <div class="fn-acts">${acts}</div>
     </div>`;
   }).join("");
-  const note = !on ? "已关闭"
-    : learning ? `正在熟悉这台电脑上常用的程序（还剩 ${Math.ceil((v.learnUntil - Date.now()) / 60000)} 分钟），之后第一次联网的程序会弹出提醒`
-    : "程序第一次连上公网时在岛上提醒，可以一键阻止（Windows 防火墙规则）";
+  const note = !on ? tr("已关闭")
+    : learning ? `${tr("正在熟悉这台电脑上常用的程序（还剩 {0} 分钟），之后第一次联网的程序会弹出提醒", Math.ceil((v.learnUntil - Date.now()) / 60000))}`
+    : tr("程序第一次连上公网时在岛上提醒，可以一键阻止（Windows 防火墙规则）");
   return `<div class="g-sec fn-sec">
-    <div class="g-head"><b>新程序联网</b><span class="g-note">${note}</span><span class="sp"></span><button data-do="fn-toggle">${on ? "关闭" : "开启"}</button></div>
-    ${rows || (on ? `<div class="empty fn-empty">${learning ? "学习中…" : "还没有新程序联网"}</div>` : "")}
+    <div class="g-head"><b>${tr("新程序联网")}</b><span class="g-note">${note}</span><span class="sp"></span><button data-do="fn-toggle">${on ? tr("关闭") : tr("开启")}</button></div>
+    ${rows || (on ? `<div class="empty fn-empty">${learning ? tr("学习中…") : tr("还没有新程序联网")}</div>` : "")}
   </div>`;
 }
 
@@ -3464,60 +3473,60 @@ function guardTabHtml() {
     ? alerts.map((a) => {
         const cls = a.active ? (a.acked ? "acked" : "on") : "off";
         const what = a.host ? `${esc(a.host)}${a.port ? `<span class="port">:${a.port}</span>` : ""}` : `<span class="mono">${esc(a.ip || "")}</span>`;
-        const kind = a.kind === "bypass" ? `<span class="a-kind bypass">绕过代理</span>` : `<span class="a-kind">规则漏网</span>`;
+        const kind = a.kind === "bypass" ? `<span class="a-kind bypass">${tr("绕过代理")}</span>` : `<span class="a-kind">${tr("规则漏网")}</span>`;
         const why = a.kind === "bypass"
-          ? "没经过代理软件，直接从网卡连了出去（程序不走系统代理，或连接早于 TUN 建立）"
-          : `经过了代理软件，但被分流规则判成直连${a.rule ? `（${esc(a.rule)}）` : ""}`;
+          ? tr("没经过代理软件，直接从网卡连了出去（程序不走系统代理，或连接早于 TUN 建立）")
+          : `${tr("经过了代理软件，但被分流规则判成直连{0}", a.rule ? `${tr("（{0}）", esc(a.rule))}` : "")}`;
         const acts = [];
         if (a.kind === "bypass" && a.path) {
-          if (a.blocked) acts.push(`<span class="ok">✓ 已禁止 ${esc(a.exe)} 直连</span><button data-unblock="${esc(a.path)}">解除</button>`);
-          else if (!g.tun) acts.push(`<button class="danger" data-block='${ds({ path: a.path, exe: a.exe })}'>禁止 ${esc(a.exe)} 直连</button>`);
+          if (a.blocked) acts.push(`<span class="ok">${tr("✓ 已禁止 {0} 直连", esc(a.exe))}</span><button data-unblock="${esc(a.path)}">${tr("解除")}</button>`);
+          else if (!g.tun) acts.push(`<button class="danger" data-block='${ds({ path: a.path, exe: a.exe })}'>${tr("禁止 {0} 直连", esc(a.exe))}</button>`);
         }
-        if (a.kind === "rule" && !ctlActive) acts.push(`<button data-do="goto-rules">启用出口控制来自动纠正</button>`);
-        if (a.host) acts.push(`<button data-exclude="${esc(a.host)}" title="以后这个域名直连也不预警">忽略这个域名</button>`);
-        if (a.active && !a.acked) acts.push(`<button data-ack="${esc(a.key)}">知道了</button>`);
+        if (a.kind === "rule" && !ctlActive) acts.push(`<button data-do="goto-rules">${tr("启用出口控制来自动纠正")}</button>`);
+        if (a.host) acts.push(`<button data-exclude="${esc(a.host)}" title="${tr("以后这个域名直连也不预警")}">${tr("忽略这个域名")}</button>`);
+        if (a.active && !a.acked) acts.push(`<button data-ack="${esc(a.key)}">${tr("知道了")}</button>`);
         return `<div class="alert-card ${cls}">
-          <div class="a-top">${iconHtml({ path: a.path, name: a.app, exe: a.exe })}${kind}<span class="a-what"><b>${esc(a.app)}</b> → ${what}</span><span class="a-when">${a.active ? "进行中" : ago(a.last)}</span></div>
-          <div class="a-sub">${why} · 命中「${esc(a.hit)}」${a.ip && a.host ? ` · <span class="mono">${esc(a.ip)}</span>` : ""}</div>
+          <div class="a-top">${iconHtml({ path: a.path, name: a.app, exe: a.exe })}${kind}<span class="a-what"><b>${esc(a.app)}</b> → ${what}</span><span class="a-when">${a.active ? tr("进行中") : ago(a.last)}</span></div>
+          <div class="a-sub">${tr("{0} · 命中「{1}」{2}", why, esc(a.hit), a.ip && a.host ? ` · <span class="mono">${esc(a.ip)}</span>` : "")}</div>
           ${acts.length ? `<div class="a-acts">${acts.join("")}</div>` : ""}
         </div>`;
       }).join("")
-    : `<div class="empty">暂时没有泄漏。正在比对 ${g.total || 0} 条「应走代理」规则。</div>`;
+    : `<div class="empty">${tr("暂时没有泄漏。正在比对 {0} 条「应走代理」规则。", g.total || 0)}</div>`;
 
   const opt = (key, label, note, extra = "") =>
     `<label class="g-opt"><input type="checkbox" data-opt="${key}" ${s[key] ? "checked" : ""}><span>${label}</span><span class="g-note">${note}</span>${extra}</label>`;
   const gfwNote = s.gfwError
     ? `<span class="g-err">${esc(s.gfwError)}</span>`
-    : s.gfwUpdated ? `${srcCount("gfw")} 条 · 更新于 ${ago(s.gfwUpdated)}` : "还没下载";
+    : s.gfwUpdated ? `${tr("{0} 条 · 更新于 {1}", srcCount("gfw"), ago(s.gfwUpdated))}` : tr("还没下载");
   const forceNote = ctlActive
-    ? "规则库里的网站要被判成直连时，改走 MicaBar 分组（不影响订阅已分到代理组的）"
-    : "需要先在「出口」页启用出口控制";
-  const imports = (s.imports || []).map((i) => `<label class="g-opt"><input type="checkbox" data-imp='${ds({ url: i.url })}' ${i.enabled ? "checked" : ""}><span class="g-note" title="${esc(i.url)}">${esc(i.url)}</span><span class="g-note" style="flex:none">${i.count} 条</span><button data-imprm="${esc(i.url)}">删除</button></label>`).join("");
-  const kindLabel = { suffix: "", keyword: "关键词 ", cidr: "IP ", exclude: "排除 " };
-  const chips = (s.custom || []).map((e) => `<span class="chip ${e.kind === "exclude" ? "exclude" : ""}"><span class="k">${kindLabel[e.kind] || ""}</span>${esc(e.value)}<button data-crm='${ds(e)}' title="删除">✕</button></span>`).join("");
-  const blocked = (s.blocked || []).map((b) => `<div class="g-opt"><span>${esc(b.exe)}</span><span class="g-note" title="${esc(b.path)}">${esc(b.path)}</span><button data-unblock="${esc(b.path)}">解除</button></div>`).join("");
+    ? tr("规则库里的网站要被判成直连时，改走 MicaBar 分组（不影响订阅已分到代理组的）")
+    : tr("需要先在「出口」页启用出口控制");
+  const imports = (s.imports || []).map((i) => `<label class="g-opt"><input type="checkbox" data-imp='${ds({ url: i.url })}' ${i.enabled ? "checked" : ""}><span class="g-note" title="${esc(i.url)}">${esc(i.url)}</span><span class="g-note" style="flex:none">${tr("{0} 条", i.count)}</span><button data-imprm="${esc(i.url)}">${tr("删除")}</button></label>`).join("");
+  const kindLabel = { suffix: "", keyword: tr("关键词 "), cidr: "IP ", exclude: tr("排除 ") };
+  const chips = (s.custom || []).map((e) => `<span class="chip ${e.kind === "exclude" ? "exclude" : ""}"><span class="k">${kindLabel[e.kind] || ""}</span>${esc(e.value)}<button data-crm='${ds(e)}' title="${tr("删除")}">✕</button></span>`).join("");
+  const blocked = (s.blocked || []).map((b) => `<div class="g-opt"><span>${esc(b.exe)}</span><span class="g-note" title="${esc(b.path)}">${esc(b.path)}</span><button data-unblock="${esc(b.path)}">${tr("解除")}</button></div>`).join("");
 
   return `<div class="g-sec">
-      <div class="g-head"><b>泄漏预警</b><span class="sp"></span>
-        ${g.unacked ? `<button data-do="ack-all">全部知道了</button>` : ""}
-        ${alerts.some((a) => !a.active) ? `<button data-do="clear-alerts">清除已结束</button>` : ""}
+      <div class="g-head"><b>${tr("泄漏预警")}</b><span class="sp"></span>
+        ${g.unacked ? `<button data-do="ack-all">${tr("全部知道了")}</button>` : ""}
+        ${alerts.some((a) => !a.active) ? `<button data-do="clear-alerts">${tr("清除已结束")}</button>` : ""}
       </div>${cards}
     </div>
     ${firstNetHtml()}
     <div class="g-sec">
-      <div class="g-head"><b>应走代理的规则库</b><span>共 ${g.total || 0} 条</span></div>
-      ${opt("builtin", "内置常见服务", `${srcCount("内置")} 个主域：Google、YouTube、GitHub、Telegram、X、OpenAI、Claude…`)}
-      ${opt("gfw", "订阅 gfw 列表", gfwNote, `<button data-do="gfw-update">更新</button>`)}
-      ${opt("forceProxy", "提前拦截：强制走代理", forceNote)}
-      ${opt("notify", "系统通知", "同一程序 + 域名 10 分钟内只通知一次；全屏游戏时不弹")}
-      <div class="g-head" style="margin-top:6px">导入规则列表（Clash / v2fly / 纯域名格式）</div>
+      <div class="g-head"><b>${tr("应走代理的规则库")}</b><span>${tr("共 {0} 条", g.total || 0)}</span></div>
+      ${opt("builtin", tr("内置常见服务"), `${tr("{0} 个主域：Google、YouTube、GitHub、Telegram、X、OpenAI、Claude…", srcCount(tr("内置")))}`)}
+      ${opt("gfw", tr("订阅 gfw 列表"), gfwNote, `<button data-do="gfw-update">${tr("更新")}</button>`)}
+      ${opt("forceProxy", tr("提前拦截：强制走代理"), forceNote)}
+      ${opt("notify", tr("系统通知"), tr("同一程序 + 域名 10 分钟内只通知一次；全屏游戏时不弹"))}
+      <div class="g-head" style="margin-top:6px">${tr("导入规则列表（Clash / v2fly / 纯域名格式）")}</div>
       ${imports}
-      <div class="g-row"><input id="g-import" placeholder="https://…/xxx.txt 或 .yaml" spellcheck="false"><button data-do="import">导入</button></div>
-      <div class="g-head" style="margin-top:6px">自定义</div>
-      <div class="chips">${chips || `<span class="g-note">还没有</span>`}</div>
-      <div class="g-row"><input id="g-add" placeholder="域名 / IP 或 CIDR / keyword:关键词 / !域名（排除）" spellcheck="false"><button data-do="add">添加</button></div>
+      <div class="g-row"><input id="g-import" placeholder="${tr("https://…/xxx.txt 或 .yaml")}" spellcheck="false"><button data-do="import">${tr("导入")}</button></div>
+      <div class="g-head" style="margin-top:6px">${tr("自定义")}</div>
+      <div class="chips">${chips || `<span class="g-note">${tr("还没有")}</span>`}</div>
+      <div class="g-row"><input id="g-add" placeholder="${tr("域名 / IP 或 CIDR / keyword:关键词 / !域名（排除）")}" spellcheck="false"><button data-do="add">${tr("添加")}</button></div>
     </div>
-    ${blocked ? `<div class="g-sec"><div class="g-head"><b>已禁止直连的程序</b><span>Windows 防火墙规则，只拦公网直连，本机代理端口不受影响</span></div>${blocked}</div>` : ""}`;
+    ${blocked ? `<div class="g-sec"><div class="g-head"><b>${tr("已禁止直连的程序")}</b><span>${tr("Windows 防火墙规则，只拦公网直连，本机代理端口不受影响")}</span></div>${blocked}</div>` : ""}`;
 }
 
 // While the cursor is over the list, rows keep their order (no re-sorting by live speed) and rows
@@ -3568,7 +3577,7 @@ document.addEventListener("pointercancel", releaseList);
 
 function connHtml(app, c) {
   if (c._gone) {
-    return `<div class="c gone"><div class="c-l1"><span class="c-proto mono">${c.proto}</span><span class="c-lp mono">:${c.localPort}</span><span class="c-arrow">→</span><span class="c-dst">${esc(c.host || c.remote || "")}</span><span class="c-spd">已断开</span></div></div>`;
+    return `<div class="c gone"><div class="c-l1"><span class="c-proto mono">${c.proto}</span><span class="c-lp mono">:${c.localPort}</span><span class="c-arrow">→</span><span class="c-dst">${esc(c.host || c.remote || "")}</span><span class="c-spd">${tr("已断开")}</span></div></div>`;
   }
   const idx = refs.push([app, c]) - 1;
   const dst = c.host
@@ -3584,16 +3593,16 @@ function connHtml(app, c) {
     const route = `<span class="${routeClass(c.node)}">${decorate(c.node)}</span>${c.group ? " · " + decorate(c.group) : ""}`;
     l2.push(route);
   }
-  if (c.rule && /micabar-guard/.test(c.rule)) l2.push(`<span class="ni" title="规则库里的网站本该被判成直连，守卫让它改走代理">守卫：强制走代理</span>`);
-  else if (c.rule && /micabar-/.test(c.rule)) l2.push(`<span class="ni">MicaBar 规则</span>`);
+  if (c.rule && /micabar-guard/.test(c.rule)) l2.push(`<span class="ni" title="${tr("规则库里的网站本该被判成直连，守卫让它改走代理")}">${tr("守卫：强制走代理")}</span>`);
+  else if (c.rule && /micabar-/.test(c.rule)) l2.push(`<span class="ni">${tr("MicaBar 规则")}</span>`);
   else if (c.rule) l2.push(esc(c.rule));
-  if (c.viaProxyPort) l2.push("经本地代理端口");
-  if (c.leak) l2.push(`<span class="leak" title="规则库里的「${esc(c.leak)}」本该走代理">⚠ 泄漏</span>`);
-  if (c.bypass) l2.push(`<span class="st" title="代理软件在运行，但这条连接没经过它（程序不走系统代理，或连接早于 TUN 建立）">未经代理</span>`);
+  if (c.viaProxyPort) l2.push(tr("经本地代理端口"));
+  if (c.leak) l2.push(`<span class="leak" title="${tr("规则库里的「{0}」本该走代理", esc(c.leak))}">${tr("⚠ 泄漏")}</span>`);
+  if (c.bypass) l2.push(`<span class="st" title="${tr("代理软件在运行，但这条连接没经过它（程序不走系统代理，或连接早于 TUN 建立）")}">${tr("未经代理")}</span>`);
   if (c.state && c.state !== "ESTABLISHED" && c.state !== "ACTIVE") l2.push(`<span class="st">${esc(c.state)}</span>`);
   const sp = (c.up || c.down) ? `<span class="c-spd mono">${speedHtml(c.up, c.down)}</span>` : "";
   const act = !app.isProxy && ctrl().status !== "unavailable" && (c.host || c.remote)
-    ? `<button class="c-act" data-act="${idx}" title="这条连接走哪个出口">⋯</button>` : "";
+    ? `<button class="c-act" data-act="${idx}" title="${tr("这条连接走哪个出口")}">⋯</button>` : "";
   return `<div class="c">
     <div class="c-l1"><span class="c-proto mono ${c.proto === "UDP" ? "udp" : ""}">${c.proto}</span><span class="c-lp mono">:${c.localPort}</span><span class="c-arrow">→</span><span class="c-dst">${dst}</span>${sp}${act}</div>
     ${l2.length ? `<div class="c-l2">${l2.join(" · ")}</div>` : ""}
@@ -3635,7 +3644,7 @@ function renderListNow(force) {
     return;
   }
   if (!snap) {
-    list.innerHTML = `<div class="empty">正在读取连接…</div>`;
+    list.innerHTML = `<div class="empty">${tr("正在读取连接…")}</div>`;
     return;
   }
   // don't wipe what the user is typing into an input inside the list
@@ -3664,9 +3673,9 @@ function renderListNow(force) {
     const leaks = snap.guard?.unacked || 0;
     if (diag.problem && sget("diag.on", true)) {
       const dp = diag.problem;
-      rows.push(`<div class="banner alert dg-banner ${dp.kind === "sysproxy" ? "warn" : ""}">${svgI(dp.kind === "sysproxy" ? DG_PATH.plug : DG_PATH.wifiOff, 15, 2.2)}<span><b>${esc(dp.problem || "网络异常")}</b> · ${esc(dp.verdict || "")}</span><button class="primary" data-do="diag-open">查看诊断</button></div>`);
+      rows.push(`<div class="banner alert dg-banner ${dp.kind === "sysproxy" ? "warn" : ""}">${svgI(dp.kind === "sysproxy" ? DG_PATH.plug : DG_PATH.wifiOff, 15, 2.2)}<span><b>${esc(dp.problem || tr("网络异常"))}</b> · ${esc(dp.verdict || "")}</span><button class="primary" data-do="diag-open">${tr("查看诊断")}</button></div>`);
     }
-    if (leaks) rows.push(`<div class="banner alert">⚠ 检测到 ${leaks} 条代理泄漏：本该走代理的连接直连了。<button class="primary" data-do="goto-guard">查看</button></div>`);
+    if (leaks) rows.push(`<div class="banner alert">${tr("⚠ 检测到 {0} 条代理泄漏：本该走代理的连接直连了。", leaks)}<button class="primary" data-do="goto-guard">${tr("查看")}</button></div>`);
     const b = bannerHtml();
     if (b) rows.push(b);
     const visible = snap.apps.filter((app) => app.conns.some((c) => matches(app, c)));
@@ -3674,17 +3683,17 @@ function renderListNow(force) {
       if (!connOrders.has(app.key)) connOrders.set(app.key, { order: null, last: new Map() });
       const conns = app._gone ? [] : stable(app.conns.filter((c) => matches(app, c)), connKey, connOrders.get(app.key));
       if (app._gone) {
-        rows.push(`<div class="app gone" data-key="${esc(app.key)}"><div class="app-head">${iconHtml(app)}<div class="app-name">${esc(app.name)}<span class="sub">连接已结束</span></div></div></div>`);
+        rows.push(`<div class="app gone" data-key="${esc(app.key)}"><div class="app-head">${iconHtml(app)}<div class="app-name">${esc(app.name)}<span class="sub">${tr("连接已结束")}</span></div></div></div>`);
         continue;
       }
       const open = openApps.has(app.key) || (query && conns.length <= 8);
-      const procs = app.pids.length > 1 ? `<span class="sub">${app.pids.length} 个进程</span>` : "";
-      const tag = app.isProxy ? `<span class="tag">代理</span>` : "";
+      const procs = app.pids.length > 1 ? `<span class="sub">${tr("{0} 个进程", app.pids.length)}</span>` : "";
+      const tag = app.isProxy ? `<span class="tag">${tr("代理")}</span>` : "";
       let body = "";
       if (open) {
         const limit = showAll.has(app.key) ? conns.length : MAX_CONNS_PER_APP;
         body = `<div class="conns">${conns.slice(0, limit).map((c) => connHtml(app, c)).join("")}${
-          conns.length > limit ? `<div class="more" data-more="${esc(app.key)}">还有 ${conns.length - limit} 条，点击显示全部</div>` : ""
+          conns.length > limit ? `<div class="more" data-more="${esc(app.key)}">${tr("还有 {0} 条，点击显示全部", conns.length - limit)}</div>` : ""
         }</div>`;
       }
       rows.push(`<div class="app ${open ? "open" : ""}" data-key="${esc(app.key)}">
@@ -3705,18 +3714,18 @@ function renderListNow(force) {
       rows.push(`<div class="app open" data-key="${esc(app.key)}">
         <div class="app-head" tabindex="0" title="${esc(app.path || app.exe)}">
           ${iconHtml(app)}
-          <div class="app-name">${esc(app.name)}${app.isProxy ? `<span class="tag">代理</span>` : ""}</div>
+          <div class="app-name">${esc(app.name)}${app.isProxy ? `<span class="tag">${tr("代理")}</span>` : ""}</div>
           <div class="app-count mono">${ports.length}</div>
         </div>
         <div class="ports">${ports.map((p) => {
           const pub = /\s(0\.0\.0\.0|::):/.test(p);
-          return `<span class="port-chip mono ${pub ? "pub" : ""}" title="${pub ? "监听所有网卡（局域网可访问）" : ""}">${esc(p)}</span>`;
+          return `<span class="port-chip mono ${pub ? "pub" : ""}" title="${pub ? tr("监听所有网卡（局域网可访问）") : ""}">${esc(p)}</span>`;
         }).join("")}</div>
       </div>`);
     }
   }
   const scroll = list.scrollTop;
-  list.innerHTML = `<div id="list-inner">${rows.length ? rows.join("") : `<div class="empty">${query ? "没有匹配的结果" : "没有连接"}</div>`}</div>`;
+  list.innerHTML = `<div id="list-inner">${rows.length ? rows.join("") : `<div class="empty">${query ? tr("没有匹配的结果") : tr("没有连接")}</div>`}</div>`;
   list.scrollTop = scroll;
   measurePanel();
 }
@@ -3742,9 +3751,9 @@ function renderPanel() {
   renderList();
   const foot = [];
   if (snap) {
-    if (!snap.speedOk) foot.push(`<span class="warn">每程序网速不可用：${esc(snap.speedError || "")}</span>`);
-    if (snap.hiddenLoopback) foot.push(`已隐藏 ${snap.hiddenLoopback} 条本机回环连接`);
-    if (!snap.geoSource) foot.push(`<span class="warn">没找到 IP 归属地库（country.mmdb / ASN.mmdb）</span>`);
+    if (!snap.speedOk) foot.push(`<span class="warn">${tr("每程序网速不可用：{0}", esc(snap.speedError || ""))}</span>`);
+    if (snap.hiddenLoopback) foot.push(`${tr("已隐藏 {0} 条本机回环连接", snap.hiddenLoopback)}`);
+    if (!snap.geoSource) foot.push(`<span class="warn">${tr("没找到 IP 归属地库（country.mmdb / ASN.mmdb）")}</span>`);
   }
   $("foot").innerHTML = foot.map((x) => `<span>${x}</span>`).join("");
   measurePanel();
@@ -3778,13 +3787,13 @@ async function runAction(el) {
       // installing / updating the override restarts the proxy client: ask first
       const c = ctrl();
       const client = c.client || "Clash Party";
-      const what = c.status === "available" && c.message ? "更新覆写" : c.status === "error" ? "重试" : "启用出口控制";
-      const html = `<div class="m-title">${what}需要重启 ${esc(client)}</div>
-        <div class="m-warn">MicaBar 会给 ${esc(client)} 写入一个全局覆写，然后把它关掉再打开一次：
-          <ul><li><b>代理会断开约 3~5 秒</b>，正在进行的下载、通话、游戏可能会掉线</li>
-          <li>${esc(client)} 的窗口可能会弹出来</li>
-          <li>加载失败会自动还原成原来的设置</li></ul></div>
-        <div class="m-actions"><button class="ghost" data-do="menu-close">取消</button><button class="primary" data-do="enable-go">现在重启并${what === "重试" ? "重试" : what.replace("启用出口控制", "启用")}</button></div>`;
+      const what = c.status === "available" && c.message ? tr("更新覆写") : c.status === "error" ? tr("重试") : tr("启用出口控制");
+      const html = `<div class="m-title">${tr("{0}需要重启 {1}", what, esc(client))}</div>
+        <div class="m-warn">${tr("MicaBar 会给 {0} 写入一个全局覆写，然后把它关掉再打开一次：", esc(client))}
+          <ul><li><b>${tr("代理会断开约 3~5 秒")}</b>${tr("，正在进行的下载、通话、游戏可能会掉线")}</li>
+          <li>${tr("{0} 的窗口可能会弹出来", esc(client))}</li>
+          <li>${tr("加载失败会自动还原成原来的设置")}</li></ul></div>
+        <div class="m-actions"><button class="ghost" data-do="menu-close">${tr("取消")}</button><button class="primary" data-do="enable-go">${tr("现在重启并{0}", what === tr("重试") ? tr("重试") : what.replace(tr("启用出口控制"), tr("启用")))}</button></div>`;
       if (el.closest && el.closest("#menu")) {
         $("menu").innerHTML = html; // already inside a menu: replace it in place
       } else {
@@ -3793,9 +3802,9 @@ async function runAction(el) {
       return;
     } else if (act === "enable-go") {
       closeMenu();
-      toast(`正在写入覆写并重启 ${ctrl().client || "Clash Party"}（代理会断开几秒）…`);
+      toast(`${tr("正在写入覆写并重启 {0}（代理会断开几秒）…", ctrl().client || "Clash Party")}`);
       await invoke("control_enable");
-      toast("出口控制已启用");
+      toast(tr("出口控制已启用"));
     } else if (act === "menu-close") {
       closeMenu();
       return;
@@ -3807,13 +3816,13 @@ async function runAction(el) {
         setTimeout(() => { confirmDisable = false; renderList(); }, 4000);
       } else {
         confirmDisable = false;
-        toast("正在移除覆写并重启 Clash Party…");
+        toast(tr("正在移除覆写并重启 Clash Party…"));
         await invoke("control_disable");
-        toast("出口控制已停用（规则保留，重新启用即可恢复）");
+        toast(tr("出口控制已停用（规则保留，重新启用即可恢复）"));
       }
     } else if (act === "notify-test") {
       await invoke("notify_test");
-      if (MANAGER || expanded) toast("测试通知已发出：收起面板时会在岛上弹出，也在通知页里");
+      if (MANAGER || expanded) toast(tr("测试通知已发出：收起面板时会在岛上弹出，也在通知页里"));
       return;
     } else if (act === "hook") {
       // changes the tool's own config file: one more click to confirm
@@ -3852,9 +3861,9 @@ async function runAction(el) {
       afterNotesChange();
       return;
     } else if (act === "update-check") {
-      toast("正在检查更新…");
+      toast(tr("正在检查更新…"));
       updateInfo = await invoke("update_check");
-      toast(updateInfo.available ? `有新版本 ${updateInfo.version}` : "已经是最新版本");
+      toast(updateInfo.available ? `${tr("有新版本 {0}", updateInfo.version)}` : tr("已经是最新版本"));
       renderList(true);
       return;
     } else if (act === "update-install") {
@@ -3872,9 +3881,9 @@ async function runAction(el) {
       return;
     } else if (act === "proc-end") {
       const name = el.dataset.name, n = Number(el.dataset.n) || 1;
-      openMenu(el, `<div class="m-title">结束「${esc(name)}」？</div>
-        <div class="m-warn">会强制结束它的 ${n > 1 ? `全部 ${n} 个进程` : "进程"}，<b>没保存的内容会丢失</b>。Windows 自己的核心进程和 MicaBar 不会被结束。</div>
-        <div class="m-actions"><button class="ghost" data-do="menu-close">取消</button><button class="danger" data-do="proc-end-go" data-name="${esc(name)}">结束</button></div>`);
+      openMenu(el, `<div class="m-title">${tr("结束「{0}」？", esc(name))}</div>
+        <div class="m-warn">${tr("会强制结束它的 {0}，", n > 1 ? `${tr("全部 {0} 个进程", n)}` : tr("进程"))}<b>${tr("没保存的内容会丢失")}</b>${tr("。Windows 自己的核心进程和 MicaBar 不会被结束。")}</div>
+        <div class="m-actions"><button class="ghost" data-do="menu-close">${tr("取消")}</button><button class="danger" data-do="proc-end-go" data-name="${esc(name)}">${tr("结束")}</button></div>`);
       return;
     } else if (act === "startup-refresh") {
       startupItems = null;
@@ -3883,11 +3892,11 @@ async function runAction(el) {
     } else if (act === "proc-end-go") {
       closeMenu();
       const [ok, bad] = await invoke("sysmon_end", { name: el.dataset.name });
-      toast(ok ? `已结束 ${el.dataset.name}（${ok} 个进程）${bad ? `，${bad} 个没结束掉（权限不够或已退出）` : ""}` : `没能结束 ${el.dataset.name}${bad ? "：权限不够" : "：它可能已经退出了"}`, !ok);
+      toast(ok ? `${tr("已结束 {0}（{1} 个进程）{2}", el.dataset.name, ok, bad ? `${tr("，{0} 个没结束掉（权限不够或已退出）", bad)}` : "")}` : `${tr("没能结束 {0}{1}", el.dataset.name, bad ? tr("：权限不够") : tr("：它可能已经退出了"))}`, !ok);
       return;
     } else if (act === "ring-reset") {
       await invoke("settings_set", { patch: { ai: { ring: { warn: 60, crit: 85, colors: { ok: "#34d399", warn: "#fbbf24", crit: "#f87171" } } } } });
-      toast("额度环的颜色和阈值已恢复默认");
+      toast(tr("额度环的颜色和阈值已恢复默认"));
       return;
     } else if (act === "open-releases") {
       invoke("open_url", { url: REPO + "/releases/latest" });
@@ -3902,41 +3911,41 @@ async function runAction(el) {
       invoke("open_url", { url: "https://github.com/" + AUTHOR });
       return;
     } else if (act === "tour-restart") {
-      invoke("tour_restart").then(() => toast("教程在岛上开始了")).catch((err) => toast(String(err), true));
+      invoke("tour_restart").then(() => toast(tr("教程在岛上开始了"))).catch((err) => toast(String(err), true));
       return;
     } else if (act === "open-logs") {
       if (appInfo?.logDir) invoke("open_url", { url: appInfo.logDir });
       return;
     } else if (act === "lat-probe") {
-      toast("测速中…");
+      toast(tr("测速中…"));
       const l = await invoke("latency_probe");
-      toast(l.ms != null ? `${l.ms} ms` : `无响应：${l.error || ""}`, l.ms == null);
+      toast(l.ms != null ? `${l.ms} ms` : `${tr("无响应：{0}", l.error || "")}`, l.ms == null);
     } else if (act === "hotkey-rec") {
       hotkeyRec = !hotkeyRec;
       renderList(true);
       return;
     } else if (act === "settings-reset") {
       await invoke("settings_reset");
-      toast("已恢复默认设置");
+      toast(tr("已恢复默认设置"));
       return;
     } else if (act === "size-reset") {
       await setPath("size", { ...SIZE_DEFAULTS });
-      toast("已恢复默认大小");
+      toast(tr("已恢复默认大小"));
       return;
     } else if (act === "layout-edit") {
       await invoke("layout_edit", { on: true });
-      toast("到屏幕上的岛那里拖动边缘调整大小，调完点「完成」");
+      toast(tr("到屏幕上的岛那里拖动边缘调整大小，调完点「完成」"));
       return;
     } else if (act === "ai-refresh") {
       const waiting = (await invoke("ai_refresh")) || [];
       toast(waiting.length
-        ? `正在查询；${waiting.map((w) => w.replace(" ", " 要到 ")).join("、")} 才能再查（官方接口限流很严，查太勤会被暂停）`
-        : "正在查询 AI 额度…");
+        ? `${tr("正在查询；{0} 才能再查（官方接口限流很严，查太勤会被暂停）", waiting.map((w) => w.replace(" ", tr(" 要到 "))).join(tr("、")))}`
+        : tr("正在查询 AI 额度…"));
       return;
     } else if (act === "exit-refresh") {
       await invoke("refresh_exit");
       if (exitState) exitState.checking = true;
-      toast("正在重新检测出口…");
+      toast(tr("正在重新检测出口…"));
     } else if (act === "media-prev" || act === "media-toggle" || act === "media-next") {
       await invoke("media_control", { action: { "media-prev": "previous", "media-toggle": "play-pause", "media-next": "next" }[act] });
       return;
@@ -3951,30 +3960,30 @@ async function runAction(el) {
     } else if (act === "clear-alerts") {
       await invoke("alert_clear");
     } else if (act === "gfw-update") {
-      toast("正在下载 gfw 列表…");
+      toast(tr("正在下载 gfw 列表…"));
       const n = await invoke("guard_update_gfw");
-      toast(`gfw 列表已更新：${n} 条`);
+      toast(`${tr("gfw 列表已更新：{0} 条", n)}`);
     } else if (act === "import") {
       const url = $("g-import").value.trim();
       if (!url) return;
-      toast("正在下载…");
+      toast(tr("正在下载…"));
       const n = await invoke("guard_import", { url });
       $("g-import").value = "";
       $("g-import").blur();
-      toast(`已导入 ${n} 条`);
+      toast(`${tr("已导入 {0} 条", n)}`);
     } else if (act === "add") {
       const text = $("g-add").value.trim();
       if (!text) return;
       await invoke("guard_add", { text });
       $("g-add").value = "";
       $("g-add").blur();
-      toast("已添加");
+      toast(tr("已添加"));
     } else if (act === "nodes") {
       nodesCache = nodesCache ? null : await invoke("control_nodes", { test: false });
     } else if (act === "test") {
-      toast("测速中…");
+      toast(tr("测速中…"));
       nodesCache = await invoke("control_nodes", { test: true });
-      toast("测速完成");
+      toast(tr("测速完成"));
     }
   } catch (err) {
     toast(String(err), true);
@@ -3986,8 +3995,8 @@ async function applyRule(spec) {
   closeMenu();
   try {
     const n = await invoke("control_set", spec);
-    const what = spec.target === "default" ? "已恢复按规则" : `已设为${TARGET_LABEL[spec.target]}`;
-    toast(n ? `${what}，断开重连了 ${n} 条连接` : what);
+    const what = spec.target === "default" ? tr("已恢复按规则") : `${tr("已设为{0}", TARGET_LABEL[spec.target])}`;
+    toast(n ? `${tr("{0}，断开重连了 {1} 条连接", what, n)}` : what);
   } catch (err) {
     toast(String(err), true);
   }
@@ -4031,7 +4040,7 @@ $("panel").addEventListener("click", (e) => {
   const node = e.target.closest("[data-node]");
   if (node) {
     invoke("control_select", { name: node.dataset.node })
-      .then(() => { if (nodesCache) nodesCache.now = node.dataset.node; toast("已切换节点"); renderList(); })
+      .then(() => { if (nodesCache) nodesCache.now = node.dataset.node; toast(tr("已切换节点")); renderList(); })
       .catch((err) => toast(String(err), true));
     return;
   }
@@ -4103,7 +4112,7 @@ $("panel").addEventListener("click", (e) => {
   }
   const rm = e.target.closest("[data-rm]");
   if (rm) {
-    invoke("control_remove", { id: rm.dataset.rm }).then(() => toast("已删除规则")).catch((err) => toast(String(err), true));
+    invoke("control_remove", { id: rm.dataset.rm }).then(() => toast(tr("已删除规则"))).catch((err) => toast(String(err), true));
     return;
   }
   if (!inMenu) closeMenu();
@@ -4117,13 +4126,13 @@ async function guardAction(el) {
       toast(await invoke("guard_block", { path, exe }));
     } else if (d.unblock) {
       await invoke("guard_unblock", { path: d.unblock });
-      toast("已解除");
+      toast(tr("已解除"));
     } else if (d.ack) {
       await invoke("alert_ack", { key: d.ack });
     } else if (d.exclude) {
       await invoke("guard_add", { text: "!" + d.exclude });
       await invoke("alert_ack", { key: null });
-      toast(`以后 ${d.exclude} 直连不再预警`);
+      toast(`${tr("以后 {0} 直连不再预警", d.exclude)}`);
     } else if (d.imprm) {
       await invoke("guard_import_set", { url: d.imprm, enabled: null, remove: true });
     } else if (d.crm) {
@@ -4143,7 +4152,7 @@ $("list").addEventListener("change", async (e) => {
     if (el.dataset.opt) {
       const s = { ...(snap.guard?.settings || {}) };
       s[el.dataset.opt] = el.checked;
-      if (el.dataset.opt === "gfw" && el.checked) toast("正在下载 gfw 列表…");
+      if (el.dataset.opt === "gfw" && el.checked) toast(tr("正在下载 gfw 列表…"));
       await invoke("guard_options", { builtin: !!s.builtin, gfw: !!s.gfw, forceProxy: !!s.forceProxy, notify: !!s.notify });
     } else if (el.dataset.imp) {
       await invoke("guard_import_set", { url: JSON.parse(el.dataset.imp).url, enabled: el.checked, remove: false });
@@ -4178,29 +4187,29 @@ $("list").addEventListener("click", (e) => {
 // ---------- tabs (order and visibility come from settings) ----------
 
 const TAB_DEFS = {
-  conns: { label: "连接", count: true },
-  listen: { label: "监听", count: true },
-  rules: { label: "出口", count: true },
-  guard: { label: "预警", count: true },
-  speed: { label: "网速" },
-  traffic: { label: "流量" },
-  nodes: { label: "节点" },
+  conns: { label: trc("tab", "连接"), count: true },
+  listen: { label: trc("tab", "监听"), count: true },
+  rules: { label: tr("出口"), count: true },
+  guard: { label: tr("预警"), count: true },
+  speed: { label: tr("网速") },
+  traffic: { label: tr("流量") },
+  nodes: { label: tr("节点") },
 };
 
 // pages of the manager window (sidebar), with a small line icon each
 const NAV = [
-  ["home", "总览", "M3 12l9-8 9 8M5 10v10h14V10"],
-  ["conns", "连接", "M4 6h16M4 12h16M4 18h10"],
-  ["listen", "监听端口", "M12 3v18M3 12h18"],
-  ["rules", "出口控制", "M5 12h14M13 6l6 6-6 6"],
-  ["guard", "泄漏预警", "M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"],
-  ["speed", "网速", "M3 17l5-6 4 4 8-9"],
-  ["traffic", "流量", "M6 20V10M12 20V4M18 20v-7"],
-  ["nodes", "节点", "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 8v4l3 2"],
-  ["sys", "系统监控", "M6 20V12M10 20V6M14 20V10M18 20V4"],
-  ["ai", "AI 额度", "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"],
-  ["notes", "通知", "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
-  ["settings", "设置", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4L7 17M17 17l1.4 1.4M5.6 5.6L7 7"],
+  ["home", tr("总览"), "M3 12l9-8 9 8M5 10v10h14V10"],
+  ["conns", tr("连接"), "M4 6h16M4 12h16M4 18h10"],
+  ["listen", tr("监听端口"), "M12 3v18M3 12h18"],
+  ["rules", tr("出口控制"), "M5 12h14M13 6l6 6-6 6"],
+  ["guard", tr("泄漏预警"), "M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"],
+  ["speed", tr("网速"), "M3 17l5-6 4 4 8-9"],
+  ["traffic", tr("流量"), "M6 20V10M12 20V4M18 20v-7"],
+  ["nodes", tr("节点"), "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 8v4l3 2"],
+  ["sys", tr("系统监控"), "M6 20V12M10 20V6M14 20V10M18 20V4"],
+  ["ai", tr("AI 额度"), "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"],
+  ["notes", tr("通知"), "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
+  ["settings", tr("设置"), "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4L7 17M17 17l1.4 1.4M5.6 5.6L7 7"],
 ];
 
 function visibleTabs() {
@@ -4319,6 +4328,8 @@ function applyGlass() {
 let pageRestored = MANAGER;
 function applySettings(s) {
   S = s;
+  // the backend resolves general.lang (auto = Windows display language); another one = reload
+  invoke("ui_lang").then((l) => I18N.sync(l)).catch(() => {});
   if (!pageRestored) {
     // open on the page used last time
     pageRestored = true;
@@ -4353,7 +4364,7 @@ Charts.attach($("list"));
 // a newer version was found by the daily check
 listen("update", (e) => {
   updateInfo = e.payload;
-  fireFlash("update", `MicaBar 有新版本 ${updateInfo.version}，在设置里更新`, "info");
+  fireFlash("update", `${tr("MicaBar 有新版本 {0}，在设置里更新", updateInfo.version)}`, "info");
   if (tab === "settings") renderList(true);
 });
 invoke("settings_get").then(applySettings).catch(() => {});
@@ -4452,14 +4463,14 @@ function tourSteps() {
   const click = sget("interaction.expand", "hover") === "click";
   const hold = Math.round(Number(sget("interaction.holdMs", 260)) || 260);
   const steps = [
-    { id: "hello", title: "欢迎使用 MicaBar", body: "这座「岛」停在屏幕边上：收起时显示出口 IP、网速这些，展开后是完整的面板。花半分钟看看怎么用吧。" },
-    { id: "open", title: "展开和收起", body: `${pass ? "现在是穿透模式：鼠标碰不到岛，只能用快捷键展开。" : click ? "平时点一下岛就会展开，点外面的地方就收起。" : "平时把鼠标在岛上停一会儿就会展开，移开就收起；收起时它不挡下面的点击。"}随时按 <kbd>${hk}</kbd> 也能展开 / 收起。<br>教程进行时，面板会一直开着。` },
+    { id: "hello", title: tr("欢迎使用 MicaBar"), body: tr("这座「岛」停在屏幕边上：收起时显示出口 IP、网速这些，展开后是完整的面板。花半分钟看看怎么用吧。") },
+    { id: "open", title: tr("展开和收起"), body: `${tr("{0}随时按", pass ? tr("现在是穿透模式：鼠标碰不到岛，只能用快捷键展开。") : click ? tr("平时点一下岛就会展开，点外面的地方就收起。") : tr("平时把鼠标在岛上停一会儿就会展开，移开就收起；收起时它不挡下面的点击。"))} <kbd>${hk}</kbd> ${tr("也能展开 / 收起。")}<br>${tr("教程进行时，面板会一直开着。")}` },
   ];
-  if (visiblePages().length > 1) steps.push({ id: "pages", target: "#pages", title: "切换页面", body: "顶部这排图标是各个页面：网络、系统、音乐、AI 额度、通知……点一下试试。页面的顺序和开关在设置里改。" });
-  if (visiblePages().includes("net")) steps.push({ id: "tabs", target: "#tabs", net: true, title: "网络页的页签", body: "连接、网速、流量、节点……在网速页的图上左右移动鼠标，能看每一秒的数值；点下面的程序能看它的详情。" });
-  steps.push({ id: "grab", target: "island", title: "拖着走", body: `按住面板不动约 ${hold} 毫秒，就能把整个岛抓起来：往左右甩换位置；往屏幕中间拉开，还能拖到另一条边上松手。收起时按住 <kbd>Alt</kbd> 再长按胶囊也行。现在就可以试试。` });
-  steps.push({ id: "gear", target: "#gear", title: "设置与总览", body: "右上角的齿轮打开桌面窗口：总览、每天的流量、节点测速和全部设置都在那里。托盘图标右键也能打开。" });
-  steps.push({ id: "legal", title: "最后：免责声明", legal: true, body: `MicaBar 由 <b>${AUTHOR}</b> 个人开发，以 MIT 许可开源（${REPO.replace("https://", "")}）。<br>软件按「现状」提供，不附带任何担保。它只在本机读取连接、进程和通知；「出口控制」「防泄漏」会改代理软件的覆写和防火墙规则，并可能重启代理软件。使用中造成的任何损失，作者不承担责任。完整的说明在 设置 → 关于。` });
+  if (visiblePages().length > 1) steps.push({ id: "pages", target: "#pages", title: tr("切换页面"), body: tr("顶部这排图标是各个页面：网络、系统、音乐、AI 额度、通知……点一下试试。页面的顺序和开关在设置里改。") });
+  if (visiblePages().includes("net")) steps.push({ id: "tabs", target: "#tabs", net: true, title: tr("网络页的页签"), body: tr("连接、网速、流量、节点……在网速页的图上左右移动鼠标，能看每一秒的数值；点下面的程序能看它的详情。") });
+  steps.push({ id: "grab", target: "island", title: tr("拖着走"), body: `${tr("按住面板不动约 {0} 毫秒，就能把整个岛抓起来：往左右甩换位置；往屏幕中间拉开，还能拖到另一条边上松手。收起时按住", hold)} <kbd>Alt</kbd> ${tr("再长按胶囊也行。现在就可以试试。")}` });
+  steps.push({ id: "gear", target: "#gear", title: tr("设置与总览"), body: tr("右上角的齿轮打开桌面窗口：总览、每天的流量、节点测速和全部设置都在那里。托盘图标右键也能打开。") });
+  steps.push({ id: "legal", title: tr("最后：免责声明"), legal: true, body: `${tr("MicaBar 由")} <b>${AUTHOR}</b> ${tr("个人开发，以 MIT 许可开源（{0}）。", REPO.replace("https://", ""))}<br>${tr("软件按「现状」提供，不附带任何担保。它只在本机读取连接、进程和通知；「出口控制」「防泄漏」会改代理软件的覆写和防火墙规则，并可能重启代理软件。使用中造成的任何损失，作者不承担责任。完整的说明在 设置 → 关于。")}` });
   return steps;
 }
 
@@ -4484,8 +4495,8 @@ function renderTour() {
   if (!expanded) {
     const s = steps[tour.step];
     el.innerHTML = tour.step === 0
-      ? card(s.title, s.body, `${btn("skip", "跳过")}<span class="sp"></span>${btn("start", "开始 →", "primary")}`, "新手教程")
-      : card("教程还没看完", `第 ${tour.step} / ${N} 步：${esc(s.title)}`, `${btn("skip", "结束教程")}<span class="sp"></span>${btn("resume", "继续", "primary")}`, "新手教程");
+      ? card(s.title, s.body, `${btn("skip", trc("tour", "跳过"))}<span class="sp"></span>${btn("start", tr("开始 →"), "primary")}`, tr("新手教程"))
+      : card(tr("教程还没看完"), `${tr("第 {0} / {1} 步：{2}", tour.step, N, esc(s.title))}`, `${btn("skip", tr("结束教程"))}<span class="sp"></span>${btn("resume", tr("继续"), "primary")}`, tr("新手教程"));
     el.style.setProperty("--tour-w", Math.min(window.innerWidth - 16, TOUR_W) + "px");
     tour.h = Math.ceil(el.offsetHeight);
     applySize();
@@ -4498,8 +4509,8 @@ function renderTour() {
   const dots = `<span class="tour-dots">${steps.slice(1).map((_, k) => `<i class="${k + 1 === tour.step ? "on" : ""}"></i>`).join("")}</span><span>${tour.step} / ${N}</span>`;
   const last = tour.step === N;
   const acts = s.legal
-    ? `${btn("repo", "打开仓库")}<span class="sp"></span>${btn("prev", "上一步")}${btn("done", "知道了", "primary")}`
-    : `${btn("skip", "跳过")}<span class="sp"></span>${tour.step > 1 ? btn("prev", "上一步") : ""}${btn("next", last ? "完成" : "下一步", "primary")}`;
+    ? `${btn("repo", tr("打开仓库"))}<span class="sp"></span>${btn("prev", tr("上一步"))}${btn("done", tr("知道了"), "primary")}`
+    : `${btn("skip", trc("tour", "跳过"))}<span class="sp"></span>${tour.step > 1 ? btn("prev", tr("上一步")) : ""}${btn("next", last ? tr("完成") : tr("下一步"), "primary")}`;
   el.innerHTML = card(s.title, s.body, acts, dots, s.legal);
 }
 
@@ -4952,7 +4963,7 @@ async function endEdit(save) {
   pillLast = "";
   renderPill();
   applySize();
-  if (save) toast("大小已保存");
+  if (save) toast(tr("大小已保存"));
 }
 
 // which edges can be dragged depends on the docked edge (the island stays centred on it)
@@ -4976,9 +4987,9 @@ function renderEditUi() {
   const ty = editPart === "panel" ? r.y + r.h / 2 - 40 : r.dock === "bottom" ? r.y - 110 : r.y + r.h + 24;
   box.innerHTML = `${handles}<div class="e-frame" style="left:${r.x}px;top:${r.y}px;width:${r.w}px;height:${r.h}px"></div>
     <div class="e-bar" style="top:${Math.max(4, ty)}px">
-      <div class="e-row">${segmented("epart", editPart, [["panel", "展开面板"], ["pill", "收起的胶囊"]])}<span class="mono e-size">${w} × ${h}</span></div>
-      <div class="e-row"><span class="e-hint">拖动${editPart === "panel" ? "面板" : "胶囊"}的边缘调整大小${editPart === "pill" && !(editSize[kW] > 0) ? "（宽度现在是自动的）" : ""}</span></div>
-      <div class="e-row"><button class="ghost" data-edo="reset">恢复默认</button><button class="ghost" data-edo="cancel">取消</button><button class="primary" data-edo="done">完成</button></div>
+      <div class="e-row">${segmented("epart", editPart, [["panel", tr("展开面板")], ["pill", tr("收起的胶囊")]])}<span class="mono e-size">${w} × ${h}</span></div>
+      <div class="e-row"><span class="e-hint">${tr("拖动{0}的边缘调整大小{1}", editPart === "panel" ? tr("面板") : tr("胶囊"), editPart === "pill" && !(editSize[kW] > 0) ? tr("（宽度现在是自动的）") : "")}</span></div>
+      <div class="e-row"><button class="ghost" data-edo="reset">${tr("恢复默认")}</button><button class="ghost" data-edo="cancel">${tr("取消")}</button><button class="primary" data-edo="done">${tr("完成")}</button></div>
     </div>`;
   box.dataset.kw = kW;
   box.dataset.kh = kH;

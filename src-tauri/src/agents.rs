@@ -165,9 +165,9 @@ pub fn stopped(id: &str) {
 
 /// Brings the session's terminal / editor window to the front.
 pub fn focus(id: &str) -> Result<(), String> {
-    let t = LIST.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.target.clone()).ok_or("这个任务已经结束了")?;
+    let t = LIST.lock().unwrap().iter().find(|s| s.id == id).map(|s| s.target.clone()).ok_or(crate::i18n::t("这个任务已经结束了"))?;
     if matches!(t, Target::None) {
-        return Err("不知道它在哪个窗口里".into());
+        return Err(crate::i18n::t("不知道它在哪个窗口里").into());
     }
     notify::focus_target(&t);
     Ok(())

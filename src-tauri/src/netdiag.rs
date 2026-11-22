@@ -42,7 +42,7 @@ pub struct Info {
 #[serde(rename_all = "camelCase")]
 pub struct Step {
     pub id: &'static str,
-    pub label: &'static str,
+    pub label: String,
     /// wait | run | ok | warn | fail | skip
     pub status: &'static str,
     pub detail: String,
@@ -236,10 +236,10 @@ fn resolve(host: &str, timeout: Duration) -> Result<u32, String> {
     });
     match rx.recv_timeout(timeout) {
         Ok(0) => Ok(t.elapsed().as_millis() as u32),
-        Ok(9003) => Err("域名不存在（DNS 返回 NXDOMAIN）".into()),
-        Ok(1460) => Err("DNS 服务器没有回应".into()),
-        Ok(rc) => Err(format!("解析失败（错误 {rc}）")),
-        Err(_) => Err("DNS 服务器没有回应".into()),
+        Ok(9003) => Err(crate::i18n::t("域名不存在（DNS 返回 NXDOMAIN）").into()),
+        Ok(1460) => Err(crate::i18n::t("DNS 服务器没有回应").into()),
+        Ok(rc) => Err(crate::tr!("解析失败（错误 {0}）", rc)),
+        Err(_) => Err(crate::i18n::t("DNS 服务器没有回应").into()),
     }
 }
 
@@ -261,18 +261,18 @@ fn http(addr: SocketAddr, req: &str, timeout: Duration) -> Result<(u16, u32), St
         }
     }
     let head = String::from_utf8_lossy(&buf[..got]).to_string();
-    let code = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| if got == 0 { "连接被对方关掉了".to_string() } else { "回应不是 HTTP".to_string() })?;
+    let code = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| if got == 0 { crate::i18n::t("连接被对方关掉了").to_string() } else { crate::i18n::t("回应不是 HTTP").to_string() })?;
     Ok((code, t.elapsed().as_millis() as u32))
 }
 
 fn short_err(e: &std::io::Error) -> String {
     use std::io::ErrorKind::*;
     match e.kind() {
-        TimedOut | WouldBlock => "超时".into(),
-        ConnectionRefused => "连接被拒绝".into(),
-        ConnectionReset | ConnectionAborted => "连接被重置".into(),
+        TimedOut | WouldBlock => crate::i18n::t("超时").into(),
+        ConnectionRefused => crate::i18n::t("连接被拒绝").into(),
+        ConnectionReset | ConnectionAborted => crate::i18n::t("连接被重置").into(),
         _ => match e.raw_os_error() {
-            Some(10051) | Some(10065) => "网络不可达".into(),
+            Some(10051) | Some(10065) => crate::i18n::t("网络不可达").into(),
             _ => e.to_string(),
         },
     }
@@ -294,7 +294,7 @@ fn direct(timeout: Duration) -> Result<u32, String> {
         });
     }
     drop(tx);
-    let mut last = Err("超时".to_string());
+    let mut last = Err(crate::i18n::t("超时").to_string());
     for _ in 0..2 {
         match rx.recv_timeout(timeout + Duration::from_millis(500)) {
             Ok(Ok((_, ms))) => return Ok(ms),
@@ -315,14 +315,14 @@ fn via_proxy(port: Option<u16>, timeout: Duration) -> Result<u32, String> {
         ),
         None => {
             use std::net::ToSocketAddrs;
-            let a = ("www.gstatic.com", 80).to_socket_addrs().map_err(|_| "解析 www.gstatic.com 失败".to_string())?.next().ok_or("解析 www.gstatic.com 失败")?;
+            let a = ("www.gstatic.com", 80).to_socket_addrs().map_err(|_| crate::i18n::t("解析 www.gstatic.com 失败").to_string())?.next().ok_or(crate::i18n::t("解析 www.gstatic.com 失败"))?;
             http(a, "GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n", timeout)
         }
     }?;
     match r.0 {
         204 | 200 => Ok(r.1),
-        502 | 503 | 504 => Err("代理连不上节点".into()),
-        c => Err(format!("代理返回 {c}")),
+        502 | 503 | 504 => Err(crate::i18n::t("代理连不上节点").into()),
+        c => Err(crate::tr!("代理返回 {0}", c)),
     }
 }
 
@@ -333,7 +333,7 @@ fn port_open(port: u16) -> bool {
 // ---------- the full check ----------
 
 fn step(id: &'static str, label: &'static str) -> Step {
-    Step { id, label, status: "wait", ..Default::default() }
+    Step { id, label: crate::i18n::t(label), status: "wait", ..Default::default() }
 }
 
 fn fix(id: &'static str, label: impl Into<String>, primary: bool) -> Fix {
@@ -362,7 +362,7 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     };
     if !proxied {
         r.steps[4].status = "skip";
-        r.steps[4].detail = "没有检测到代理软件".into();
+        r.steps[4].detail = crate::i18n::t("没有检测到代理软件").into();
         r.steps[5].status = "skip";
     }
     let set = |r: &mut Report, i: usize, status: &'static str, detail: String, ms: Option<u32>| {
@@ -378,7 +378,7 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     let up = uplink();
     match &up {
         Some((name, _)) => set(&mut r, 0, "ok", name.clone(), None),
-        None => set(&mut r, 0, "fail", "没有连上的网卡".into(), None),
+        None => set(&mut r, 0, "fail", crate::i18n::t("没有连上的网卡").into(), None),
     }
     progress(&r);
 
@@ -388,7 +388,7 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
         progress(&r);
         match ping(gw, 900).or_else(|| ping(gw, 900)) {
             Some(ms) => set(&mut r, 1, "ok", gw.to_string(), Some(ms)),
-            None => set(&mut r, 1, "warn", format!("{gw} 不回应 ping"), None),
+            None => set(&mut r, 1, "warn", crate::tr!("{0} 不回应 ping", gw), None),
         }
     } else {
         set(&mut r, 1, "skip", String::new(), None);
@@ -401,13 +401,13 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     progress(&r);
     let dns_t = std::thread::spawn(|| resolve("www.baidu.com", Duration::from_secs(4)).or_else(|_| resolve("www.qq.com", Duration::from_secs(3))));
     let net = direct(Duration::from_secs(4));
-    let dns = dns_t.join().unwrap_or_else(|_| Err("出错".into()));
+    let dns = dns_t.join().unwrap_or_else(|_| Err(crate::i18n::t("出错").into()));
     match &dns {
-        Ok(ms) => set(&mut r, 2, "ok", "解析正常".into(), Some(*ms)),
+        Ok(ms) => set(&mut r, 2, "ok", crate::i18n::t("解析正常").into(), Some(*ms)),
         Err(e) => set(&mut r, 2, "fail", e.clone(), None),
     }
     match &net {
-        Ok(ms) => set(&mut r, 3, "ok", "直连畅通".into(), Some(*ms)),
+        Ok(ms) => set(&mut r, 3, "ok", crate::i18n::t("直连畅通").into(), Some(*ms)),
         Err(e) => set(&mut r, 3, "fail", e.clone(), None),
     }
     progress(&r);
@@ -417,19 +417,19 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     if proxied {
         r.steps[4].status = "run";
         progress(&r);
-        let name = inf.client.clone().unwrap_or_else(|| "代理".into());
+        let name = inf.client.clone().unwrap_or_else(|| crate::i18n::t("代理").into());
         let port = inf.local_port.or_else(|| inf.system_proxy.as_deref().and_then(proxy::port_from_proxy_server));
         match port {
-            Some(p) if port_open(p) => set(&mut r, 4, "ok", format!("{name} · 端口 {p}"), None),
+            Some(p) if port_open(p) => set(&mut r, 4, "ok", crate::tr!("{0} · 端口 {1}", name, p), None),
             Some(p) => {
                 core_ok = false;
-                let why = if inf.client_running { String::new() } else { format!("（{name} 没在运行）") };
-                set(&mut r, 4, "fail", format!("端口 {p} 没有程序在监听{why}"), None);
+                let why = if inf.client_running { String::new() } else { crate::tr!("（{0} 没在运行）", name) };
+                set(&mut r, 4, "fail", crate::tr!("端口 {0} 没有程序在监听{1}", p, why), None);
             }
             None if inf.core_running => set(&mut r, 4, "ok", format!("{name} · TUN"), None),
             None => {
                 core_ok = false;
-                set(&mut r, 4, "fail", format!("{name} 的内核没在运行"), None);
+                set(&mut r, 4, "fail", crate::tr!("{0} 的内核没在运行", name), None);
             }
         }
         progress(&r);
@@ -449,39 +449,39 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
 
     // verdict: the first broken link explains the rest
     let st = |i: usize| r.steps[i].status;
-    let (problem, verdict, advice, fixes): (Option<&str>, String, String, Vec<Fix>) = if st(0) == "fail" {
-        (Some("没连网"), "电脑没有连上网络".into(), "检查网线是否插好、Wi-Fi 是否连上，飞行模式有没有打开。".into(), vec![fix("netsettings", "打开网络设置", true)])
+    let (problem, verdict, advice, fixes): (Option<String>, String, String, Vec<Fix>) = if st(0) == "fail" {
+        (Some(crate::i18n::t("没连网")), crate::i18n::t("电脑没有连上网络").into(), crate::i18n::t("检查网线是否插好、Wi-Fi 是否连上，飞行模式有没有打开。").into(), vec![fix("netsettings", crate::i18n::t("打开网络设置"), true)])
     } else if proxied && inf.tun && !core_ok {
-        (Some("代理挂了"), "TUN 模式开着，但代理软件没在工作".into(), "所有流量都要经过代理软件，它一停就全断了。重启代理软件，或者先把 TUN 关掉。".into(), proxy_fixes(&inf))
+        (Some(crate::i18n::t("代理挂了")), crate::i18n::t("TUN 模式开着，但代理软件没在工作").into(), crate::i18n::t("所有流量都要经过代理软件，它一停就全断了。重启代理软件，或者先把 TUN 关掉。").into(), proxy_fixes(&inf))
     } else if st(3) == "fail" && st(1) == "warn" {
-        (Some("路由器连不上"), "连不上路由器，外网也不通".into(), "看看路由器 / 光猫的灯是否正常，重启一下路由器通常能好；用 Wi-Fi 的话试试重新连接。".into(), vec![fix("netsettings", "打开网络设置", true), fix("retry", "再测一次", false)])
+        (Some(crate::i18n::t("路由器连不上")), crate::i18n::t("连不上路由器，外网也不通").into(), crate::i18n::t("看看路由器 / 光猫的灯是否正常，重启一下路由器通常能好；用 Wi-Fi 的话试试重新连接。").into(), vec![fix("netsettings", crate::i18n::t("打开网络设置"), true), fix("retry", crate::i18n::t("再测一次"), false)])
     } else if st(3) == "fail" {
-        (Some("宽带断了"), "路由器是通的，但外网不通".into(), "多半是宽带这一段的问题：光猫掉线、欠费或运营商故障。重启光猫试试，不行就联系运营商。".into(), vec![fix("retry", "再测一次", true)])
+        (Some(crate::i18n::t("宽带断了")), crate::i18n::t("路由器是通的，但外网不通").into(), crate::i18n::t("多半是宽带这一段的问题：光猫掉线、欠费或运营商故障。重启光猫试试，不行就联系运营商。").into(), vec![fix("retry", crate::i18n::t("再测一次"), true)])
     } else if st(2) == "fail" {
-        (Some("DNS 坏了"), "能连外网，但域名解析失败".into(), "网址变不成 IP，所以网页打不开。先刷新 DNS 缓存；还不行就把网卡的 DNS 改成 223.5.5.5 / 119.29.29.29。".into(), vec![fix("flushdns", "刷新 DNS 缓存", true), fix("netsettings", "打开网络设置", false)])
+        (Some(crate::i18n::t("DNS 坏了")), crate::i18n::t("能连外网，但域名解析失败").into(), crate::i18n::t("网址变不成 IP，所以网页打不开。先刷新 DNS 缓存；还不行就把网卡的 DNS 改成 223.5.5.5 / 119.29.29.29。").into(), vec![fix("flushdns", crate::i18n::t("刷新 DNS 缓存"), true), fix("netsettings", crate::i18n::t("打开网络设置"), false)])
     } else if proxied && !core_ok {
         (
-            Some("代理挂了"),
-            format!("{} 没在工作", inf.client.clone().unwrap_or_else(|| "代理软件".into())),
+            Some(crate::i18n::t("代理挂了")),
+            crate::tr!("{0} 没在工作", inf.client.clone().unwrap_or_else(|| "代理软件".into())),
             if inf.client_running {
-                "直连是好的，只有走代理的网站打不开。重启一下代理软件。".into()
+                crate::i18n::t("直连是好的，只有走代理的网站打不开。重启一下代理软件。").into()
             } else {
-                "直连是好的，但代理软件已经退出了，系统代理还指着它，所以浏览器打不开网页。把它打开就好。".into()
+                crate::i18n::t("直连是好的，但代理软件已经退出了，系统代理还指着它，所以浏览器打不开网页。把它打开就好。").into()
             },
             proxy_fixes(&inf),
         )
     } else if proxied && st(5) == "fail" {
         let mut f = Vec::new();
         if inf.controller {
-            f.push(fix("switch-node", "换一个能用的节点", true));
+            f.push(fix("switch-node", crate::i18n::t("换一个能用的节点"), true));
         }
-        f.push(fix("retry", "再测一次", !inf.controller));
-        (Some("节点挂了"), format!("节点 {} 连不上", inf.node.clone().unwrap_or_default()).replace("节点  ", "节点 "), "直连正常、代理软件也在运行，是当前节点不通。换一个节点，或者在代理软件里更新订阅。".into(), f)
+        f.push(fix("retry", crate::i18n::t("再测一次"), !inf.controller));
+        (Some(crate::i18n::t("节点挂了")), crate::tr!("节点 {0} 连不上", inf.node.clone().unwrap_or_default()).replace("  ", " "), crate::i18n::t("直连正常、代理软件也在运行，是当前节点不通。换一个节点，或者在代理软件里更新订阅。").into(), f)
     } else {
-        (None, "网络正常".into(), String::new(), Vec::new())
+        (None, crate::i18n::t("网络正常").into(), String::new(), Vec::new())
     };
     r.ok = problem.is_none();
-    r.problem = problem.map(|s| s.to_string());
+    r.problem = problem;
     r.kind = if r.ok { String::new() } else { "net".into() };
     r.verdict = verdict;
     r.advice = advice;
@@ -494,32 +494,32 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
 }
 
 fn proxy_fixes(inf: &Info) -> Vec<Fix> {
-    let name = inf.client.clone().unwrap_or_else(|| "代理软件".into());
+    let name = inf.client.clone().unwrap_or_else(|| crate::i18n::t("代理软件").into());
     let mut f = Vec::new();
     if inf.clash_party && inf.client_running {
-        f.push(fix("restart-proxy", format!("重启 {name}"), true));
+        f.push(fix("restart-proxy", crate::tr!("重启 {0}", name), true));
     } else if inf.client_exe.is_some() {
-        f.push(fix("start-proxy", format!("打开 {name}"), true));
+        f.push(fix("start-proxy", crate::tr!("打开 {0}", name), true));
     }
-    f.push(fix("retry", "再测一次", f.is_empty()));
+    f.push(fix("retry", crate::i18n::t("再测一次"), f.is_empty()));
     f
 }
 
 /// The system proxy problem as a report of its own (no chain checks needed).
 fn sysproxy_report(good: &str, now_value: Option<&str>, client: &str) -> Report {
     let verdict = match now_value {
-        None => "系统代理被关掉了".to_string(),
-        Some(v) => format!("系统代理被改成了 {v}"),
+        None => crate::i18n::t("系统代理被关掉了").to_string(),
+        Some(v) => crate::tr!("系统代理被改成了 {0}", v),
     };
     Report {
         at: now_ms(),
         auto: true,
         ok: false,
-        problem: Some(if now_value.is_none() { "系统代理被关了".into() } else { "系统代理被改了".into() }),
+        problem: Some(if now_value.is_none() { crate::i18n::t("系统代理被关了").into() } else { crate::i18n::t("系统代理被改了").into() }),
         kind: "sysproxy".into(),
         verdict,
-        advice: format!("{client} 还在运行，但浏览器等程序已经不走它了（原来是 {good}）。常见原因是别的软件改了系统代理。"),
-        fixes: vec![fix("restore-sysproxy", format!("恢复成 {good}"), true), fix("ignore-sysproxy", "是我关的", false)],
+        advice: crate::tr!("{0} 还在运行，但浏览器等程序已经不走它了（原来是 {1}）。常见原因是别的软件改了系统代理。", client, good),
+        fixes: vec![fix("restore-sysproxy", crate::tr!("恢复成 {0}", good), true), fix("ignore-sysproxy", crate::i18n::t("是我关的"), false)],
         ..Default::default()
     }
 }
@@ -532,7 +532,7 @@ pub fn flush_dns() -> Result<(), String> {
         log("netdiag: dns cache flushed");
         Ok(())
     } else {
-        Err("刷新 DNS 缓存失败".into())
+        Err(crate::i18n::t("刷新 DNS 缓存失败").into())
     }
 }
 
@@ -545,7 +545,7 @@ pub fn set_system_proxy(server: &str) -> Result<(), String> {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
     let k = winreg::RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", KEY_SET_VALUE)
-        .map_err(|e| format!("打不开系统代理设置：{e}"))?;
+        .map_err(|e| crate::tr!("打不开系统代理设置：{0}", e))?;
     k.set_value("ProxyServer", &server.to_string()).map_err(|e| e.to_string())?;
     k.set_value("ProxyEnable", &1u32).map_err(|e| e.to_string())?;
     #[link(name = "wininet")]
@@ -562,7 +562,7 @@ pub fn set_system_proxy(server: &str) -> Result<(), String> {
 }
 
 pub fn restore_system_proxy() -> Result<(), String> {
-    let good = W.lock().unwrap().good_proxy.clone().ok_or("不知道原来的系统代理是什么")?;
+    let good = W.lock().unwrap().good_proxy.clone().ok_or(crate::i18n::t("不知道原来的系统代理是什么"))?;
     set_system_proxy(&good)?;
     clear_sysproxy();
     Ok(())
@@ -766,7 +766,7 @@ fn system_proxy_watch(inf: &Info) {
                     let since = *w.proxy_off_since.get_or_insert_with(Instant::now);
                     // a client switching modes passes through "off" for a moment
                     if since.elapsed() >= Duration::from_secs(6) && w.problem.is_none() {
-                        let mut r = sysproxy_report(&good, inf.system_proxy.as_deref(), inf.client.as_deref().unwrap_or("代理软件"));
+                        let mut r = sysproxy_report(&good, inf.system_proxy.as_deref(), inf.client.as_deref().unwrap_or(&crate::i18n::t("代理软件")));
                         r.down_since = Some(now_ms());
                         log(format!("netdiag: system proxy changed: {:?} (was {good})", inf.system_proxy));
                         w.problem = Some(r);

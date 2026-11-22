@@ -183,7 +183,7 @@ impl ProcCache {
 
     fn build(&mut self, pid: u32, exe: &str) -> ProcInfo {
         if pid == 0 {
-            return ProcInfo { exe: "Idle".into(), path: None, display: "系统空闲进程".into(), icon: None };
+            return ProcInfo { exe: "Idle".into(), path: None, display: crate::i18n::t("系统空闲进程").into(), icon: None };
         }
         if pid == 4 {
             return ProcInfo { exe: "System".into(), path: None, display: "System".into(), icon: None };

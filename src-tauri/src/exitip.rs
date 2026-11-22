@@ -104,7 +104,7 @@ pub async fn probe_direct(bind: Option<IpAddr>) -> Result<Probe, String> {
         let mut b = builder().no_proxy().local_address(bind);
         match resolve_direct(&host, bind).await {
             Some(ip) => b = b.resolve(&host, std::net::SocketAddr::new(ip, 443)),
-            None => errors.push(format!("{host}: DNS 解析失败")),
+            None => errors.push(crate::tr!("{0}: DNS 解析失败", host)),
         }
         let c = b.build().map_err(|e| e.to_string())?;
         match fetch(&c, url).await {
@@ -129,7 +129,7 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Probe, String> {
     };
     match ip {
         Some(ip) => Ok(Probe { ip, host: host_of(url), cc, org }),
-        None => Err(format!("{}: 返回里没有 IP", host_of(url))),
+        None => Err(crate::tr!("{0}: 返回里没有 IP", host_of(url))),
     }
 }
 
@@ -147,9 +147,9 @@ pub async fn probe(client: &reqwest::Client, domestic: bool) -> Result<Probe, St
 
 fn short_err(e: &reqwest::Error) -> String {
     if e.is_timeout() {
-        "超时".into()
+        crate::i18n::t("超时").into()
     } else if e.is_connect() {
-        "连接失败".into()
+        crate::i18n::t("连接失败").into()
     } else {
         let s = e.to_string();
         s.chars().take(80).collect()

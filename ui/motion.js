@@ -224,7 +224,7 @@ const Sheet = (() => {
       el = document.createElement("div");
       el.className = "sheet";
       el.setAttribute("role", "dialog");
-      el.innerHTML = `<div class="sheet-bar" data-nograb title="上下拖动；往下甩关闭"><i></i></div><div class="sheet-body"></div>`;
+      el.innerHTML = `<div class="sheet-bar" data-nograb title="${tr("上下拖动；往下甩关闭")}"><i></i></div><div class="sheet-body"></div>`;
       body = el.querySelector(".sheet-body");
       host.append(scrim, el);
       el.addEventListener("click", (e) => clickFn?.(e));

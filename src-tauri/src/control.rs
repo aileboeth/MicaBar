@@ -408,7 +408,7 @@ fn write_override(data_dir: &Path, install: bool) -> Result<(), String> {
     if list.get("items").and_then(|v| v.as_sequence()).is_none() {
         list = serde_yaml::from_str("items: []").unwrap();
     }
-    let items = list.get_mut("items").and_then(|v| v.as_sequence_mut()).ok_or("override.yaml 格式不对")?;
+    let items = list.get_mut("items").and_then(|v| v.as_sequence_mut()).ok_or(crate::i18n::t("override.yaml 格式不对"))?;
     items.retain(|it| !matches!(it.get("id").and_then(|v| v.as_str()), Some(OVERRIDE_ID) | Some(LEGACY_OVERRIDE_ID)));
     for f in [format!("{LEGACY_OVERRIDE_ID}.js"), format!("{LEGACY_OVERRIDE_ID}.yaml")] {
         let _ = std::fs::remove_file(data_dir.join("override").join(f));
@@ -424,12 +424,12 @@ fn write_override(data_dir: &Path, install: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
         items.push(item);
         std::fs::create_dir_all(data_dir.join("override")).map_err(|e| e.to_string())?;
-        std::fs::write(&file, override_js()).map_err(|e| format!("写入覆写失败: {e}"))?;
+        std::fs::write(&file, override_js()).map_err(|e| crate::tr!("写入覆写失败: {0}", e))?;
     } else {
         let _ = std::fs::remove_file(&file);
     }
     let text = serde_yaml::to_string(&list).map_err(|e| e.to_string())?;
-    std::fs::write(data_dir.join("override.yaml"), text).map_err(|e| format!("写入 override.yaml 失败: {e}"))
+    std::fs::write(data_dir.join("override.yaml"), text).map_err(|e| crate::tr!("写入 override.yaml 失败: {0}", e))
 }
 
 fn backup(data_dir: &Path) -> Option<PathBuf> {
@@ -486,20 +486,20 @@ fn start_party(cp: &ClashParty) -> Result<(), String> {
         // we run elevated; explorer.exe starts it as the normal desktop user
         std::process::Command::new("explorer.exe").arg(&cp.exe).spawn()
     };
-    r.map(|_| ()).map_err(|e| format!("启动 Clash Party 失败: {e}"))
+    r.map(|_| ()).map_err(|e| crate::tr!("启动 Clash Party 失败: {0}", e))
 }
 
 /// Waits until a controller answers and reports our rule providers.
 fn wait_providers(timeout: Duration) -> Result<(Controller, Option<String>), String> {
     let t0 = Instant::now();
-    let mut last = String::from("Clash Party 没有启动内核");
+    let mut last = String::from(crate::i18n::t("Clash Party 没有启动内核"));
     while t0.elapsed() < timeout {
         std::thread::sleep(Duration::from_millis(700));
         let cfg = mihomo::read_config();
         if let Some((ctl, _)) = mihomo::discover(&cfg) {
             match providers_loaded(&ctl, cfg.secret.as_deref()) {
                 Ok(true) => return Ok((ctl, cfg.secret)),
-                Ok(false) => last = "内核已启动，但没有加载 MicaBar 规则集".into(),
+                Ok(false) => last = crate::i18n::t("内核已启动，但没有加载 MicaBar 规则集").into(),
                 Err(e) => last = e,
             }
         }
@@ -518,7 +518,7 @@ pub fn providers_loaded(ctl: &Controller, secret: Option<&str>) -> Result<bool, 
 /// Installs (or removes) the override and restarts Clash Party once.
 /// On install returns the controller of the restarted core.
 pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], cfg: &CoreConfig) -> Result<Option<(Controller, Option<String>)>, String> {
-    let cp = find_clash_party(procs).ok_or("没有找到正在运行的 Clash Party")?;
+    let cp = find_clash_party(procs).ok_or(crate::i18n::t("没有找到正在运行的 Clash Party"))?;
     let home = core_pids.first().and_then(|p| core_home(*p)).or_else(|| {
         cfg.file.as_ref().and_then(|f| Path::new(f).parent().map(|p| p.to_path_buf()))
     });
@@ -561,7 +561,7 @@ pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], 
             restore(&cp2, bak.as_deref());
             let _ = std::fs::remove_file(cp2.data_dir.join("override").join(format!("{OVERRIDE_ID}.js")));
             let _ = start_party(&cp2);
-            Err(format!("Clash Party 没能加载出口控制覆写，已还原原来的设置（{e}）"))
+            Err(crate::tr!("Clash Party 没能加载出口控制覆写，已还原原来的设置（{0}）", e))
         }
     }
 }
@@ -576,7 +576,7 @@ fn restore(cp: &ClashParty, bak: Option<&Path>) {
 
 pub fn write_provider_files(home: &Path, rules: &[Rule]) -> Result<(), String> {
     let dir = home.join("micabar");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建规则目录失败: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| crate::tr!("创建规则目录失败: {0}", e))?;
     for (lv, t) in provider_names() {
         let lines: Vec<String> = rules
             .iter()
@@ -589,7 +589,7 @@ pub fn write_provider_files(home: &Path, rules: &[Rule]) -> Result<(), String> {
         } else {
             format!("# 由 MicaBar 生成，请在 MicaBar 里修改\npayload:\n{}", lines.concat())
         };
-        std::fs::write(dir.join(format!("{lv}-{t}.yaml")), s).map_err(|e| format!("写入规则失败: {e}"))?;
+        std::fs::write(dir.join(format!("{lv}-{t}.yaml")), s).map_err(|e| crate::tr!("写入规则失败: {0}", e))?;
     }
     // files of the first version (one provider per target), no longer referenced
     for t in TARGETS {
@@ -613,7 +613,7 @@ pub fn ensure_guard_files(home: &Path) -> Result<(), String> {
 
 pub fn reload_guard(ctl: &Controller, secret: Option<&str>) -> Result<(), String> {
     for (n, _, _) in GUARD_PROVIDERS {
-        mihomo::request(ctl, "PUT", &format!("/providers/rules/{n}"), None, secret).map_err(|e| format!("刷新规则集 {n} 失败: {e}"))?;
+        mihomo::request(ctl, "PUT", &format!("/providers/rules/{n}"), None, secret).map_err(|e| crate::tr!("刷新规则集 {0} 失败: {1}", n, e))?;
     }
     Ok(())
 }
@@ -621,7 +621,7 @@ pub fn reload_guard(ctl: &Controller, secret: Option<&str>) -> Result<(), String
 pub fn reload_providers(ctl: &Controller, secret: Option<&str>) -> Result<(), String> {
     for (l, t) in provider_names() {
         mihomo::request(ctl, "PUT", &format!("/providers/rules/micabar-{l}-{t}"), None, secret)
-            .map_err(|e| format!("刷新规则集 micabar-{l}-{t} 失败: {e}"))?;
+            .map_err(|e| crate::tr!("刷新规则集 micabar-{0}-{1} 失败: {2}", l, t, e))?;
     }
     Ok(())
 }
@@ -675,7 +675,7 @@ pub fn nodes(ctl: &Controller, secret: Option<&str>) -> Result<Nodes, String> {
     let body = mihomo::get(ctl, "/proxies", secret)?;
     let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     let proxies = v.get("proxies").ok_or("no proxies")?;
-    let g = proxies.get(GROUP).ok_or("内核里没有 MicaBar 分组")?;
+    let g = proxies.get(GROUP).ok_or(crate::i18n::t("内核里没有 MicaBar 分组"))?;
     let now = g.get("now").and_then(|x| x.as_str()).map(|s| s.to_string());
     let all: Vec<String> = g
         .get("all")

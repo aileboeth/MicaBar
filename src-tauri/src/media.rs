@@ -139,7 +139,7 @@ pub fn start(state: Shared, on_change: impl Fn(Option<NowPlaying>) + Send + 'sta
 /// play-pause | next | previous on the current session.
 pub fn control(action: &str) -> Result<(), String> {
     let mgr = Manager::RequestAsync().and_then(|op| op.join()).map_err(|e| e.to_string())?;
-    let s = mgr.GetCurrentSession().map_err(|_| "没有正在播放的程序".to_string())?;
+    let s = mgr.GetCurrentSession().map_err(|_| crate::i18n::t("没有正在播放的程序").to_string())?;
     let op = match action {
         "next" => s.TrySkipNextAsync(),
         "previous" => s.TrySkipPreviousAsync(),

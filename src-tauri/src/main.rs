@@ -11,6 +11,7 @@ mod firstnet;
 mod geo;
 mod glass;
 mod guard;
+mod i18n;
 mod icon;
 mod iporg;
 mod media;
@@ -453,7 +454,7 @@ impl Collector {
                         link.ctl = Some(c);
                         link.secret = self.cfg.secret.clone();
                     }
-                    None => mihomo_err = Some("找不到 mihomo 控制接口".to_string()),
+                    None => mihomo_err = Some(crate::i18n::t("找不到 mihomo 控制接口").to_string()),
                 }
             }
             if let Some(c) = link.ctl.clone() {
@@ -576,7 +577,7 @@ impl Collector {
             let info = self.procs.get(s.pid).cloned().unwrap_or(procinfo::ProcInfo {
                 exe: format!("pid {}", s.pid),
                 path: None,
-                display: format!("进程 {}", s.pid),
+                display: crate::tr!("进程 {0}", s.pid),
                 icon: None,
             });
             let key = app_key(&info.path, &info.exe);
@@ -644,7 +645,7 @@ impl Collector {
                 continue;
             }
             let path = non_empty(&c.metadata.process_path);
-            let exe = non_empty(&c.metadata.process).unwrap_or_else(|| "未知进程".into());
+            let exe = non_empty(&c.metadata.process).unwrap_or_else(|| crate::i18n::t("未知进程").into());
             let key = app_key(&path, &exe);
             let app = apps.entry(key.clone()).or_insert_with(|| AppRow {
                 key: key.clone(),
@@ -878,8 +879,8 @@ impl Collector {
                 }
                 book.notified.insert(f.key.clone(), now);
                 let what = f.host.clone().or_else(|| f.ip.clone()).unwrap_or_default();
-                let why = if f.kind == "bypass" { "没经过代理软件，直接连了出去" } else { "被分流规则判成了直连" };
-                guard::toast(&format!("代理泄漏：{}", f.app), &format!("{what} 本该走代理，{why}"), &format!("命中规则库：{}", f.hit));
+                let why = if f.kind == "bypass" { crate::i18n::t("没经过代理软件，直接连了出去") } else { crate::i18n::t("被分流规则判成了直连") };
+                guard::toast(&crate::tr!("代理泄漏：{0}", f.app), &crate::tr!("{0} 本该走代理，{1}", what, why), &crate::tr!("命中规则库：{0}", f.hit));
             }
         }
         let mut alerts: Vec<Alert> = book.alerts.values().cloned().collect();
@@ -907,7 +908,7 @@ impl Collector {
         let (status, message, client) = match &cp {
             None => {
                 let other = sh.proxy.lock().unwrap().client.clone();
-                let msg = other.map(|c| format!("出口控制目前只支持 Clash Party / Mihomo Party（检测到 {c}）"));
+                let msg = other.map(|c| crate::tr!("出口控制目前只支持 Clash Party / Mihomo Party（检测到 {0}）", c));
                 ("unavailable", msg, None)
             }
             Some(cp) => {
@@ -916,13 +917,13 @@ impl Collector {
                 if installed && !control::override_current(&cp.data_dir) {
                     (
                         "available",
-                        Some("出口控制更新了规则结构，需要重新写入覆写（会重启 Clash Party 一次）".to_string()),
+                        Some(crate::i18n::t("出口控制更新了规则结构，需要重新写入覆写（会重启 Clash Party 一次）").to_string()),
                         Some("Clash Party".to_string()),
                     )
                 } else if loaded {
                     ("active", None, Some("Clash Party".to_string()))
                 } else if installed {
-                    ("pending", Some("覆写已写入，等 Clash Party 重新加载内核后生效".to_string()), Some("Clash Party".to_string()))
+                    ("pending", Some(crate::i18n::t("覆写已写入，等 Clash Party 重新加载内核后生效").to_string()), Some("Clash Party".to_string()))
                 } else {
                     ("available", None, Some("Clash Party".to_string()))
                 }
@@ -1235,7 +1236,7 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
         match p.local_port {
             Some(port) => Some(check_one(sh.clone(), Check::Proxy(Some(port))).await),
             None if p.tun.is_some() => Some(check_one(sh.clone(), Check::Proxy(None)).await),
-            None => Some(ExitResult { error: Some("检测到代理软件，但没找到本地代理端口".into()), at: now_ms(), ..Default::default() }),
+            None => Some(ExitResult { error: Some(crate::i18n::t("检测到代理软件，但没找到本地代理端口").into()), at: now_ms(), ..Default::default() }),
         }
     } else {
         None
@@ -1361,7 +1362,7 @@ fn set_hit_rects(state: tauri::State<'_, Arc<Shared>>, pill: [f64; 4], panel: [f
 
 fn ctl_link(sh: &Shared) -> Result<(Controller, Option<String>), String> {
     let l = sh.mihomo.lock().unwrap();
-    l.ctl.clone().map(|c| (c, l.secret.clone())).ok_or_else(|| "mihomo 控制接口未连接".to_string())
+    l.ctl.clone().map(|c| (c, l.secret.clone())).ok_or_else(|| crate::i18n::t("mihomo 控制接口未连接").to_string())
 }
 
 fn set_control(sh: &Shared, status: &str, message: Option<String>) {
@@ -1378,7 +1379,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Sen
 #[tauri::command]
 async fn control_enable(state: tauri::State<'_, Arc<Shared>>) -> Result<(), String> {
     let sh = state.inner().clone();
-    set_control(&sh, "working", Some("正在写入覆写并重启 Clash Party…".into()));
+    set_control(&sh, "working", Some(crate::i18n::t("正在写入覆写并重启 Clash Party…").into()));
     let r = blocking({
         let sh = sh.clone();
         move || {
@@ -1420,7 +1421,7 @@ async fn control_enable(state: tauri::State<'_, Arc<Shared>>) -> Result<(), Stri
 #[tauri::command]
 async fn control_disable(state: tauri::State<'_, Arc<Shared>>) -> Result<(), String> {
     let sh = state.inner().clone();
-    set_control(&sh, "working", Some("正在移除覆写并重启 Clash Party…".into()));
+    set_control(&sh, "working", Some(crate::i18n::t("正在移除覆写并重启 Clash Party…").into()));
     let r = blocking(move || {
         let list = procinfo::list_processes();
         let cores = proxy::client_name(&list).1;
@@ -1447,7 +1448,7 @@ async fn control_set(
     let sh = state.inner().clone();
     blocking(move || {
         let (ctl, secret) = ctl_link(&sh)?;
-        let home = sh.core_home.lock().unwrap().clone().ok_or("还不知道内核目录，稍等几秒再试")?;
+        let home = sh.core_home.lock().unwrap().clone().ok_or(crate::i18n::t("还不知道内核目录，稍等几秒再试"))?;
         let rule = {
             let mut rules = sh.rules.lock().unwrap();
             let r = control::upsert(&mut rules, &kind, process, value, &target);
@@ -1468,7 +1469,7 @@ async fn control_remove(state: tauri::State<'_, Arc<Shared>>, id: String) -> Res
     let sh = state.inner().clone();
     blocking(move || {
         let (ctl, secret) = ctl_link(&sh)?;
-        let home = sh.core_home.lock().unwrap().clone().ok_or("还不知道内核目录")?;
+        let home = sh.core_home.lock().unwrap().clone().ok_or(crate::i18n::t("还不知道内核目录"))?;
         let removed = {
             let mut rules = sh.rules.lock().unwrap();
             let r = rules.iter().find(|r| r.id == id).cloned();
@@ -1562,7 +1563,7 @@ fn probe_latency(sh: &Shared) {
                 let d = serde_json::from_slice::<serde_json::Value>(&b).ok().and_then(|v| v.get("delay").and_then(|d| d.as_u64()));
                 (d.map(|d| d as u32), None)
             }
-            Err(e) => (None, Some(if e.contains("504") || e.to_lowercase().contains("timeout") { "超时".to_string() } else { e })),
+            Err(e) => (None, Some(if e.contains("504") || e.to_lowercase().contains("timeout") { crate::i18n::t("超时").to_string() } else { e })),
         };
         if i == 0 {
             *sh.latency.lock().unwrap() = Latency { node: Some(node.clone()), ms, error, at: now };
@@ -1653,7 +1654,7 @@ async fn check_update(app: &AppHandle) -> Result<UpdateInfo, String> {
     match updater.check().await {
         Ok(Some(u)) => Ok(UpdateInfo { current, available: true, version: Some(u.version.clone()), notes: u.body.clone(), installed: system::is_installed() }),
         Ok(None) => Ok(UpdateInfo { current, installed: system::is_installed(), ..Default::default() }),
-        Err(e) => Err(format!("检查更新失败：{e}")),
+        Err(e) => Err(crate::tr!("检查更新失败：{0}", e)),
     }
 }
 
@@ -1669,9 +1670,9 @@ async fn update_check(app: AppHandle) -> Result<UpdateInfo, String> {
 async fn update_install(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
     if !system::is_installed() {
-        return Err("这是便携版，不能自动更新；请到 GitHub 下载新版本".into());
+        return Err(crate::i18n::t("这是便携版，不能自动更新；请到 GitHub 下载新版本").into());
     }
-    let u = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?.ok_or("已经是最新版本")?;
+    let u = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?.ok_or(crate::i18n::t("已经是最新版本"))?;
     log(format!("update: installing {}", u.version));
     // progress for the update card: {phase: download|install, got, total}
     let _ = app.emit("update-progress", serde_json::json!({ "phase": "download", "got": 0, "total": null }));
@@ -1696,7 +1697,7 @@ async fn update_install(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) ->
         .await
         .map_err(|e| {
             log(format!("update: download failed: {e}"));
-            format!("下载失败：{e}")
+            crate::tr!("下载失败：{0}", e)
         })?;
     log(format!("update: downloaded {} bytes, signature ok, installing", bytes.len()));
     let _ = app.emit("update-progress", serde_json::json!({ "phase": "install" }));
@@ -1706,7 +1707,7 @@ async fn update_install(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) ->
     speed::stop();
     u.install(bytes).map_err(|e| {
         log(format!("update: install failed: {e}"));
-        format!("安装失败：{e}")
+        crate::tr!("安装失败：{0}", e)
     })?;
     app.restart();
 }
@@ -1801,13 +1802,46 @@ fn apply_settings_backend(app: &AppHandle, ws: &WinState) {
     if let Some(w) = app.get_webview_window("main") {
         window_ctl::place_window(&w);
     }
+    // language changed: new tray menu (the windows reload themselves after ui_lang)
+    if i18n::set_lang(&i18n::wanted()) {
+        if let (Some(tray), Ok(menu)) = (app.tray_by_id("main"), tray_menu(app)) {
+            let _ = tray.set_menu(Some(menu));
+        }
+        // exit IP names (region, carrier) come in the new language with a fresh check
+        app.state::<Arc<Shared>>().exit_trigger.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The resolved interface language (general.lang, auto = Windows display language).
+#[tauri::command]
+fn ui_lang() -> String {
+    i18n::lang()
+}
+
+fn tray_menu<M: Manager<tauri::Wry>>(app: &M) -> tauri::Result<Menu<tauri::Wry>> {
+    let t = i18n::t;
+    let open_item = MenuItem::with_id(app, "open", t("打开 MicaBar"), true, None::<&str>)?;
+    let settings_item = MenuItem::with_id(app, "settings", t("设置"), true, None::<&str>)?;
+    let layout_item = MenuItem::with_id(app, "layout", t("调整岛的大小…"), true, None::<&str>)?;
+    let refresh = MenuItem::with_id(app, "refresh", t("重新检测出口 IP"), true, None::<&str>)?;
+    let log_item = MenuItem::with_id(app, "log", t("打开日志"), true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", t("退出"), true, None::<&str>)?;
+    let theme_auto = MenuItem::with_id(app, "theme:auto", t("外观：跟随系统"), true, None::<&str>)?;
+    let theme_light = MenuItem::with_id(app, "theme:light", t("外观：白色磨砂"), true, None::<&str>)?;
+    let theme_dark = MenuItem::with_id(app, "theme:dark", t("外观：黑色磨砂"), true, None::<&str>)?;
+    let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
+    let sep0 = tauri::menu::PredefinedMenuItem::separator(app)?;
+    Menu::with_items(
+        app,
+        &[&open_item, &settings_item, &layout_item, &sep0, &refresh, &theme_auto, &theme_light, &theme_dark, &sep, &log_item, &quit_item],
+    )
 }
 
 #[tauri::command]
 fn settings_set(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
     // start with Windows: create / remove the logon task first, keep the setting only if it worked
     if let Some(on) = patch.pointer("/general/autostart").and_then(|v| v.as_bool()) {
-        system::set_autostart(on).map_err(|e| format!("设置开机自启失败：{e}"))?;
+        system::set_autostart(on).map_err(|e| crate::tr!("设置开机自启失败：{0}", e))?;
     }
     let s = settings::update(&patch);
     apply_settings_backend(&app, &state.ws);
@@ -1925,13 +1959,13 @@ async fn guard_add(state: tauri::State<'_, Arc<Shared>>, text: String) -> Result
     blocking(move || {
         let t = text.trim();
         let entry = if let Some(v) = t.strip_prefix('!').or_else(|| t.strip_prefix("排除:")).or_else(|| t.strip_prefix("排除：")) {
-            let mut e = guard::parse_list(v).into_iter().next().ok_or("不是有效的域名")?;
+            let mut e = guard::parse_list(v).into_iter().next().ok_or(crate::i18n::t("不是有效的域名"))?;
             e.kind = "exclude".into();
             e
         } else if let Some(v) = t.strip_prefix("keyword:").or_else(|| t.strip_prefix("关键词:")).or_else(|| t.strip_prefix("关键词：")) {
             guard::Entry { kind: "keyword".into(), value: v.trim().to_lowercase() }
         } else {
-            guard::parse_list(t).into_iter().next().ok_or("没认出来：填域名、IP/CIDR、keyword:关键词，或 !域名 表示排除")?
+            guard::parse_list(t).into_iter().next().ok_or(crate::i18n::t("没认出来：填域名、IP/CIDR、keyword:关键词，或 !域名 表示排除"))?
         };
         {
             let mut s = sh.guard.lock().unwrap();
@@ -1970,7 +2004,7 @@ async fn update_gfw(sh: Arc<Shared>) -> Result<usize, String> {
         Err(e) => {
             s.gfw_error = Some(e.clone());
             log(format!("guard: gfw update failed: {e}"));
-            Err(format!("更新 gfw 列表失败：{e}"))
+            Err(crate::tr!("更新 gfw 列表失败：{0}", e))
         }
     }
 }
@@ -1989,7 +2023,7 @@ async fn guard_import(state: tauri::State<'_, Arc<Shared>>, url: String) -> Resu
     let sh = state.inner().clone();
     let url = url.trim().to_string();
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("填一个 http(s) 链接".into());
+        return Err(crate::i18n::t("填一个 http(s) 链接").into());
     }
     let r = guard::fetch_text(&[url.clone()], proxy_port(&sh)).await;
     let n = {
@@ -2001,13 +2035,13 @@ async fn guard_import(state: tauri::State<'_, Arc<Shared>>, url: String) -> Resu
                 s.imports.push(guard::Import { url: url.clone(), enabled: true, count: n, updated: now_ms(), error: None });
                 n
             }
-            Err(e) => return Err(format!("下载失败：{e}")),
+            Err(e) => return Err(crate::tr!("下载失败：{0}", e)),
         }
     };
     if n == 0 {
         sh.guard.lock().unwrap().imports.retain(|i| i.url != url);
         guard::remove_import_file(&url);
-        return Err("这个链接里没认出任何域名 / IP 规则".into());
+        return Err(crate::i18n::t("这个链接里没认出任何域名 / IP 规则").into());
     }
     let sh2 = sh.clone();
     blocking(move || apply_guard(&sh2)).await?;
@@ -2038,7 +2072,7 @@ async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: St
     let sh = state.inner().clone();
     blocking(move || {
         if sh.proxy.lock().unwrap().tun.is_some() {
-            return Err("TUN 模式下程序的流量也走虚拟网卡，用防火墙禁止会让它完全断网，所以不提供".into());
+            return Err(crate::i18n::t("TUN 模式下程序的流量也走虚拟网卡，用防火墙禁止会让它完全断网，所以不提供").into());
         }
         let name = guard::block(&path, &exe)?;
         {
@@ -2049,8 +2083,8 @@ async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: St
         }
         let n = guard::reset_connections(&pids_of(&sh, &path));
         Ok(match firstnet::firewall_warning() {
-            Some(w) => format!("已添加禁止 {exe} 直连的规则，{w}"),
-            None => format!("已禁止 {exe} 直连{}", if n > 0 { format!("，断开了 {n} 条连接") } else { String::new() }),
+            Some(w) => crate::tr!("已添加禁止 {0} 直连的规则，{1}", exe, w),
+            None => crate::tr!("已禁止 {0} 直连{1}", exe, if n > 0 { format!("，断开了 {n} 条连接") } else { String::new() }),
         })
     })
     .await
@@ -2144,7 +2178,7 @@ fn switch_node(sh: &Shared) -> Result<String, String> {
         let ex = sh.exit.lock().unwrap();
         ex.groups.iter().find(|g| g.is_default).and_then(|g| g.r.group.clone()).or_else(|| ex.proxy.as_ref().and_then(|e| e.group.clone()))
     }
-    .ok_or("还不知道当前用的是哪个代理分组")?;
+    .ok_or(crate::i18n::t("还不知道当前用的是哪个代理分组"))?;
     let b = mihomo::get(&ctl, &format!("/proxies/{}", pct(&group)), secret.as_deref())?;
     let v: serde_json::Value = serde_json::from_slice(&b).map_err(|e| e.to_string())?;
     let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
@@ -2154,14 +2188,14 @@ fn switch_node(sh: &Shared) -> Result<String, String> {
     let delays: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&d).unwrap_or_default();
     if !kind.eq_ignore_ascii_case("Selector") {
         sh.exit_trigger.store(true, Ordering::SeqCst);
-        return Ok(format!("{group} 是自动选择的分组，已重新测速，它会自己换到能用的节点"));
+        return Ok(crate::tr!("{0} 是自动选择的分组，已重新测速，它会自己换到能用的节点", group));
     }
     let best = delays
         .iter()
         .filter_map(|(n, ms)| ms.as_u64().filter(|m| *m > 0).map(|m| (n.clone(), m)))
         .filter(|(n, _)| *n != now && n != "DIRECT" && !n.starts_with("REJECT"))
         .min_by_key(|(_, m)| *m)
-        .ok_or("这个分组里没有能用的节点了，试试在代理软件里更新订阅")?;
+        .ok_or(crate::i18n::t("这个分组里没有能用的节点了，试试在代理软件里更新订阅"))?;
     let body = serde_json::json!({ "name": best.0 }).to_string();
     mihomo::request(&ctl, "PUT", &format!("/proxies/{}", pct(&group)), Some(&body), secret.as_deref())?;
     // existing connections move over
@@ -2172,7 +2206,7 @@ fn switch_node(sh: &Shared) -> Result<String, String> {
     }
     log(format!("netdiag: {group} switched {now} -> {} ({} ms)", best.0, best.1));
     sh.exit_trigger.store(true, Ordering::SeqCst);
-    Ok(format!("{group} 换到了 {}（{} ms）", best.0, best.1))
+    Ok(crate::tr!("{0} 换到了 {1}（{2} ms）", group, best.0, best.1))
 }
 
 #[tauri::command]
@@ -2183,11 +2217,11 @@ async fn netdiag_fix(state: tauri::State<'_, Arc<Shared>>, id: String) -> Result
             netdiag::open_net_settings();
             Ok(String::new())
         }
-        "flushdns" => netdiag::flush_dns().map(|_| "DNS 缓存已刷新".into()),
-        "restore-sysproxy" => netdiag::restore_system_proxy().map(|_| "系统代理已恢复".into()),
+        "flushdns" => netdiag::flush_dns().map(|_| crate::i18n::t("DNS 缓存已刷新").into()),
+        "restore-sysproxy" => netdiag::restore_system_proxy().map(|_| crate::i18n::t("系统代理已恢复").into()),
         "ignore-sysproxy" => {
             netdiag::ignore_system_proxy();
-            Ok("好的，系统代理再打开之前不再提醒".into())
+            Ok(crate::i18n::t("好的，系统代理再打开之前不再提醒").into())
         }
         "switch-node" => switch_node(&sh),
         "restart-proxy" | "start-proxy" => {
@@ -2196,16 +2230,16 @@ async fn netdiag_fix(state: tauri::State<'_, Arc<Shared>>, id: String) -> Result
                 let cores = proxy::client_name(&list).1;
                 control::restart_party(&cp, &cores)?;
                 sh.exit_trigger.store(true, Ordering::SeqCst);
-                Ok("代理软件已重启".into())
+                Ok(crate::i18n::t("代理软件已重启").into())
             } else {
-                let exe = netdiag::client_exe().ok_or("不知道代理软件装在哪里，请手动打开它")?;
+                let exe = netdiag::client_exe().ok_or(crate::i18n::t("不知道代理软件装在哪里，请手动打开它"))?;
                 // de-elevated through explorer, like a double click
                 std::process::Command::new("explorer.exe").arg(&exe).spawn().map_err(|e| e.to_string())?;
                 sh.exit_trigger.store(true, Ordering::SeqCst);
-                Ok("正在打开代理软件".into())
+                Ok(crate::i18n::t("正在打开代理软件").into())
             }
         }
-        _ => Err("未知的操作".into()),
+        _ => Err(crate::i18n::t("未知的操作").into()),
     })
     .await
 }
@@ -2253,16 +2287,16 @@ fn first_net(apps: &[AppRow]) {
     for k in firstnet::observe(&seen) {
         notify::push(notify::Note {
             key: "micabar-firstnet".into(),
-            app: "新程序联网".into(),
+            app: crate::i18n::t("新程序联网").into(),
             icon: Some(k.path.clone()),
             title: k.name.clone(),
-            body: format!("第一次连上网 → {}", k.dest),
+            body: crate::tr!("第一次连上网 → {0}", k.dest),
             sub: k.path.clone(),
             kind: "firstnet".into(),
             source: "micabar".into(),
             actions: vec![
-                notify::NoteAction { id: "allow".into(), label: "允许".into(), style: "plain".into() },
-                notify::NoteAction { id: "block".into(), label: "阻止联网".into(), style: "danger".into() },
+                notify::NoteAction { id: "allow".into(), label: crate::i18n::t("允许").into(), style: "plain".into() },
+                notify::NoteAction { id: "block".into(), label: crate::i18n::t("阻止联网").into(), style: "danger".into() },
             ],
             data: k.path.clone(),
             ..Default::default()
@@ -2292,7 +2326,7 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
         let msg = match action.as_str() {
             "allow" => {
                 firstnet::allow(&path);
-                format!("已允许 {exe} 联网")
+                crate::tr!("已允许 {0} 联网", exe)
             }
             "dismiss" => {
                 firstnet::dismiss(&path);
@@ -2300,7 +2334,7 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
             }
             "block" => {
                 if !sh.admin {
-                    return Err("改防火墙需要以管理员身份运行 MicaBar".into());
+                    return Err(crate::i18n::t("改防火墙需要以管理员身份运行 MicaBar").into());
                 }
                 let rule = firstnet::firewall_block(&path)?;
                 // a program on the system proxy reaches the internet through the core: a REJECT
@@ -2308,7 +2342,7 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
                 let core_rule = if sh.control.lock().unwrap().status == "active" {
                     (|| -> Result<String, String> {
                         let (ctl, secret) = ctl_link(&sh)?;
-                        let home = sh.core_home.lock().unwrap().clone().ok_or("还不知道内核目录")?;
+                        let home = sh.core_home.lock().unwrap().clone().ok_or(crate::i18n::t("还不知道内核目录"))?;
                         let r = {
                             let mut rules = sh.rules.lock().unwrap();
                             let r = control::upsert(&mut rules, "process", Some(exe.clone()), None, "reject");
@@ -2333,17 +2367,17 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
                 firstnet::set_blocked(&path, true, &rule, &core_rule);
                 let p = sh.proxy.lock().unwrap().clone();
                 let mut msg = if core_rule.is_empty() && p.system_proxy.is_some() && p.tun.is_none() {
-                    format!("已阻止 {exe} 直接联网；它若走系统代理，还要开启「出口控制」才能完全拦住")
+                    format!("warn:{}", crate::tr!("已阻止 {0} 直接联网；它若走系统代理，还要开启「出口控制」才能完全拦住", exe))
                 } else {
-                    format!("已阻止 {exe} 联网")
+                    crate::tr!("已阻止 {0} 联网", exe)
                 };
                 if let Some(w) = firstnet::firewall_warning() {
-                    msg = format!("已添加 {exe} 的阻止规则，{w}");
+                    msg = format!("warn:{}", crate::tr!("已添加 {0} 的阻止规则，{1}", exe, w));
                 }
                 msg
             }
             "unblock" => {
-                let k = firstnet::get(&path).ok_or("没有这个程序的记录")?;
+                let k = firstnet::get(&path).ok_or(crate::i18n::t("没有这个程序的记录"))?;
                 if !k.rule.is_empty() {
                     firstnet::firewall_unblock(&k.rule, &path)?;
                 }
@@ -2364,9 +2398,9 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
                     }
                 }
                 firstnet::set_blocked(&path, false, "", "");
-                format!("已恢复 {exe} 联网")
+                crate::tr!("已恢复 {0} 联网", exe)
             }
-            _ => return Err("未知的操作".into()),
+            _ => return Err(crate::i18n::t("未知的操作").into()),
         };
         Ok(msg)
     })
@@ -2768,6 +2802,7 @@ fn main() {
         return;
     }
     migrate_old_data();
+    i18n::set_lang(&i18n::wanted());
     let admin = is_admin();
     log(format!("---- MicaBar {} start, admin={admin}", env!("CARGO_PKG_VERSION")));
     let geo = Geo::load();
@@ -2827,6 +2862,7 @@ fn main() {
             alert_clear,
             settings_get,
             settings_set,
+            ui_lang,
             settings_reset,
             monitors_list,
             hotkey_check,
@@ -2883,24 +2919,10 @@ fn main() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            let open_item = MenuItem::with_id(app, "open", "打开 MicaBar", true, None::<&str>)?;
-            let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-            let layout_item = MenuItem::with_id(app, "layout", "调整岛的大小…", true, None::<&str>)?;
-            let refresh = MenuItem::with_id(app, "refresh", "重新检测出口 IP", true, None::<&str>)?;
-            let log_item = MenuItem::with_id(app, "log", "打开日志", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let theme_auto = MenuItem::with_id(app, "theme:auto", "外观：跟随系统", true, None::<&str>)?;
-            let theme_light = MenuItem::with_id(app, "theme:light", "外观：白色磨砂", true, None::<&str>)?;
-            let theme_dark = MenuItem::with_id(app, "theme:dark", "外观：黑色磨砂", true, None::<&str>)?;
-            let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
-            let sep0 = tauri::menu::PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(
-                app,
-                &[&open_item, &settings_item, &layout_item, &sep0, &refresh, &theme_auto, &theme_light, &theme_dark, &sep, &log_item, &quit_item],
-            )?;
+            let menu = tray_menu(app.handle())?;
             let sh_tray = shared.clone();
             let sh_tray2 = shared.clone();
-            let mut tray = TrayIconBuilder::new()
+            let mut tray = TrayIconBuilder::with_id("main")
                 .tooltip("MicaBar")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -2982,7 +3004,7 @@ fn main() {
             let sh = shared.clone();
             let h = handle.clone();
             std::thread::spawn(move || {
-                let counters = if sh.admin { speed::start() } else { Err("需要管理员权限".into()) };
+                let counters = if sh.admin { speed::start() } else { Err(crate::i18n::t("需要管理员权限").into()) };
                 match &counters {
                     Ok(_) => log("ETW kernel network session started"),
                     Err(e) => log(format!("ETW unavailable: {e}")),

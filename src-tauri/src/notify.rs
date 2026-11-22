@@ -254,7 +254,7 @@ pub fn mark_read(ids: &[u64]) {
 pub fn open(id: u64) -> Result<(), String> {
     let target = {
         let mut b = book().lock().unwrap();
-        let n = b.notes.iter_mut().find(|n| n.id == id).ok_or("这条通知已经不在了")?;
+        let n = b.notes.iter_mut().find(|n| n.id == id).ok_or(crate::i18n::t("这条通知已经不在了"))?;
         n.read = true;
         n.target.clone()
     };
@@ -305,19 +305,19 @@ pub fn settle(id: u64) {
 /// A sample, so the look can be tried from the settings.
 pub fn test() {
     let samples = [
-        ("微信", "张三", "晚上一起吃饭吗？我在楼下等你，顺便带一下钥匙", "msg"),
-        ("Claude Code", "MicaBar", "通知模块写好了，虚拟机里验证通过", "done"),
-        ("Telegram", "李四", "文件发你了，看一下", "msg"),
+        (crate::i18n::t("微信"), crate::i18n::t("张三"), crate::i18n::t("晚上一起吃饭吗？我在楼下等你，顺便带一下钥匙"), "msg"),
+        ("Claude Code".to_string(), "MicaBar".to_string(), crate::i18n::t("通知模块写好了，虚拟机里验证通过"), "done"),
+        ("Telegram".to_string(), crate::i18n::t("李四"), crate::i18n::t("文件发你了，看一下"), "msg"),
     ];
     static K: AtomicU32 = AtomicU32::new(0);
     let i = K.fetch_add(1, Ordering::SeqCst) as usize % samples.len();
-    let (app, title, body, kind) = samples[i];
+    let (app, title, body, kind) = samples[i].clone();
     push(Note {
         key: format!("test-{i}"),
         app: app.into(),
         title: title.into(),
         body: body.into(),
-        sub: if kind == "done" { "完成 · 用时 3 分 12 秒".into() } else { String::new() },
+        sub: if kind == "done" { crate::i18n::t("完成 · 用时 3 分 12 秒").into() } else { String::new() },
         kind: kind.into(),
         source: "test".into(),
         merge: format!("test-{i}"),
@@ -608,11 +608,11 @@ fn flash_note(hwnd: isize, key: String, path: Option<String>) {
     };
     let title_now = window_text(hwnd);
     let body = if wechat {
-        "新消息".to_string()
+        crate::i18n::t("新消息").to_string()
     } else if !title_now.trim().is_empty() && title_now != app {
         title_now.chars().take(80).collect()
     } else {
-        "需要你注意".to_string()
+        crate::i18n::t("需要你注意").to_string()
     };
     push(Note {
         owner: key.clone(),
@@ -625,7 +625,7 @@ fn flash_note(hwnd: isize, key: String, path: Option<String>) {
         source: "flash".into(),
         target: Target::Hwnd(hwnd, path),
         merge: format!("flash|{key}"),
-        tpl: wechat.then(|| "{n} 条新消息".to_string()),
+        tpl: wechat.then(|| crate::i18n::t("{n} 条新消息").to_string()),
         ..Default::default()
     });
 }
@@ -762,12 +762,12 @@ fn on_tg_popup(popup: isize, pid: u32, path: String) {
                 app: "Telegram".into(),
                 icon: Some(path.clone()),
                 title: "Telegram".into(),
-                body: "新消息".into(),
+                body: crate::i18n::t("新消息").into(),
                 kind: "msg".into(),
                 source: "popup".into(),
                 target,
                 merge: "tg|?".into(),
-                tpl: Some("{n} 条新消息".into()),
+                tpl: Some(crate::i18n::t("{n} 条新消息").into()),
                 ..Default::default()
             });
             return;
@@ -785,7 +785,7 @@ fn on_tg_popup(popup: isize, pid: u32, path: String) {
                     Some(w) if *w != c.name => format!("{} · {w}", c.name),
                     _ => c.name.clone(),
                 },
-                body: if text.is_empty() { "新消息".into() } else { text },
+                body: if text.is_empty() { crate::i18n::t("新消息").into() } else { text },
                 kind: "msg".into(),
                 source: "popup".into(),
                 target: target.clone(),
@@ -1584,11 +1584,11 @@ static DONE_AT: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 fn dur_text(d: Duration) -> String {
     let s = d.as_secs();
     if s < 60 {
-        format!("{s} 秒")
+        crate::tr!("{0} 秒", s)
     } else if s < 3600 {
-        format!("{} 分 {} 秒", s / 60, s % 60)
+        crate::tr!("{0} 分 {1} 秒", s / 60, s % 60)
     } else {
-        format!("{} 小时 {} 分", s / 3600, (s % 3600) / 60)
+        crate::tr!("{0} 小时 {1} 分", s / 3600, (s % 3600) / 60)
     }
 }
 
@@ -1670,8 +1670,8 @@ fn ai_event(tool: &str, event: &str, j: &Value, host: (Target, Option<String>)) 
                 app: app.into(),
                 icon: host.1,
                 title: if cwd.is_empty() { app.into() } else { project_of(&cwd) },
-                body: if reply.is_empty() { "任务完成".into() } else { reply },
-                sub: took.map(|d| format!("完成 · 用时 {}", dur_text(d))).unwrap_or_else(|| "完成".into()),
+                body: if reply.is_empty() { crate::i18n::t("任务完成").into() } else { reply },
+                sub: took.map(|d| crate::tr!("完成 · 用时 {0}", dur_text(d))).unwrap_or_else(|| crate::i18n::t("完成").into()),
                 kind: "done".into(),
                 source: "ai".into(),
                 target,
@@ -1691,15 +1691,15 @@ fn ai_event(tool: &str, event: &str, j: &Value, host: (Target, Option<String>)) 
             }
             let tool_name = msg.split("permission to use ").nth(1).map(|r| r.trim_end_matches('.').to_string());
             if !lower.contains("waiting for your input") {
-                let what = tool_name.as_ref().map(|t| format!("批准使用 {t}")).unwrap_or_else(|| if msg.is_empty() { "需要你看一下".into() } else { msg.clone() });
+                let what = tool_name.as_ref().map(|t| crate::tr!("批准使用 {0}", t)).unwrap_or_else(|| if msg.is_empty() { crate::i18n::t("需要你看一下").into() } else { msg.clone() });
                 crate::agents::asking(&session, tool, &project(&s("cwd")), &what, &s("transcript_path"), target.clone());
             }
             let body = if let Some(rest) = &tool_name {
-                format!("需要你批准：使用 {rest}")
+                crate::tr!("需要你批准：使用 {0}", rest)
             } else if lower.contains("waiting for your input") {
-                "在等你回复".to_string()
+                crate::i18n::t("在等你回复").to_string()
             } else if msg.is_empty() {
-                "需要你看一下".to_string()
+                crate::i18n::t("需要你看一下").to_string()
             } else {
                 msg
             };
@@ -1711,7 +1711,7 @@ fn ai_event(tool: &str, event: &str, j: &Value, host: (Target, Option<String>)) 
                 icon: host.1,
                 title: if cwd.is_empty() { app.into() } else { project_of(&cwd) },
                 body,
-                sub: "等你确认".into(),
+                sub: crate::i18n::t("等你确认").into(),
                 kind: "ask".into(),
                 source: "ai".into(),
                 target,
@@ -1729,8 +1729,8 @@ fn ai_event(tool: &str, event: &str, j: &Value, host: (Target, Option<String>)) 
                 app: app.into(),
                 icon: host.1,
                 title: if cwd.is_empty() { app.into() } else { project_of(&cwd) },
-                body: if reply.is_empty() { "任务完成".into() } else { reply },
-                sub: "完成".into(),
+                body: if reply.is_empty() { crate::i18n::t("任务完成").into() } else { reply },
+                sub: crate::i18n::t("完成").into(),
                 kind: "done".into(),
                 source: "ai".into(),
                 target,
@@ -1867,12 +1867,12 @@ pub fn set_hook(tool: &str, on: bool) -> Result<String, String> {
         "claude" => {
             let p = claude_settings();
             if !p.parent().map(|d| d.is_dir()).unwrap_or(false) {
-                return Err("没找到 Claude Code 的配置文件夹（~/.claude）".into());
+                return Err(crate::i18n::t("没找到 Claude Code 的配置文件夹（~/.claude）").into());
             }
             let text = std::fs::read_to_string(&p).unwrap_or_else(|_| "{}".into());
-            let mut v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("settings.json 不是有效的 JSON：{e}"))?;
+            let mut v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| crate::tr!("settings.json 不是有效的 JSON：{0}", e))?;
             if !v.is_object() {
-                return Err("settings.json 的格式不对".into());
+                return Err(crate::i18n::t("settings.json 的格式不对").into());
             }
             backup_once(&p);
             if v.get("hooks").map(|h| !h.is_object()).unwrap_or(true) {
@@ -1914,18 +1914,18 @@ pub fn set_hook(tool: &str, on: bool) -> Result<String, String> {
             let out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
             std::fs::write(&p, out + "\n").map_err(|e| e.to_string())?;
             log(format!("notify: Claude Code hooks {}", if on { "installed" } else { "removed" }));
-            Ok(if on { "已加到 Claude Code（新开的会话生效；已开着的会话里输入 /hooks 看一眼也会生效）".into() } else { "已从 Claude Code 移除".into() })
+            Ok(if on { crate::i18n::t("已加到 Claude Code（新开的会话生效；已开着的会话里输入 /hooks 看一眼也会生效）").into() } else { crate::i18n::t("已从 Claude Code 移除").into() })
         }
         "codex" => {
             let p = codex_config();
             if !p.parent().map(|d| d.is_dir()).unwrap_or(false) {
-                return Err("没找到 Codex 的配置文件夹（~/.codex）".into());
+                return Err(crate::i18n::t("没找到 Codex 的配置文件夹（~/.codex）").into());
             }
             let text = std::fs::read_to_string(&p).unwrap_or_default();
             let line = codex_notify_line(&text);
             if let Some((_, l)) = &line {
                 if !is_ours(l, "codex") {
-                    return Err("config.toml 里已经有别的 notify 设置，MicaBar 不覆盖它（可以手动合并）".into());
+                    return Err(crate::i18n::t("config.toml 里已经有别的 notify 设置，MicaBar 不覆盖它（可以手动合并）").into());
                 }
             }
             backup_once(&p);
@@ -1947,9 +1947,9 @@ pub fn set_hook(tool: &str, on: bool) -> Result<String, String> {
             }
             std::fs::write(&p, out).map_err(|e| e.to_string())?;
             log(format!("notify: Codex notify {}", if on { "installed" } else { "removed" }));
-            Ok(if on { "已加到 Codex（重新打开 Codex 后生效）".into() } else { "已从 Codex 移除".into() })
+            Ok(if on { crate::i18n::t("已加到 Codex（重新打开 Codex 后生效）").into() } else { crate::i18n::t("已从 Codex 移除").into() })
         }
-        _ => Err("未知的工具".into()),
+        _ => Err(crate::i18n::t("未知的工具").into()),
     }
 }
 
