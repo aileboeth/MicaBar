@@ -28,11 +28,13 @@ node — and decide right there whether it goes through the proxy or direct.
 - **Leak alerts**: when a site that should go through the proxy goes direct, the pill turns red and a Windows
   notification appears. Prevention: rule leaks are forced through the proxy; programs that bypass the proxy can be
   blocked from direct connections with one click (Windows Firewall).
-- **Speed / traffic / nodes**: live speed graph, per-program proxy-vs-direct traffic (today, 7 or 30 days, click a
+- **Speed / traffic / nodes**: live speed graph (move along it and it snaps to each second, the big numbers roll along;
+  click a program for its own graph in a pull-up sheet), per-program proxy-vs-direct traffic (today, 7 or 30 days, click a
   day for its details), node latency and loss.
 - **Looks and feel**: live frosted glass (white / black, follows the system) that keeps text readable over any background (dark areas behind white glass are lifted, bright ones behind black glass dimmed), colour presets and custom themes;
   capsule / notch / indicator-bar shapes docked to any screen edge (long-press the island and drag it to another edge); hover or click to open, pass-through mode, custom
-  hotkey, keyboard navigation; stays out of the way of fullscreen games.
+  hotkey, keyboard navigation; stays out of the way of fullscreen games. Fluid animations (the pill morphs into the
+  panel, cards tilt towards the pointer, buttons spring back), following the Windows animation setting or switched on / off.
 
 > The look and interaction are inspired by [fly-island](https://github.com/flyl1u/fly-island), some feature ideas
 > by [BrimDeck](https://github.com/MoFeng2223/BrimDeck); all code is written independently.
@@ -52,6 +54,7 @@ with "start with Windows" enabled it starts from a scheduled task without a prom
 
 ## Usage
 
+- On the first start a short tour on the island shows the basics (again from Settings → About).
 - Rest the mouse on the pill for 0.3 s to open it (or switch to click); default hotkey `Ctrl+Alt+N`.
 - Left-click the tray icon for the desktop window; right-click menu: open, settings, resize the island, re-check
   exit IPs, appearance, open log, quit.
@@ -157,3 +160,8 @@ Implementation notes (Chinese): [docs/internals.zh-CN.md](docs/internals.zh-CN.m
 ## License
 
 [MIT](LICENSE). Flag icons from [flag-icons](https://github.com/lipis/flag-icons) (MIT, see `ui/flags/LICENSE`).
+
+MicaBar is provided "as is", without warranty of any kind. Exit control and the leak guard change your proxy
+client's override configuration, add firewall rules and may restart the proxy client; the author is not liable
+for any loss from using the software. MicaBar is not affiliated with Clash, mihomo, Anthropic, OpenAI, Google, xAI
+or any other project or company named here; their names and trademarks belong to their owners.

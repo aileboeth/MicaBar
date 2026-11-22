@@ -253,12 +253,31 @@ function measurePanel() {
 const chartW = () => Math.max(420, Math.floor((MANAGER ? $("list").clientWidth - 40 : panelW() - 34)));
 
 let maximized = false; // a maximized window is in front (setting: shrink to a line)
+// The first time per run that a maximized window turns the pill into the line, the pill says so
+// for a few seconds first (it looked like a bug: "I picked the capsule and it became a line").
+const maxHint = { shown: false, until: 0 };
+// first-run tour (see "first-run tour" below); declared up here because the sizing code reads it
+const tour = { on: false, step: 0, h: 0 };
+const TOUR_W = 384;
+
+function setMaximized(v) {
+  v = !!v;
+  if (v === maximized) return;
+  maximized = v;
+  if (v && !MANAGER && !maxHint.shown && sget("shape.lineWhenMaximized", false) && sget("shape.style", "capsule") !== "line") {
+    maxHint.shown = true;
+    maxHint.until = Date.now() + 5000;
+    fireFlash("maxline", "前台窗口最大化了，岛缩成指示条（设置 → 收起外观里可以关）", "info");
+    setTimeout(() => { pillLast = ""; renderPill(); applySize(); }, 5100);
+  }
+  applySize();
+}
 
 // Effective collapsed shape and docked edge.
 function shape() {
   const dock = sget("shape.dock", "top");
   let style = sget("shape.style", "capsule");
-  if (maximized && sget("shape.lineWhenMaximized", false)) style = "line";
+  if (maximized && sget("shape.lineWhenMaximized", false) && Date.now() >= maxHint.until) style = "line";
   const vertical = dock === "left" || dock === "right";
   if (vertical && style === "capsule") style = "notch"; // a sideways capsule = a notch on that edge
   return { style, dock, vertical };
@@ -272,6 +291,10 @@ function islandRect(open) {
   if (open) {
     w = Math.min(W - 8, panelW());
     h = Math.min(H - 8, panelHNow);
+  } else if (tour.on && !nst.on && !fling.active) {
+    // the tour's card (any shape / edge)
+    w = Math.min(W - 16, TOUR_W);
+    h = Math.min(H - 16, Math.max(sz("pillH"), tour.h || 150));
   } else if (nst.on) {
     // a notification card (any shape / edge)
     w = Math.min(W - 16, NOTE_W);
@@ -286,7 +309,8 @@ function islandRect(open) {
     h = sz("pillH");
   }
   // capsule floats 6px off the edge; notch and line sit on it; an expanded panel floats unless notch
-  const gap = open ? (style === "notch" ? 0 : 6) : style === "capsule" || (nst.on && style === "line") ? 6 : 0;
+  const card = nst.on || (tour.on && !fling.active);
+  const gap = open ? (style === "notch" ? 0 : 6) : style === "capsule" || (card && style === "line") ? 6 : 0;
   let x = (W - w) / 2, y = (H - h) / 2;
   if (dock === "top") y = gap;
   else if (dock === "bottom") y = H - h - gap;
@@ -338,14 +362,15 @@ function applySize() {
   pill.style.width = fixedW ? r.w + "px" : "";
   pill.style.justifyContent = fixedW ? "center" : "";
   island.classList.toggle("notch", r.style === "notch");
-  island.classList.toggle("line", r.style === "line" && !expanded && !nst.on);
-  island.classList.toggle("vertical", r.vertical && !expanded && !nst.on);
+  const card = nst.on || (tour.on && !fling.active);
+  island.classList.toggle("line", r.style === "line" && !expanded && !card);
+  island.classList.toggle("vertical", r.vertical && !expanded && !card);
   for (const d of ["top", "bottom", "left", "right"]) island.classList.toggle("dock-" + d, r.dock === d);
   island.style.setProperty("--ix", r.x + "px");
   island.style.setProperty("--iy", r.y + "px");
   island.style.width = r.w + "px";
   island.style.height = r.h + "px";
-  if (!expanded && nst.on) island.style.borderRadius = r.style === "notch" ? "" : "22px";
+  if (!expanded && card) island.style.borderRadius = r.style === "notch" ? "" : "22px";
   else if (!expanded && r.style === "capsule") island.style.borderRadius = r.h / 2 + "px";
   else island.style.borderRadius = "";
   placeTail(r);
@@ -371,6 +396,11 @@ function expand() {
   applySize();
   ensureSysPoll();
   updateViz();
+  Cascade.play($("list"));
+  if (tour.on) {
+    if (tour.step === 0) tour.step = 1;
+    renderTour();
+  }
 }
 
 function collapse() {
@@ -381,6 +411,8 @@ function collapse() {
   island.classList.remove("expanded");
   island.classList.add("collapsed");
   $("search").blur();
+  Sheet.close();
+  if (tour.on) renderTour();
   applySize();
   updateViz();
 }
@@ -925,7 +957,7 @@ function renderNote() {
 }
 
 function showNote(id) {
-  if (MANAGER || expanded || editing || fling.active) return;
+  if (MANAGER || expanded || editing || fling.active || tour.on) return;
   nst.active = [id, ...nst.active.filter((x) => x !== id)].slice(0, 12);
   if (!nst.on) {
     nst.on = true;
@@ -1492,6 +1524,30 @@ function segmented(name, value, options) {
 let speedRange = 60;
 let speedApp = null;
 
+// rolling-counter text for a rate: number and unit apart ("547" + "KB/s"), zero as "0 B/s"
+function odoRate(b) {
+  const t = b >= 1 ? fmtRate(b) : "0 B/s";
+  const i = t.lastIndexOf(" ");
+  return [t.slice(0, i), t.slice(i + 1)];
+}
+
+let speedView = null; // { xs, up, down } of the big chart as last drawn: the scrubbed index points into it
+
+// Big numbers above the chart: the latest second, or the one under the crosshair while scrubbing.
+function speedRead(i) {
+  const v = speedView;
+  if (!v || !v.xs.length) return;
+  const k = i == null ? v.xs.length - 1 : Math.min(i, v.xs.length - 1);
+  Odo.set("sp-down", ...odoRate(v.down[k]));
+  Odo.set("sp-up", ...odoRate(v.up[k]));
+  const w = document.querySelector(".sp-when-t");
+  // the crosshair carries the clock time; up here: how long ago
+  const back = Math.round((v.xs[v.xs.length - 1] - v.xs[k]) / 1000);
+  if (w) w.textContent = i == null || back <= 0 ? "现在" : back < 60 ? `${back} 秒前` : `${Math.floor(back / 60)} 分 ${back % 60} 秒前`;
+  document.querySelector(".sp-hero")?.classList.toggle("scrubbing", i != null);
+}
+Charts.onScrub("speed", (i) => speedRead(i));
+
 function speedTabHtml() {
   const n = Math.min(speedRange, speedHist.t.length);
   if (n < 2) return `<div class="empty">正在收集网速数据…</div>`;
@@ -1500,11 +1556,13 @@ function speedTabHtml() {
   const xs = speedHist.t.slice(-n);
   const up = (src ? src.up : speedHist.up).slice(-n);
   const down = (src ? src.down : speedHist.down).slice(-n);
+  speedView = { xs, up, down };
   const chart = Charts.line({
-    id: "speed", width: chartW(), height: 170, xs,
+    id: "speed", width: chartW() - 28, height: 140, xs,
     series: [{ name: "下载", cls: "s1", values: down }, { name: "上传", cls: "s2", values: up }],
-    fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, endLabels: true, binary: true,
+    fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, binary: true, area: true, scrub: true, slide: true,
   });
+  const peakD = Math.max(...down, 0), peakU = Math.max(...up, 0);
   const apps = [...appHist.entries()]
     .map(([key, h]) => ({ key, ...h, cur: (h.up[h.up.length - 1] || 0) + (h.down[h.down.length - 1] || 0), sum: h.up.slice(-n).reduce((a, b) => a + b, 0) + h.down.slice(-n).reduce((a, b) => a + b, 0) }))
     .filter((a) => a.sum > 0)
@@ -1512,18 +1570,115 @@ function speedTabHtml() {
     .slice(0, 15);
   const rows = apps.map((a) => {
     const series = a.up.slice(-n).map((u, i) => u + a.down.slice(-n)[i]);
-    return `<div class="sp-row ${a.key === speedApp ? "sel" : ""}" data-sapp="${esc(a.key)}" tabindex="0">
-      ${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span>${Charts.spark(series)}
-      <span class="speed mono">${speedHtml(a.up[a.up.length - 1], a.down[a.down.length - 1])}</span></div>`;
+    return `<div class="sp-row ${a.key === speedApp ? "sel" : ""} ${a.key === sheetApp ? "open" : ""}" data-sheet-app="${esc(a.key)}" tabindex="0" title="点一下看详情">
+      ${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span>${Charts.spark(series, 110, 24, "s1", true)}
+      <span class="speed mono">${speedHtml(a.up[a.up.length - 1], a.down[a.down.length - 1])}</span><span class="chev">›</span></div>`;
   }).join("");
-  return `<div class="viz">
+  const range = { 60: "1 分钟", 120: "2 分钟", 300: "5 分钟" }[speedRange] || "";
+  return `<div class="viz sp-viz">
     <div class="viz-head">${segmented("srange", speedRange, [[60, "1 分钟"], [120, "2 分钟"], [300, "5 分钟"]])}
-      <span class="viz-sel">${src ? `只看 <b>${esc(src.name)}</b> <button data-sapp="">✕ 看全部</button>` : "全部程序"}</span>
-      <span class="legend"><span class="lg"><i class="key s1"></i>下载</span><span class="lg"><i class="key s2"></i>上传</span></span></div>
-    ${chart}
-    <div class="g-head" style="margin-top:8px">按程序（点一下只看它）</div>
-    ${rows || `<div class="empty">这段时间没有程序在传数据</div>`}
+      <span class="viz-sel">${src ? `只看 <b>${esc(src.name)}</b> <button data-sapp="">✕ 看全部</button>` : "全部程序"}</span></div>
+    <div class="hero-wrap"><i class="hero-glow"></i>
+      <div class="sp-hero glow-card">
+        <div class="sp-read">
+          <div class="sp-num"><span class="sp-k"><i class="key s1"></i>下载</span>${Odo.slot("sp-down", "big")}</div>
+          <div class="sp-num"><span class="sp-k"><i class="key s2"></i>上传</span>${Odo.slot("sp-up", "big")}</div>
+          <div class="sp-when"><span class="sp-when-t">现在</span><span class="sp-peak">${range}峰值 ↓${esc(fmtRate(peakD) || "0")} · ↑${esc(fmtRate(peakU) || "0")}</span></div>
+        </div>
+        ${chart}
+      </div>
+    </div>
+    <div class="g-head">按程序<span class="g-note">点一下看详情</span></div>
+    <div class="sp-rows cascade-items">${rows || `<div class="empty">这段时间没有程序在传数据</div>`}</div>
   </div>`;
+}
+
+// ---------- one program's details (bottom sheet over the speed page) ----------
+
+let sheetApp = null;
+
+function appSheetHtml(key) {
+  const h = appHist.get(key);
+  if (!h) return "";
+  const n = Math.min(speedRange, speedHist.t.length, h.up.length);
+  const xs = speedHist.t.slice(-n), up = h.up.slice(-n), down = h.down.slice(-n);
+  const sum = (a) => a.reduce((s, v) => s + v, 0);
+  const live = snap?.apps?.find((a) => a.key === key);
+  const w = Math.max(300, (Sheet.body()?.clientWidth || $("panel").clientWidth - 16) - 32);
+  const range = { 60: "1 分钟", 120: "2 分钟", 300: "5 分钟" }[speedRange] || "这段时间";
+  const stat = (k, v) => `<div class="as-stat"><span>${k}</span><b>${v}</b></div>`;
+  return `<div class="as-head" data-sheet-drag>${iconHtml(h)}<div class="as-title"><b>${esc(h.name)}</b><span>${esc(h.path || h.exe || "")}</span></div>
+      <button class="ghost" data-sheet-do="close" title="关闭（Esc）">✕</button></div>
+    <div class="as-read">
+      <div class="sp-num"><span class="sp-k"><i class="key s1"></i>下载</span>${Odo.slot("as-down", "big")}</div>
+      <div class="sp-num"><span class="sp-k"><i class="key s2"></i>上传</span>${Odo.slot("as-up", "big")}</div>
+    </div>
+    ${n >= 2 ? Charts.line({ id: "app-sheet", width: w, height: 120, xs, series: [{ name: "下载", cls: "s1", values: down }, { name: "上传", cls: "s2", values: up }], fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, binary: true, area: true }) : ""}
+    <div class="as-stats">
+      ${stat(`${range}下载`, fmtBytes(sum(down)))}
+      ${stat(`${range}上传`, fmtBytes(sum(up)))}
+      ${stat("下载峰值", fmtRate(Math.max(...down, 0)) || "0")}
+      ${stat("上传峰值", fmtRate(Math.max(...up, 0)) || "0")}
+      ${stat("当前连接", live ? live.conns.length : 0)}
+      ${live ? stat("出口", live.viaProxy ? "代理" : "直连") : ""}
+    </div>
+    <div class="m-actions end">
+      <button class="ghost" data-sheet-do="conns">看它的连接</button>
+      <button class="primary" data-sheet-do="focus">${speedApp === key ? "回到全部程序" : "在大图里只看它"}</button>
+    </div>`;
+}
+
+function sheetSync() {
+  if (!sheetApp || !Sheet.isOpen()) return;
+  const h = appHist.get(sheetApp);
+  if (!h) return;
+  Sheet.update(appSheetHtml(sheetApp));
+  const body = Sheet.body();
+  if (body && !body._charts) { Charts.attach(body); body._charts = true; }
+  if (body) Charts.restore(body);
+  Odo.set("as-down", ...odoRate(h.down[h.down.length - 1]));
+  Odo.set("as-up", ...odoRate(h.up[h.up.length - 1]));
+}
+
+function openAppSheet(key) {
+  if (!appHist.get(key)) return;
+  sheetApp = key;
+  Sheet.open($("panel"), "", {
+    onClose: () => { sheetApp = null; document.querySelectorAll(".sp-row.open").forEach((r) => r.classList.remove("open")); },
+    onClick: (e) => {
+      const b = e.target.closest("[data-sheet-do]");
+      if (!b) return;
+      const act = b.dataset.sheetDo;
+      const key = sheetApp;
+      if (act === "close") Sheet.close();
+      else if (act === "focus") {
+        speedApp = speedApp === key ? null : key;
+        Sheet.close();
+        renderList(true);
+      } else if (act === "conns") {
+        const name = appHist.get(key)?.name || "";
+        Sheet.close();
+        switchTab("conns");
+        $("search").value = name;
+        query = name;
+        renderList(true);
+      }
+    },
+  });
+  document.querySelectorAll(".sp-row").forEach((r) => r.classList.toggle("open", r.dataset.sheetApp === key));
+  sheetSync();
+}
+
+// after every rebuild of the list: tilt, cascade and the live numbers continue on the new elements
+function afterRender() {
+  Tilt.restore();
+  Cascade.after();
+  if (tab === "speed") {
+    speedRead(Charts.scrubIndex("speed"));
+    sheetSync();
+  } else if (Sheet.isOpen()) {
+    Sheet.close();
+  }
 }
 
 // ---------- traffic tab ----------
@@ -2110,7 +2265,7 @@ function homeHtml() {
   if (p.detected && groups.length) {
     for (const g of groups) {
       const geo = [g.cc ? country(g.cc) : "", g.org || ""].filter(Boolean).join(" · ");
-      exitCards.push(`<div class="hx">
+      exitCards.push(`<div class="hx tilt" data-tilt="5">
         <div class="hx-g">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</div>
         <div class="hx-ip mono">${g.ip ? `${flagImg(g.cc)}${esc(g.ip)}` : `<span class="crit">${g.error ? "检测失败" : "—"}</span>`}</div>
         <div class="hx-m">${esc(geo)}</div>
@@ -2119,10 +2274,10 @@ function homeHtml() {
     }
   } else if (p.detected && ex.proxy) {
     const r = ex.proxy;
-    exitCards.push(`<div class="hx"><div class="hx-g">代理出口</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc([r.cc ? country(r.cc) : "", r.org || ""].filter(Boolean).join(" · "))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
+    exitCards.push(`<div class="hx tilt" data-tilt="5"><div class="hx-g">代理出口</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc([r.cc ? country(r.cc) : "", r.org || ""].filter(Boolean).join(" · "))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
   }
   const d = ex.direct;
-  exitCards.push(`<div class="hx direct"><div class="hx-g">直连出口${p.detected ? "" : "（未检测到代理）"}</div>
+  exitCards.push(`<div class="hx direct tilt" data-tilt="5"><div class="hx-g">直连出口${p.detected ? "" : "（未检测到代理）"}</div>
     <div class="hx-ip mono">${d?.ip ? `${flagImg(d.cc)}${esc(d.ip)}` : "—"}</div>
     <div class="hx-m">${esc(d ? [d.cc ? country(d.cc) : "", d.org || ""].filter(Boolean).join(" · ") : "")}</div></div>`);
   const groupNote = p.detected && !groups.length
@@ -2136,7 +2291,7 @@ function homeHtml() {
   const tp = today ? today.pu + today.pd : 0, td = today ? today.du + today.dd : 0;
   const L = snap.latency;
   const leaks = snap.guard?.unacked || 0;
-  const tile = (label, value, note = "", go = "") => `<div class="tile ${go ? "go" : ""}" ${go ? `data-tab="${go}"` : ""}><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
+  const tile = (label, value, note = "", go = "") => `<div class="tile tilt ${go ? "go" : ""}" ${go ? `data-tab="${go}"` : ""}><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
   const tiles = `<div class="tiles home-tiles">
     ${tile("网速", `<span class="mono">${speedHtml(snap.up, snap.down)}</span>`, "", "speed")}
     ${tile("连接", `<span class="mono">${snap.connCount}</span>`, `${snap.apps.filter((a) => a.conns.length).length} 个程序`, "conns")}
@@ -2150,7 +2305,7 @@ function homeHtml() {
     ? Charts.line({
         id: "home-speed", width: chartW(), height: 130, xs: speedHist.t.slice(-n),
         series: [{ name: "下载", cls: "s1", values: speedHist.down.slice(-n) }, { name: "上传", cls: "s2", values: speedHist.up.slice(-n) }],
-        fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, endLabels: true, binary: true,
+        fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, endLabels: true, binary: true, area: true,
       })
     : "";
 
@@ -2363,7 +2518,7 @@ function setCategory(id) {
   try { localStorage.setItem("mb-set-cat", id); } catch { /* ignore */ }
   document.querySelectorAll("[data-setcat]").forEach((b) => b.classList.toggle("active", b.dataset.setcat === id));
   $("list").scrollTop = 0;
-  playIn($("list"), "page-in");
+  Cascade.play($("list"));
   renderList(true);
 }
 
@@ -2399,7 +2554,7 @@ const CHECK_SVG = `<svg class="pick-check" width="18" height="18" viewBox="0 0 2
 function shapeCardsHtml() {
   const cur = sget("shape.style", "capsule");
   const card = (id, name) => `<button class="pick-card ${cur === id ? "on" : ""}" data-pick="shape.style" data-val="${id}" aria-pressed="${cur === id}">
-      <div class="sc-mock"><div class="sc-win"><i></i><i></i><i></i><i></i></div><div class="sc-shape ${id}"><b></b><b></b><b></b><b></b></div></div>
+      <div class="sc-mock tilt" data-tilt="9"><div class="sc-win"><i></i><i></i><i></i><i></i></div><div class="sc-shape ${id}"><b></b><b></b><b></b><b></b></div></div>
       <div class="pick-name"><span>${name}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
   return `<div class="pick-grid">${card("notch", "刘海")}${card("capsule", "胶囊")}${card("line", "指示条")}</div>`;
 }
@@ -2424,7 +2579,7 @@ function themeCardsHtml(ids) {
     else if (id === "custom") { const c = sget("appearance.custom", {}) || {}; t = { bg: c.bg || "#16161c", text: c.text || "#f2f2f5", dim: mixHex(c.text || "#f2f2f5", c.bg || "#16161c", 0.3) }; name = "自定义"; }
     else { t = PRESETS[id]; name = t.name; }
     return `<button class="pick-card theme ${cur === id ? "on" : ""}" data-pick="appearance.theme" data-val="${id}" aria-pressed="${cur === id}">
-      <div class="tp-stage">${themePill(t)}</div><div class="pick-name"><span>${esc(name)}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
+      <div class="tp-stage tilt" data-tilt="9">${themePill(t)}</div><div class="pick-name"><span>${esc(name)}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
   }).join("")}</div>`;
 }
 
@@ -2453,7 +2608,7 @@ const SET_PAGES = {
     ${shapeCardsHtml()}
     ${sSelect("shape.dock", "停靠位置", [["top", "屏幕上边"], ["bottom", "屏幕下边（任务栏上方）"], ["left", "屏幕左边"], ["right", "屏幕右边"]], "左右两边时，胶囊会变成竖着的刘海；也可以长按岛往屏幕中间拉开，拖到另一条边松手")}
     ${sSelect("shape.anchor", "在这条边上的位置", [["start", "靠左（停靠左右两边时为靠上）"], ["center", "居中"], ["end", "靠右（停靠左右两边时为靠下）"]], "也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊")}
-    ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成指示条")}
+    ${sToggle("shape.lineWhenMaximized", "前台窗口最大化时缩成指示条", "和岛在同一块屏幕上的最大化窗口在前台时，胶囊 / 刘海临时变成指示条；切到别的窗口就变回来。每次启动后第一次变的时候，胶囊上会先提示一下")}
   </div>
   <div class="s-sec"><div class="s-title">显示内容<span class="s-note">拖动 ⠿ 调整顺序；宽度放不下时，排在后面的几项和轮换区合成最后一格轮流显示（指示条只显示状态色）</span></div>
     ${sDragList("pill.items", PILL_ITEM_LABEL)}
@@ -2505,6 +2660,9 @@ const SET_PAGES = {
     <label class="s-row"><span class="s-label">字体<span class="s-note">留空 = 系统默认</span></span>
       <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="例如 微软雅黑" spellcheck="false"></span></label>
     <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
+  </div>
+  <div class="s-sec"><div class="s-title">动效</div>
+    ${sSelect("appearance.motion", "界面动效", [["auto", "跟随 Windows（设置 → 辅助功能 → 动画效果）"], ["on", "总是打开"], ["off", "关闭"]], "胶囊展开变形、卡片倾斜、按钮回弹、数字滚动、列表依次出现这些动画")}
   </div>`,
 
   network: () => `
@@ -2561,7 +2719,19 @@ const SET_PAGES = {
     ${updateInfo?.available ? updateCardHtml() : ""}
     ${sToggle("general.autoUpdate", "自动检查更新", "每天检查一次 GitHub 上的新版本，有新版本时在胶囊上提示")}
     <div class="s-row"><span class="s-label">日志与数据<span class="s-note">${esc(appInfo?.logDir || "")}</span></span>
-      <span><button class="ghost" data-do="open-logs">打开目录</button> <button class="ghost" data-do="open-home">GitHub 主页</button></span></div>
+      <button class="ghost" data-do="open-logs">打开目录</button></div>
+    <div class="s-row"><span class="s-label">新手教程<span class="s-note">在岛上重新走一遍第一次启动时的引导</span></span>
+      <button class="ghost" data-do="tour-restart">重新看教程</button></div>
+  </div>
+  <div class="s-sec"><div class="s-title">作者与仓库</div>
+    <div class="s-row"><span class="s-label">作者<span class="s-note">${AUTHOR}</span></span>
+      <button class="ghost" data-do="open-author">GitHub 主页</button></div>
+    <div class="s-row"><span class="s-label">源代码<span class="s-note mono">${REPO.replace("https://", "")}</span></span>
+      <span><button class="ghost" data-do="open-issues">反馈问题</button> <button class="ghost" data-do="open-home">打开仓库</button></span></div>
+    <div class="s-row"><span class="s-label">许可<span class="s-note">MIT 开源许可：可以自由使用、修改和分发，需保留版权声明</span></span></div>
+  </div>
+  <div class="s-sec"><div class="s-title">免责声明</div>
+    <div class="legal">${DISCLAIMER.map((p) => `<p>${p}</p>`).join("")}</div>
   </div>
   <div class="s-sec"><div class="s-title">恢复默认</div>
     <div class="s-row"><span class="s-label">所有设置<span class="s-note">这几页里的所有设置回到第一次打开时的样子</span></span>
@@ -2638,6 +2808,13 @@ function refreshAppInfo() {
   }).catch(() => {});
 }
 const REPO = "https://github.com/aileboeth/MicaBar";
+const AUTHOR = "aileboeth";
+const DISCLAIMER = [
+  "MicaBar 是作者个人业余开发的免费开源软件（MIT 许可），按「现状」提供，不附带任何明示或暗示的担保，包括但不限于对适销性、特定用途适用性和不侵权的担保。",
+  "它在本机读取网络连接、进程、系统通知、正在播放的媒体和 AI 工具的登录状态，这些数据只在本机使用，不会上传给作者；查询出口 IP、AI 额度、检查更新时会访问对应的服务（完整清单见仓库的 README）。「出口控制」「防泄漏」会修改代理软件的覆写配置、添加防火墙规则，并可能重启代理软件。",
+  "因使用或无法使用本软件造成的任何直接或间接损失（包括但不限于数据丢失、断网、代理配置被改动、账号受限），作者不承担责任。请在遵守当地法律法规和各服务使用条款的前提下使用。",
+  "MicaBar 与 Clash、mihomo、Anthropic、OpenAI、Google、xAI 等项目和公司没有任何关联，文中提到的名称和商标归各自的所有者。",
+];
 
 $("list").addEventListener("change", (e) => {
   const el = e.target;
@@ -2918,6 +3095,11 @@ function connHtml(app, c) {
 }
 
 function renderList(force = false) {
+  renderListNow(force);
+  afterRender();
+}
+
+function renderListNow(force) {
   const list = $("list");
   if (listPress && !force) return;
   if (tab === "settings") {
@@ -3183,6 +3365,15 @@ async function runAction(el) {
     } else if (act === "open-home") {
       invoke("open_url", { url: REPO });
       return;
+    } else if (act === "open-issues") {
+      invoke("open_url", { url: REPO + "/issues" });
+      return;
+    } else if (act === "open-author") {
+      invoke("open_url", { url: "https://github.com/" + AUTHOR });
+      return;
+    } else if (act === "tour-restart") {
+      invoke("tour_restart").then(() => toast("教程在岛上开始了")).catch((err) => toast(String(err), true));
+      return;
     } else if (act === "open-logs") {
       if (appInfo?.logDir) invoke("open_url", { url: appInfo.logDir });
       return;
@@ -3280,7 +3471,7 @@ $("panel").addEventListener("click", (e) => {
   const inMenu = e.target.closest("#menu");
   const go = e.target.closest("#list [data-tab]");
   if (go && !e.target.closest("[data-do]")) {
-    switchTab(go.dataset.tab);
+    switchTab(go.dataset.tab, go.classList.contains("tile") ? go.getBoundingClientRect() : null);
     return;
   }
   const set = e.target.closest("[data-set]");
@@ -3357,6 +3548,11 @@ $("panel").addEventListener("click", (e) => {
     trafficDay = d && d !== trafficDay ? d : null; // clicking the picked day again goes back to the range
     loadTraffic(true);
     renderList(true);
+    return;
+  }
+  const sheetRow = e.target.closest("[data-sheet-app]");
+  if (sheetRow) {
+    openAppSheet(sheetRow.dataset.sheetApp);
     return;
   }
   const sapp = e.target.closest("[data-sapp]");
@@ -3510,7 +3706,7 @@ function renderTabs() {
     .join("");
 }
 
-function switchTab(name) {
+function switchTab(name, zoomFrom = null) {
   if (!MANAGER && name === "settings") {
     // the island's gear opens the settings in the desktop window
     invoke("open_manager", { page: "settings" }).catch(() => {});
@@ -3522,7 +3718,6 @@ function switchTab(name) {
   if (crossing) {
     renderTabs();
     playIn($("tabs"), name === "settings" ? "nav-fwd" : "nav-back");
-    playIn($("list"), "page-in");
   }
   if (!PAGE_TABS.has(name) && name !== "settings" && name !== "home") netTab = name;
   renderPages();
@@ -3540,11 +3735,17 @@ function switchTab(name) {
     try { history.replaceState(null, "", "#" + name); } catch { /* ignore */ }
   }
   $("list").scrollTop = 0;
+  Sheet.close();
+  // a card opened its page: the page grows out of the card; otherwise the items rise in one by one
+  if (zoomFrom) Cascade.play(null);
+  else Cascade.play($("list"));
   renderList(true);
+  if (zoomFrom) sharedZoom(zoomFrom, $("list"));
   if (MANAGER) renderPanel();
   else measurePanel();
   ensureSysPoll();
   updateViz();
+  if (tour.on && expanded) renderTour();
 }
 
 // a very narrow island: the wheel scrolls the tab row sideways
@@ -3602,6 +3803,8 @@ function applySettings(s) {
   document.documentElement.style.setProperty("--q-crit", sget("ai.ring.colors.crit", "#f87171"));
   applyTheme();
   applyGlass();
+  applyMotion();
+  maybeStartTour();
   const scale = sget("appearance.scale", 100);
   if (scale !== zoomNow && !MANAGER) {
     zoomNow = scale;
@@ -3687,6 +3890,131 @@ listen("island", (e) => {
     collapse();
   }
 });
+// ---------- first-run tour ----------
+// Steps on the island itself: a card in place of the pill while collapsed, a card at the bottom of
+// the open panel with a pulsing ring on what the step is about. Shown once (general.tourDone),
+// again from 设置 → 关于. While it runs the backend keeps the panel open and lets the collapsed
+// card take clicks (like a notification card).
+
+function tourSteps() {
+  const hk = esc(sget("interaction.hotkey", "Ctrl+Alt+N"));
+  const pass = sget("interaction.passthrough", false);
+  const click = sget("interaction.expand", "hover") === "click";
+  const hold = Math.round(Number(sget("interaction.holdMs", 260)) || 260);
+  const steps = [
+    { id: "hello", title: "欢迎使用 MicaBar", body: "这座「岛」停在屏幕边上：收起时显示出口 IP、网速这些，展开后是完整的面板。花半分钟看看怎么用吧。" },
+    { id: "open", title: "展开和收起", body: `${pass ? "现在是穿透模式：鼠标碰不到岛，只能用快捷键展开。" : click ? "平时点一下岛就会展开，点外面的地方就收起。" : "平时把鼠标在岛上停一会儿就会展开，移开就收起；收起时它不挡下面的点击。"}随时按 <kbd>${hk}</kbd> 也能展开 / 收起。<br>教程进行时，面板会一直开着。` },
+  ];
+  if (visiblePages().length > 1) steps.push({ id: "pages", target: "#pages", title: "切换页面", body: "顶部这排图标是各个页面：网络、系统、音乐、AI 额度、通知……点一下试试。页面的顺序和开关在设置里改。" });
+  if (visiblePages().includes("net")) steps.push({ id: "tabs", target: "#tabs", net: true, title: "网络页的页签", body: "连接、网速、流量、节点……在网速页的图上左右移动鼠标，能看每一秒的数值；点下面的程序能看它的详情。" });
+  steps.push({ id: "grab", target: "island", title: "拖着走", body: `按住面板不动约 ${hold} 毫秒，就能把整个岛抓起来：往左右甩换位置；往屏幕中间拉开，还能拖到另一条边上松手。收起时按住 <kbd>Alt</kbd> 再长按胶囊也行。现在就可以试试。` });
+  steps.push({ id: "gear", target: "#gear", title: "设置与总览", body: "右上角的齿轮打开桌面窗口：总览、每天的流量、节点测速和全部设置都在那里。托盘图标右键也能打开。" });
+  steps.push({ id: "legal", title: "最后：免责声明", legal: true, body: `MicaBar 由 <b>${AUTHOR}</b> 个人开发，以 MIT 许可开源（${REPO.replace("https://", "")}）。<br>软件按「现状」提供，不附带任何担保。它只在本机读取连接、进程和通知；「出口控制」「防泄漏」会改代理软件的覆写和防火墙规则，并可能重启代理软件。使用中造成的任何损失，作者不承担责任。完整的说明在 设置 → 关于。` });
+  return steps;
+}
+
+function renderTour() {
+  if (MANAGER) return;
+  const el = $("tour");
+  document.querySelectorAll(".tour-hl").forEach((x) => x.classList.remove("tour-hl"));
+  island.classList.remove("tour-ring");
+  if (!tour.on) {
+    island.classList.remove("touring");
+    el.innerHTML = "";
+    return;
+  }
+  const steps = tourSteps();
+  tour.step = Math.max(0, Math.min(tour.step, steps.length - 1));
+  const N = steps.length - 1; // the welcome card is step 0, not counted
+  const btn = (act, label, cls = "ghost") => `<button class="${cls}" data-tour="${act}">${label}</button>`;
+  const card = (title, body, acts, head = "", legal = false) => `<div class="tour-card glow-card">
+      ${head ? `<div class="tour-step">${head}</div>` : ""}<div class="tour-title">${title}</div>
+      <div class="${legal ? "tour-legal" : "tour-body"} in">${body}</div><div class="tour-acts">${acts}</div></div>`;
+  island.classList.add("touring");
+  if (!expanded) {
+    const s = steps[tour.step];
+    el.innerHTML = tour.step === 0
+      ? card(s.title, s.body, `${btn("skip", "跳过")}<span class="sp"></span>${btn("start", "开始 →", "primary")}`, "新手教程")
+      : card("教程还没看完", `第 ${tour.step} / ${N} 步：${esc(s.title)}`, `${btn("skip", "结束教程")}<span class="sp"></span>${btn("resume", "继续", "primary")}`, "新手教程");
+    el.style.setProperty("--tour-w", Math.min(window.innerWidth - 16, TOUR_W) + "px");
+    tour.h = Math.ceil(el.offsetHeight);
+    applySize();
+    return;
+  }
+  if (tour.step === 0) tour.step = 1;
+  const s = steps[tour.step];
+  if (s.target === "island") island.classList.add("tour-ring");
+  else if (s.target) document.querySelector(s.target)?.classList.add("tour-hl");
+  const dots = `<span class="tour-dots">${steps.slice(1).map((_, k) => `<i class="${k + 1 === tour.step ? "on" : ""}"></i>`).join("")}</span><span>${tour.step} / ${N}</span>`;
+  const last = tour.step === N;
+  const acts = s.legal
+    ? `${btn("repo", "打开仓库")}<span class="sp"></span>${btn("prev", "上一步")}${btn("done", "知道了", "primary")}`
+    : `${btn("skip", "跳过")}<span class="sp"></span>${tour.step > 1 ? btn("prev", "上一步") : ""}${btn("next", last ? "完成" : "下一步", "primary")}`;
+  el.innerHTML = card(s.title, s.body, acts, dots, s.legal);
+}
+
+function tourGo(d) {
+  const steps = tourSteps();
+  const i = Math.max(1, tour.step + d);
+  if (i >= steps.length) return endTour();
+  tour.step = i;
+  if (steps[i].net && curPage() !== "net") switchPage("net"); // the tabs only exist on the network page
+  renderTour();
+}
+
+function startTour() {
+  if (MANAGER || editing) return;
+  hideNotes();
+  tour.on = true;
+  tour.step = expanded ? 1 : 0;
+  invoke("tour_mode", { on: true, open: false }).catch(() => {});
+  invoke("log_js", { msg: "tour start" }).catch(() => {});
+  renderTour();
+  applySize();
+}
+
+function endTour() {
+  tour.on = false;
+  tour.step = 0;
+  invoke("tour_mode", { on: false, open: false }).catch(() => {});
+  invoke("settings_set", { patch: { general: { tourDone: true } } }).catch(() => {});
+  renderTour();
+  pillLast = "";
+  renderPill();
+  applySize();
+}
+
+// first start: once the settings are in, if the tour was never finished or skipped
+function maybeStartTour() {
+  if (MANAGER || tour.on || maybeStartTour.done || !S) return;
+  maybeStartTour.done = true;
+  if (!sget("general.tourDone", false)) setTimeout(() => { if (!tour.on && !sget("general.tourDone", false)) startTour(); }, 1800);
+}
+
+// a grab during the tour collapses the island: continue after it lands (past the grab step)
+function tourAfterGrab() {
+  if (!tour.on) return;
+  if (tourSteps()[tour.step]?.id === "grab") tour.step++;
+  renderTour();
+  if (tour.step >= 1) setTimeout(() => invoke("tour_mode", { on: true, open: true }).catch(() => {}), 450);
+}
+
+if (!MANAGER) {
+  $("tour").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tour]");
+    if (!b) return;
+    const a = b.dataset.tour;
+    if (a === "start" || a === "resume") {
+      if (tour.step === 0) tour.step = 1;
+      invoke("tour_mode", { on: true, open: true }).catch(() => {});
+    } else if (a === "next") tourGo(1);
+    else if (a === "prev") tourGo(-1);
+    else if (a === "repo") invoke("open_url", { url: REPO }).catch(() => {});
+    else if (a === "skip" || a === "done") endTour();
+  });
+  listen("tour-start", () => { tour.on = false; startTour(); });
+}
+
 // the panel never scrolls as a whole (only #list inside it does); focus() could shift it
 $("panel").addEventListener("scroll", () => { if ($("panel").scrollTop) $("panel").scrollTop = 0; });
 
@@ -3775,7 +4103,7 @@ function startGrab(e) {
   const { vertical } = edgeAxis();
   expanded = false;
   closeMenu();
-  island.classList.remove("expanded", "peek");
+  island.classList.remove("expanded", "peek", "touring");
   island.classList.add("collapsed", "grabbed", "flinging");
   pillLast = "";
   renderPill();
@@ -3818,7 +4146,8 @@ function onScrollbar(e) {
 
 island.addEventListener("pointerdown", (e) => {
   if (MANAGER || editing || fling.active || e.button !== 0) return;
-  if (e.target.closest("input, select, textarea, #menu")) return;
+  // controls, the scrub chart, the sheet and the tour card are not handles for grabbing the island
+  if (e.target.closest("input, select, textarea, #menu, #tour, .sheet, .sheet-scrim, [data-nograb]")) return;
   if (onScrollbar(e)) return;
   const ev = { pointerId: e.pointerId, screenX: e.screenX, screenY: e.screenY };
   const hold = Math.min(1000, Math.max(150, Number(sget("interaction.holdMs", 260)) || 260));
@@ -4012,6 +4341,7 @@ function endFling() {
   fitted = "";
   fitWindow();
   applySize();
+  tourAfterGrab();
 }
 
 // ---------- layout editing: drag the edges of the panel / pill ----------
@@ -4157,10 +4487,14 @@ $("edit").addEventListener("click", (e) => {
 });
 listen("layout-edit", (e) => (e.payload ? startEdit() : endEdit(false)));
 
-listen("maximized", (e) => {
-  maximized = !!e.payload;
-  applySize();
-});
+listen("maximized", (e) => setMaximized(e.payload));
+
+// animations: follow Windows "animation effects" (auto), or always on / off (设置 → 面板主题 → 动效)
+function applyMotion() {
+  const m = sget("appearance.motion", "auto");
+  const off = m === "off" || (m === "auto" && snap?.animations === false);
+  document.documentElement.classList.toggle("no-anim", off);
+}
 
 // ---------- keyboard ----------
 // Tab / Shift+Tab: native focus order. ←/→ on the tab bar switch pages. ↑/↓ move between rows
@@ -4198,7 +4532,7 @@ document.addEventListener("keydown", (e) => {
       list[next].scrollIntoView({ block: "nearest" });
     }
     e.preventDefault();
-  } else if ((e.key === "Enter" || e.key === " ") && a?.classList.contains("app-head")) {
+  } else if ((e.key === "Enter" || e.key === " ") && (a?.classList.contains("app-head") || a?.classList.contains("sp-row"))) {
     a.click();
     e.preventDefault();
   }
@@ -4220,12 +4554,9 @@ listen("snapshot", (e) => {
 function onSnapshot(e) {
   snap = e.payload;
   exitState = snap.exit;
-  if (snap.maximized !== maximized) {
-    maximized = !!snap.maximized;
-  }
+  if (!!snap.maximized !== maximized) setMaximized(snap.maximized);
   recordSpeed(snap);
-  // follow Windows "animation effects"
-  document.documentElement.classList.toggle("no-anim", snap.animations === false);
+  applyMotion();
   checkFlashes(snap);
   renderPill();
   renderPanel();

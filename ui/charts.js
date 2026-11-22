@@ -2,12 +2,19 @@
 // Small SVG charts for the panel. Conventions: 2px lines with round joins, >=8px end dots with a
 // 2px surface ring, 1px solid recessive gridlines, one y axis, text in ink colours (never the
 // series colour), selective end labels, crosshair + tooltip on hover.
+// Lines are monotone curves (no overshoot past the real values). `area` fills under each line
+// with a fading gradient; `scrub` turns the tooltip into a magnetic crosshair that glides to the
+// nearest sample and reports it (onScrub); `slide` scrolls the plot smoothly as new samples arrive.
 
 const Charts = (() => {
-  const chartData = new Map(); // id -> { xs, series, geom, fmtX, fmtY, markers }
+  const chartData = new Map(); // id -> { xs, series, X, Y, pad, W, H, n, fmtX, fmtY, markers, scrub }
   const hover = new Map(); // id -> last mouse x inside the plot (CSS px), survives re-renders
+  const glide = new Map(); // id -> { x, v, tx, i, raf } magnetic crosshair (scrub charts)
+  const scrubCb = new Map(); // id -> fn(index | null)
+  const lastEnd = new Map(); // id -> { t, n } newest sample of the last render (slide)
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const reduced = () => document.documentElement.classList.contains("no-anim");
 
   // 1 / 2 / 2.5 / 5 x 10^n steps, 4 intervals. binary: pick the KB/MB/GB unit first and round
   // inside it, so byte axes read 0 / 1 MB / 2 MB rather than 0 / 977 KB / 1.9 MB.
@@ -22,11 +29,37 @@ const Charts = (() => {
     return { max: step * ticks * unit, step: step * unit };
   }
 
+  // Monotone cubic (Fritsch–Carlson) through the points: smooth, but never above a peak or below
+  // a valley the data doesn't have.
+  function curve(pts) {
+    const n = pts.length;
+    if (!n) return "";
+    const f = (v) => v.toFixed(1);
+    if (n < 3) return pts.map((p, i) => `${i ? "L" : "M"}${f(p[0])},${f(p[1])}`).join("");
+    const dx = [], m = [], t = new Array(n);
+    for (let i = 0; i < n - 1; i++) {
+      dx[i] = pts[i + 1][0] - pts[i][0] || 1e-6;
+      m[i] = (pts[i + 1][1] - pts[i][1]) / dx[i];
+    }
+    t[0] = m[0];
+    t[n - 1] = m[n - 2];
+    for (let i = 1; i < n - 1; i++) {
+      t[i] = m[i - 1] * m[i] <= 0 ? 0 : (3 * (dx[i - 1] + dx[i])) / ((2 * dx[i] + dx[i - 1]) / m[i - 1] + (dx[i] + 2 * dx[i - 1]) / m[i]);
+    }
+    let d = `M${f(pts[0][0])},${f(pts[0][1])}`;
+    for (let i = 0; i < n - 1; i++) {
+      const h = dx[i] / 3;
+      d += `C${f(pts[i][0] + h)},${f(pts[i][1] + t[i] * h)} ${f(pts[i + 1][0] - h)},${f(pts[i + 1][1] - t[i + 1] * h)} ${f(pts[i + 1][0])},${f(pts[i + 1][1])}`;
+    }
+    return d;
+  }
+
   /**
    * Line chart.
    * opts: { id, width, height, xs: number[], series: [{ name, cls, values: (number|null)[] }],
    *         fmtY(v), fmtTick(v), fmtX(x), endLabels: bool, ref: { value, label },
-   *         markers: [{ i, label }] (critical marks, drawn at the top) }
+   *         markers: [{ i, label }] (critical marks, drawn at the top),
+   *         area: bool, scrub: bool, slide: bool }
    */
   function line(opts) {
     const { id, width: W, height: H, xs, series } = opts;
@@ -39,12 +72,19 @@ const Charts = (() => {
     const sc = niceScale(max * 1.05, 4, !!opts.binary);
     const X = (i) => pad.l + (n <= 1 ? pw : (i / (n - 1)) * pw);
     const Y = (v) => pad.t + ph - (v / sc.max) * ph;
-    chartData.set(id, { xs, series, X, Y, pad, W, H, n, fmtX: opts.fmtX, fmtY: opts.fmtY, markers: opts.markers || [] });
+    chartData.set(id, { xs, series, X, Y, pad, W, H, n, fmtX: opts.fmtX, fmtY: opts.fmtY, markers: opts.markers || [], scrub: !!opts.scrub });
+
+    // a new sample at the right end, same window length: the plot was one step further right a
+    // moment ago, so it scrolls into place instead of jumping
+    const prev = lastEnd.get(id);
+    lastEnd.set(id, { t: xs[n - 1], n });
+    const slide = opts.slide && !reduced() && prev && n > 2 && prev.n === n && prev.t !== xs[n - 1];
+    const step = n > 1 ? pw / (n - 1) : 0;
 
     let grid = "";
     for (let v = 0; v <= sc.max + 1e-9; v += sc.step) {
       const y = Y(v).toFixed(1);
-      grid += `<line class="c-grid" x1="${pad.l}" x2="${pad.l + pw}" y1="${y}" y2="${y}"/>`;
+      grid += `<line class="c-grid${v === 0 ? " base" : ""}" x1="${pad.l}" x2="${pad.l + pw}" y1="${y}" y2="${y}"/>`;
       grid += `<text class="c-tick" x="${pad.l - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${esc(opts.fmtTick ? opts.fmtTick(v) : v)}</text>`;
     }
     // x labels: first and last only (the tooltip carries the rest)
@@ -58,16 +98,32 @@ const Charts = (() => {
       const y = Y(opts.ref.value).toFixed(1);
       ref = `<line class="c-ref" x1="${pad.l}" x2="${pad.l + pw}" y1="${y}" y2="${y}"/><text class="c-tick" x="${pad.l + pw}" y="${(+y - 4).toFixed(1)}" text-anchor="end">${esc(opts.ref.label)}</text>`;
     }
-    let paths = "", ends = "";
+    const gid = (cls) => `cg-${String(id).replace(/[^\w-]/g, "")}-${cls}`;
+    let defs = "", paths = "", areas = "", ends = "";
     const endPts = [];
+    const base = Y(0);
     for (const s of series) {
-      let d = "", pen = false;
+      // runs of non-null samples, each drawn as its own curve
+      const runs = [];
+      let run = [];
       s.values.forEach((v, i) => {
-        if (v == null) { pen = false; return; }
-        d += `${pen ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`;
-        pen = true;
+        if (v == null) { if (run.length) runs.push(run); run = []; return; }
+        run.push([X(i), Y(v)]);
       });
-      paths += `<path class="c-line ${s.cls}" d="${d}"/>`;
+      if (run.length) runs.push(run);
+      for (const r of runs) {
+        const d = curve(r);
+        paths += `<path class="c-line ${s.cls}" d="${d}"/>`;
+        if (opts.area && r.length > 1) areas += `<path class="c-area" style="fill:url(#${gid(s.cls)})" d="${d}L${r[r.length - 1][0].toFixed(1)},${base.toFixed(1)}L${r[0][0].toFixed(1)},${base.toFixed(1)}Z"/>`;
+      }
+      if (opts.area) {
+        // the gradient spans the series' usual level (90th percentile), not its rare peaks, so the
+        // body of the area stays visible when one spike sets the scale
+        const vals = s.values.filter((v) => v != null).sort((a, b) => a - b);
+        const p90 = vals.length ? vals[Math.floor(vals.length * 0.9)] : 0;
+        const top = Math.min(base - 8, Y(Math.max(p90 * 1.4, sc.max * 0.05)));
+        defs += `<linearGradient id="${gid(s.cls)}" gradientUnits="userSpaceOnUse" x1="0" y1="${top.toFixed(1)}" x2="0" y2="${base.toFixed(1)}"><stop offset="0" class="c-stop ${s.cls}" stop-opacity="0.32"/><stop offset="1" class="c-stop ${s.cls}" stop-opacity="0.02"/></linearGradient>`;
+      }
       let li = s.values.length - 1;
       while (li >= 0 && s.values[li] == null) li--;
       if (li >= 0) {
@@ -93,19 +149,94 @@ const Charts = (() => {
       const x = X(m.i).toFixed(1);
       marks += `<g class="c-crit"><line x1="${x}" x2="${x}" y1="${pad.t}" y2="${pad.t + ph}"/><text x="${x}" y="${pad.t + 8}" text-anchor="middle">✕</text></g>`;
     }
-    return `<div class="chart" data-chart="${esc(id)}" style="width:${W}px;height:${H}px">
-      <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${grid}${xl}${ref}${marks}${paths}${ends}${labels}
-        <g class="c-hover" style="display:none"><line class="c-cross" y1="${pad.t}" y2="${pad.t + ph}"/>${series.map((s) => `<circle class="c-hdot ${s.cls}" r="4"/>`).join("")}</g>
+    const clip = `cc-${String(id).replace(/[^\w-]/g, "")}`;
+    defs += `<clipPath id="${clip}"><rect x="${pad.l - 6}" y="0" width="${pw + 12}" height="${H}"/></clipPath>`;
+    const plot = `<g clip-path="url(#${clip})"><g class="c-plot${slide ? " sliding" : ""}" style="--dx:${step.toFixed(2)}px">${areas}${paths}${ends}</g></g>`;
+    const hoverG = opts.scrub
+      ? `<g class="c-hover scrub" style="display:none"><line class="c-cross" y1="${pad.t}" y2="${pad.t + ph}"/>${series.map((s) => `<circle class="c-halo ${s.cls}" r="9"/><circle class="c-hdot ${s.cls}" r="4.5"/>`).join("")}</g>`
+      : `<g class="c-hover" style="display:none"><line class="c-cross" y1="${pad.t}" y2="${pad.t + ph}"/>${series.map((s) => `<circle class="c-hdot ${s.cls}" r="4"/>`).join("")}</g>`;
+    return `<div class="chart${opts.scrub ? " scrub" : ""}" data-chart="${esc(id)}" ${opts.scrub ? "data-nograb" : ""} style="width:${W}px;height:${H}px">
+      <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs>${defs}</defs>${grid}${xl}${ref}${marks}${plot}${labels}
+        ${hoverG}
         <rect class="c-hit" x="${pad.l}" y="0" width="${pw}" height="${H}" fill="transparent"/>
-      </svg><div class="c-tip" style="display:none"></div></div>`;
+      </svg>${opts.scrub ? `<div class="c-xlab" style="display:none"></div>` : `<div class="c-tip" style="display:none"></div>`}</div>`;
   }
 
-  function showHover(el, mx) {
+  const idxAt = (d, mx) => {
+    const t = (mx - d.pad.l) / (d.W - d.pad.l - d.pad.r);
+    return Math.max(0, Math.min(d.n - 1, Math.round(t * (d.n - 1))));
+  };
+
+  // scrub charts: draw the crosshair at x (between samples while it glides), dots riding the lines
+  function drawScrub(el, d, x, i) {
+    const g = el.querySelector(".c-hover");
+    const lab = el.querySelector(".c-xlab");
+    if (!g) return;
+    g.style.display = "";
+    const cross = g.querySelector(".c-cross");
+    cross.setAttribute("x1", x.toFixed(1));
+    cross.setAttribute("x2", x.toFixed(1));
+    const pw = d.W - d.pad.l - d.pad.r;
+    const fi = Math.max(0, Math.min(d.n - 1, ((x - d.pad.l) / pw) * (d.n - 1)));
+    const a = Math.floor(fi), b = Math.min(d.n - 1, a + 1), k = fi - a;
+    const dots = g.querySelectorAll(".c-hdot"), halos = g.querySelectorAll(".c-halo");
+    d.series.forEach((s, j) => {
+      const va = s.values[a], vb = s.values[b];
+      const show = va != null && vb != null;
+      dots[j].style.display = halos[j].style.display = show ? "" : "none";
+      if (!show) return;
+      const y = d.Y(va + (vb - va) * k).toFixed(1);
+      for (const c of [dots[j], halos[j]]) { c.setAttribute("cx", x.toFixed(1)); c.setAttribute("cy", y); }
+    });
+    if (lab) {
+      lab.style.display = "";
+      lab.textContent = d.fmtX ? d.fmtX(d.xs[i]) : String(i);
+      const w = lab.offsetWidth;
+      lab.style.left = Math.max(d.pad.l - 4, Math.min(d.W - w, x - w / 2)) + "px";
+    }
+  }
+
+  const chartEl = (id) => document.querySelector(`.chart[data-chart="${CSS.escape(id)}"]`);
+
+  function glideTo(id, d, i, instant) {
+    let g = glide.get(id);
+    const tx = d.X(i);
+    if (!g) { g = { x: tx, v: 0, tx, i, raf: 0 }; glide.set(id, g); instant = true; }
+    if (g.i !== i) { g.i = i; scrubCb.get(id)?.(i); }
+    g.tx = tx;
+    if (instant || reduced()) {
+      if (instant && g.x == null) g.x = tx;
+      if (reduced()) { g.x = tx; g.v = 0; }
+      const el = chartEl(id);
+      if (el) drawScrub(el, d, g.x, i);
+      if (reduced()) return;
+    }
+    if (g.raf) return;
+    let last = performance.now();
+    const step = (now) => {
+      const dt = Math.min(32, now - last);
+      last = now;
+      // a stiff, well damped spring: it glides over and clicks onto the sample
+      for (let t = 0; t < dt; t += 4) {
+        const h = Math.min(4, dt - t);
+        g.v += (-0.0016 * (g.x - g.tx) - 0.07 * g.v) * h;
+        g.x += g.v * h;
+      }
+      const el = chartEl(id), dd = chartData.get(id);
+      if (!el || !dd || !hover.has(id)) { g.raf = 0; return; }
+      if (Math.abs(g.x - g.tx) < 0.3 && Math.abs(g.v) < 0.01) { g.x = g.tx; g.v = 0; drawScrub(el, dd, g.x, g.i); g.raf = 0; return; }
+      drawScrub(el, dd, g.x, g.i);
+      g.raf = requestAnimationFrame(step);
+    };
+    g.raf = requestAnimationFrame(step);
+  }
+
+  function showHover(el, mx, instant) {
     const id = el.dataset.chart;
     const d = chartData.get(id);
     if (!d || d.n === 0) return;
-    const t = (mx - d.pad.l) / (d.W - d.pad.l - d.pad.r);
-    const i = Math.max(0, Math.min(d.n - 1, Math.round(t * (d.n - 1))));
+    const i = idxAt(d, mx);
+    if (d.scrub) return glideTo(id, d, i, instant);
     const g = el.querySelector(".c-hover");
     const tip = el.querySelector(".c-tip");
     if (!g || !tip) return;
@@ -137,23 +268,29 @@ const Charts = (() => {
   }
 
   function hideHover(el) {
+    const id = el.dataset.chart;
     const g = el.querySelector(".c-hover");
-    const tip = el.querySelector(".c-tip");
+    const tip = el.querySelector(".c-tip, .c-xlab");
     if (g) g.style.display = "none";
     if (tip) tip.style.display = "none";
+    const gl = glide.get(id);
+    if (gl) { cancelAnimationFrame(gl.raf); glide.delete(id); scrubCb.get(id)?.(null); }
   }
 
   // Event delegation on a container; hover survives the container being re-rendered.
   function attach(container) {
     container.addEventListener("mousemove", (e) => {
       const el = e.target.closest(".chart");
-      if (!el || !e.target.closest(".c-hit, .c-hover, .c-tip")) return;
+      if (!el || !e.target.closest(".c-hit, .c-hover, .c-tip, .c-xlab")) return;
       const r = el.getBoundingClientRect();
       const mx = e.clientX - r.left;
       hover.set(el.dataset.chart, mx);
       showHover(el, mx);
     });
-    container.addEventListener("mouseleave", () => hover.clear());
+    container.addEventListener("mouseleave", () => {
+      for (const id of hover.keys()) { const el = chartEl(id); if (el) hideHover(el); }
+      hover.clear();
+    });
     container.addEventListener("mouseout", (e) => {
       const el = e.target.closest(".chart");
       if (el && !el.contains(e.relatedTarget)) {
@@ -167,9 +304,13 @@ const Charts = (() => {
   function restore(container) {
     for (const [id, mx] of hover) {
       const el = container.querySelector(`.chart[data-chart="${CSS.escape(id)}"]`);
-      if (el) showHover(el, mx);
+      if (el) showHover(el, mx, true);
     }
   }
+
+  /** The index a scrub chart's crosshair is on (null when the pointer is elsewhere). */
+  const scrubIndex = (id) => (hover.has(id) && glide.get(id) ? glide.get(id).i : null);
+  const onScrub = (id, fn) => scrubCb.set(id, fn);
 
   /**
    * Stacked columns. opts: { id, width, height, cats: string[], stacks: [{ name, cls, values }],
@@ -235,15 +376,19 @@ const Charts = (() => {
       .join("")}</div>`;
   }
 
-  /** Sparkline: one series in the de-emphasis hue, no axes. */
-  function spark(values, w = 90, h = 22) {
+  /** Sparkline: one series, no axes. cls colours it (default: the de-emphasis hue); area fills under it. */
+  let sparkN = 0;
+  function spark(values, w = 90, h = 22, cls = "", area = false) {
     const max = Math.max(...values, 0);
-    if (!(max > 0) || values.length < 2) return `<svg class="spark" width="${w}" height="${h}"></svg>`;
+    if (!(max > 0) || values.length < 2) return `<svg class="spark ${cls}" width="${w}" height="${h}"></svg>`;
     const X = (i) => (i / (values.length - 1)) * (w - 2) + 1;
     const Y = (v) => h - 2 - (v / max) * (h - 4);
-    const d = values.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join("");
-    return `<svg class="spark" width="${w}" height="${h}"><path d="${d}"/></svg>`;
+    const pts = values.map((v, i) => [X(i), Y(v)]);
+    const d = curve(pts);
+    const id = `sg${++sparkN % 1000}`;
+    const fill = area ? `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity="0.3"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path class="spark-area" style="fill:url(#${id});stroke:none" d="${d}L${X(values.length - 1).toFixed(1)},${h}L1,${h}Z"/>` : "";
+    return `<svg class="spark ${cls}" width="${w}" height="${h}">${fill}<path d="${d}"/></svg>`;
   }
 
-  return { line, columns, segbar, spark, attach, restore };
+  return { line, columns, segbar, spark, attach, restore, onScrub, scrubIndex };
 })();

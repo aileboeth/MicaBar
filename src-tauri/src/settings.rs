@@ -22,7 +22,9 @@ pub fn defaults() -> Value {
             // saver | balanced | smooth
             "profile": "balanced",
             // primary | cursor | <monitor name>
-            "monitor": "primary"
+            "monitor": "primary",
+            // the first-run tour on the island was finished or skipped
+            "tourDone": false
         },
         "interaction": {
             // hover | click
@@ -194,6 +196,8 @@ pub fn defaults() -> Value {
             "font": "",
             // percent
             "scale": 100,
+            // animations: auto (follow Windows "animation effects") | on | off
+            "motion": "auto",
             "custom": { "base": "dark", "bg": "#16161c", "text": "#f2f2f5", "accent": "#60a5fa" }
         }
     })
@@ -327,7 +331,12 @@ pub fn update(patch: &Value) -> Value {
 
 pub fn reset() -> Value {
     let mut s = store().lock().unwrap();
+    // "restore defaults" is about the look and behaviour: the tour doesn't come back
+    let tour_done = s.pointer("/general/tourDone").cloned();
     *s = defaults();
+    if let Some(v) = tour_done {
+        s["general"]["tourDone"] = v;
+    }
     if let Ok(t) = serde_json::to_string_pretty(&*s) {
         let _ = std::fs::write(path(), t);
     }

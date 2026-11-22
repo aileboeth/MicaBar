@@ -2326,6 +2326,22 @@ fn layout_edit(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, on: bool) {
     log(format!("layout edit {}", if on { "on" } else { "off" }));
 }
 
+/// The first-run tour: `on` while it runs; `open` asks the island to open now.
+#[tauri::command]
+fn tour_mode(state: tauri::State<'_, Arc<Shared>>, on: bool, open: bool) {
+    state.ws.tour.store(on, Ordering::SeqCst);
+    if open {
+        state.ws.open_req.store(true, Ordering::SeqCst);
+    }
+    log(format!("tour {}", if on { "on" } else { "off" }));
+}
+
+/// "重新看教程" in the desktop window: the island starts the tour again.
+#[tauri::command]
+fn tour_restart(app: AppHandle) {
+    let _ = app.emit_to("main", "tour-start", true);
+}
+
 #[tauri::command]
 fn pill_click(state: tauri::State<'_, Arc<Shared>>) {
     state.ws.click_req.store(true, Ordering::SeqCst);
@@ -2496,6 +2512,8 @@ fn main() {
             notify_test,
             note_mode,
             layout_edit,
+            tour_mode,
+            tour_restart,
             grab_start,
             grab_free,
             grab_end,

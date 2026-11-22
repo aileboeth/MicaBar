@@ -1,0 +1,205 @@
+/* Motion layer (loaded after style.css): fluid island morph, press / tilt / sheen, rolling counters,
+   the speed card, bottom sheet, card -> page zoom, staggered entrance, first-run tour.
+   html.no-anim (Windows animations off, or 设置 → 面板主题 → 动效 关) turns all of it off. */
+
+:root {
+  /* damped springs sampled into linear(): heavy fluid (no wobble) and a lively one (~15% overshoot) */
+  --ease-fluid: linear(0, 0.0512, 0.1667, 0.3058, 0.4447, 0.5706, 0.6778, 0.7651, 0.8336, 0.8857, 0.9242, 0.9519, 0.9711, 0.9841, 0.9925, 0.9977, 1.0007, 1.0023, 1.0029, 1.0029, 1.0027, 1.0023, 1.0019, 1.0015, 1);
+  --ease-bounce: linear(0, 0.0929, 0.3072, 0.5607, 0.795, 0.9769, 1.0947, 1.1521, 1.1619, 1.1401, 1.1023, 1.0611, 1.0247, 0.9977, 0.9812, 0.9741, 0.9742, 0.9786, 0.9851, 0.9917, 0.9973, 1.0012, 1.0035, 1.0043, 1.0041, 1.0032, 1.0021, 1.0011, 1.0002, 0.9997, 0.9994, 0.9993, 1);
+  --sheen-spot: rgba(255, 255, 255, 0.13);
+  --press-in: inset 0 2px 6px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+:root[data-theme="light"] {
+  --sheen-spot: rgba(255, 255, 255, 0.6);
+  --press-in: inset 0 2px 5px rgba(0, 0, 0, 0.16), inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+/* ---------- capsule -> panel: one fluid shape ---------- */
+html:not(.no-anim) #island:not(.peek):not(.flinging):not(.dragging) {
+  transition-duration: 0.58s, 0.58s, 0.58s, 0.58s, 0.58s, 0.3s, 0.3s;
+  transition-timing-function: var(--ease-fluid), var(--ease-fluid), var(--ease-fluid), var(--ease-fluid), var(--ease-fluid), ease, ease;
+}
+html:not(.no-anim) #island:not(.expanded) #panel { filter: blur(8px); transform: scale(0.965); }
+html:not(.no-anim) #island #panel { transition: opacity 0.22s ease, filter 0.42s ease, transform 0.58s var(--ease-fluid); }
+html:not(.no-anim) #island.expanded #panel { transition-delay: 0.07s, 0s, 0s; }
+#island.dock-top #panel { transform-origin: 50% 0; }
+#island.dock-bottom #panel { transform-origin: 50% 100%; }
+#island.dock-left #panel { transform-origin: 0 50%; }
+#island.dock-right #panel { transform-origin: 100% 50%; }
+html:not(.no-anim) #island #pill { transition: opacity 0.18s ease, filter 0.3s ease, transform 0.45s var(--ease-fluid); }
+html:not(.no-anim) #island.expanded #pill { filter: blur(6px); transform: scale(1.06); }
+
+/* ---------- press: squeeze + inner shadow, overshoot on release ---------- */
+.pressing { scale: 0.96; box-shadow: var(--press-in) !important; transition: scale 0.09s ease-out, box-shadow 0.09s ease-out !important; }
+.pop { animation: press-pop 0.5s var(--ease-bounce); }
+@keyframes press-pop { from { scale: 0.96; } to { scale: 1; } }
+
+/* ---------- cards tilting towards the pointer, light spot under it ---------- */
+.tilt {
+  position: relative;
+  transform: perspective(820px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transition: transform 0.75s var(--ease-bounce), box-shadow 0.3s ease;
+}
+.tilt.tilting { transition: transform 0.14s ease-out, box-shadow 0.3s ease; }
+:is(.tile, .hx).tilting { box-shadow: 0 10px 26px var(--shadow); }
+/* the picture cards keep their own ring (selected / hover); only the transform is ours */
+.pick-card > .tilt { transition: transform 0.75s var(--ease-bounce), box-shadow 0.15s ease; }
+.pick-card > .tilt.tilting { transition: transform 0.14s ease-out, box-shadow 0.15s ease; }
+.tilt.tilt-now { transition: none !important; }
+.tilt::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: radial-gradient(240px circle at var(--mx, 50%) var(--my, 50%), var(--sheen-spot), transparent 62%);
+  opacity: 0; transition: opacity 0.4s ease;
+}
+.tilt.tilting::after { opacity: 1; }
+
+/* ---------- rolling counter ---------- */
+.odo { display: inline-flex; align-items: flex-start; height: 1.15em; line-height: 1.15em; overflow: hidden; white-space: nowrap; font-variant-numeric: tabular-nums; vertical-align: bottom; }
+.odo-d { display: inline-block; height: 1.15em; overflow: hidden; }
+.odo-s { display: flex; flex-direction: column; transform: translateY(calc(var(--d, 0) * -1.15em)); transition: transform 0.45s var(--ease-fluid); }
+.odo-s i { display: block; height: 1.15em; line-height: 1.15em; font-style: normal; text-align: center; }
+.odo-c { display: inline-block; }
+.odo-n { display: inline-flex; }
+.odo-u { margin-left: 4px; }
+.odo.big { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; color: var(--text); }
+.odo.big .odo-u { font-size: 12.5px; font-weight: 500; color: var(--dim); letter-spacing: 0; align-self: flex-end; line-height: 1.7; }
+.odo:not(.big) .odo-u { color: var(--dim); }
+
+/* ---------- speed card: rotating gradient rim + breathing glow underneath ---------- */
+@property --ang { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+.hero-wrap { position: relative; margin: 2px 0 14px; }
+.hero-glow {
+  position: absolute; left: 14%; right: 14%; bottom: -12px; height: 46px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--s1) 70%, transparent), color-mix(in srgb, var(--s2) 30%, transparent) 60%, transparent);
+  filter: blur(20px); opacity: 0.5;
+  animation: breathe 4.6s ease-in-out infinite;
+}
+@keyframes breathe { 0%, 100% { opacity: 0.32; transform: scaleX(0.86); } 50% { opacity: 0.75; transform: scaleX(1.06); } }
+.glow-card { position: relative; border-radius: 16px; background: var(--card); }
+.glow-card::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none;
+  background: conic-gradient(from var(--ang), transparent 0deg, color-mix(in srgb, var(--s1) 85%, transparent) 60deg, transparent 130deg, transparent 180deg, color-mix(in srgb, var(--s2) 80%, transparent) 240deg, transparent 310deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: rim-spin 7s linear infinite;
+}
+@keyframes rim-spin { to { --ang: 360deg; } }
+.sp-hero { padding: 12px 14px 8px; }
+.sp-read { display: flex; align-items: flex-end; gap: 26px; margin-bottom: 6px; min-height: 52px; }
+.sp-num { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sp-k { font-size: 11.5px; color: var(--dim); display: inline-flex; align-items: center; gap: 6px; }
+.sp-k .key { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.sp-when { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-size: 11.5px; color: var(--dim); text-align: right; }
+.sp-when-t { font-family: "Cascadia Mono", Consolas, monospace; color: var(--text); font-size: 12.5px; padding: 1px 8px; border-radius: 999px; background: var(--ov2); transition: background-color 0.2s ease, color 0.2s ease; }
+.sp-hero.scrubbing .sp-when-t { background: var(--blue); color: var(--on-accent); }
+.sp-peak { white-space: nowrap; }
+
+/* chart: gradient areas, magnetic crosshair, smooth scrolling */
+.c-stop.s1 { stop-color: var(--s1); }
+.c-stop.s2 { stop-color: var(--s2); }
+.c-stop.s3 { stop-color: var(--s3); }
+.c-stop.s4 { stop-color: var(--s4); }
+.c-area { stroke: none; }
+.c-grid { stroke-dasharray: 2 4; }
+.c-grid.base { stroke-dasharray: none; }
+.c-plot.sliding { animation: c-slide 1s linear both; }
+@keyframes c-slide { from { transform: translateX(var(--dx)); } to { transform: none; } }
+.chart.scrub .c-hit { cursor: col-resize; }
+.chart.scrub .c-hit:hover { fill: transparent; }
+.c-hover.scrub .c-cross { stroke: var(--dim); stroke-dasharray: 3 3; }
+.c-halo { opacity: 0.22; }
+.c-halo.s1 { fill: var(--s1); }
+.c-halo.s2 { fill: var(--s2); }
+.c-xlab {
+  position: absolute; top: -2px; pointer-events: none; white-space: nowrap;
+  font: 11px "Cascadia Mono", Consolas, monospace; color: var(--text);
+  background: var(--menu-bg); border-radius: 999px; padding: 1px 8px; box-shadow: 0 2px 8px var(--shadow), inset 0 0 0 1px var(--ov3);
+}
+
+/* per-program rows */
+.sp-rows { display: flex; flex-direction: column; gap: 2px; }
+.sp-row { position: relative; }
+.sp-row.open { background: var(--ov3); }
+.sp-row .spark { width: 110px; height: 24px; }
+.spark.s1 { color: var(--s1); }
+.spark.s1 > path:last-child { stroke: currentColor; stroke-width: 1.6; }
+.sp-row .chev { color: var(--dimmer); font-size: 16px; line-height: 1; transition: transform 0.3s var(--ease-bounce), color 0.2s ease; }
+.sp-row:hover .chev { transform: translateX(3px); color: var(--text); }
+.g-head .g-note { color: var(--dimmer); font-weight: 400; margin-left: 6px; font-size: 11.5px; }
+
+/* ---------- bottom sheet ---------- */
+.sheet-scrim { position: absolute; inset: 0; z-index: 40; background: rgba(0, 0, 0, 0.32); opacity: 0; border-radius: inherit; }
+.sheet {
+  position: absolute; left: 8px; right: 8px; bottom: 0; z-index: 41;
+  display: flex; flex-direction: column;
+  background: var(--menu-bg); border-radius: 18px 18px 0 0;
+  box-shadow: 0 -10px 34px var(--shadow), inset 0 1px 0 var(--ov3);
+  overflow: hidden;
+}
+.sheet.at-full { border-radius: 18px 18px 0 0; }
+.sheet-bar { flex: none; height: 22px; display: grid; place-items: center; cursor: grab; touch-action: none; }
+.sheet.dragging .sheet-bar { cursor: grabbing; }
+.sheet-bar i { width: 38px; height: 5px; border-radius: 3px; background: var(--ov4); transition: width 0.25s var(--ease-bounce), background-color 0.2s ease; }
+.sheet-bar:hover i, .sheet.dragging .sheet-bar i { width: 52px; background: var(--dim); }
+.sheet-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px 16px; }
+.as-head { display: flex; align-items: center; gap: 10px; padding: 2px 0 10px; cursor: grab; }
+.as-head .app-icon { width: 28px; height: 28px; }
+.as-title { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.as-title b { font-size: 14.5px; }
+.as-title span { font-size: 11px; color: var(--dimmer); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.as-read { display: flex; gap: 26px; margin-bottom: 8px; }
+.as-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 6px; margin: 10px 0 12px; }
+.as-stat { background: var(--ov1); border-radius: 10px; padding: 7px 10px; display: flex; flex-direction: column; gap: 2px; }
+.as-stat span { font-size: 11px; color: var(--dim); }
+.as-stat b { font-size: 14px; font-variant-numeric: tabular-nums; }
+
+/* ---------- card -> page ---------- */
+.zoom-ghost { position: fixed; z-index: 60; pointer-events: none; background: var(--card-2); border-radius: 12px; box-shadow: 0 18px 40px var(--shadow); }
+
+/* ---------- staggered entrance ---------- */
+.cascade :is(#list-inner > *, .cascade-items > *, .tiles > *, .hx-grid > *, .am-list > *, .set-page > *) {
+  animation: rise 0.62s var(--ease-bounce) both;
+  animation-delay: calc(var(--ci, 0) * 38ms - var(--el, 0ms));
+}
+@keyframes rise { from { opacity: 0; transform: translateY(12px) scale(0.985); } 40% { opacity: 1; } to { opacity: 1; transform: none; } }
+
+/* ---------- first-run tour ---------- */
+#tour { position: absolute; z-index: 45; opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+#island.touring #tour { opacity: 1; pointer-events: auto; }
+#island.touring:not(.expanded) #tour { left: 0; top: 0; width: var(--tour-w, 380px); }
+#island.touring:not(.expanded) :is(#pill, #note) { opacity: 0; pointer-events: none; }
+#island.touring.expanded #tour { left: 12px; right: 12px; bottom: 12px; }
+#island.touring.dock-bottom.expanded #tour { bottom: auto; top: 56px; }
+.tour-card { position: relative; padding: 14px 16px 12px; border-radius: 16px; color: var(--text); }
+#island.touring.expanded .tour-card { background: var(--menu-bg); box-shadow: 0 12px 34px var(--shadow); }
+.tour-step { font-size: 11px; color: var(--dim); letter-spacing: 0.04em; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.tour-dots { display: inline-flex; gap: 4px; }
+.tour-dots i { width: 6px; height: 6px; border-radius: 3px; background: var(--ov4); transition: width 0.35s var(--ease-bounce), background-color 0.2s ease; }
+.tour-dots i.on { width: 16px; background: var(--blue); }
+.tour-title { font-size: 15px; font-weight: 650; margin-bottom: 4px; }
+.tour-body { font-size: 12.5px; line-height: 1.6; color: var(--dim); }
+.tour-body b, .tour-body kbd { color: var(--text); }
+kbd { font: 11.5px "Cascadia Mono", Consolas, monospace; padding: 1px 6px; border-radius: 6px; background: var(--ov2); box-shadow: inset 0 -1px 0 var(--ov3); }
+.tour-legal { font-size: 11.5px; line-height: 1.6; color: var(--dim); max-height: 150px; overflow-y: auto; margin-top: 2px; }
+.tour-acts { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.tour-acts .sp { flex: 1; }
+.tour-body.in { animation: rise 0.5s var(--ease-bounce) both; }
+.tour-hl { position: relative; z-index: 3; border-radius: 10px; animation: hl-ring 1.6s ease-in-out infinite; }
+@keyframes hl-ring {
+  0%, 100% { box-shadow: 0 0 0 2px var(--blue), 0 0 0 4px color-mix(in srgb, var(--blue) 35%, transparent); }
+  50% { box-shadow: 0 0 0 2px var(--blue), 0 0 0 9px color-mix(in srgb, var(--blue) 0%, transparent); }
+}
+#island.tour-ring::after {
+  content: ""; position: absolute; inset: 0; z-index: 44; border-radius: inherit; pointer-events: none;
+  box-shadow: inset 0 0 0 2px var(--blue); animation: ring-in 1.6s ease-in-out infinite;
+}
+@keyframes ring-in { 50% { box-shadow: inset 0 0 0 2px var(--blue), inset 0 0 22px color-mix(in srgb, var(--blue) 35%, transparent); } }
+html.no-anim .tour-hl { box-shadow: 0 0 0 2px var(--blue); }
+
+/* about page */
+.legal p { margin: 0 0 8px; font-size: 12.5px; line-height: 1.7; color: var(--dim); }
+.legal p:last-child { margin-bottom: 0; }
+
+html.no-anim .tilt { transform: none !important; }
+html.no-anim .pressing { scale: 0.97; }
+#island.touring:not(.expanded) { opacity: 1 !important; }

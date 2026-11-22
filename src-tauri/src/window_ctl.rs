@@ -62,6 +62,11 @@ pub struct WinState {
     /// A notification card is showing: the cursor on it holds it (and clicks reach it) instead
     /// of opening the panel.
     pub noting: AtomicBool,
+    /// The first-run tour is on: collapsed, its card takes clicks like a notification card;
+    /// open, the panel doesn't close when the cursor leaves or clicks elsewhere.
+    pub tour: AtomicBool,
+    /// The page asks the island to open (the tour's "start" / "continue").
+    pub open_req: AtomicBool,
     pub hwnd: AtomicIsize,
 }
 
@@ -499,7 +504,13 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             if expanded {
                 set_expanded(&mut h, false, "esc");
             }
-        } else if !expanded && ws.noting.load(Ordering::SeqCst) {
+        } else if ws.open_req.swap(false, Ordering::SeqCst) {
+            if !expanded {
+                set_expanded(&mut h, true, "tour");
+                h.pinned = true;
+                h.entered = false;
+            }
+        } else if !expanded && (ws.noting.load(Ordering::SeqCst) || ws.tour.load(Ordering::SeqCst)) {
             // a notification card: the page handles hover / clicks on it; it never opens the panel,
             // and after it the cursor has to leave before the pill opens
             h.dwell = None;
@@ -536,6 +547,9 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         } else if inside {
             h.leave = None;
             h.entered = true;
+        } else if ws.tour.load(Ordering::SeqCst) {
+            // the tour keeps the panel open (Esc / the hotkey / its own buttons close it)
+            h.leave = None;
         } else if pressed {
             set_expanded(&mut h, false, "click outside");
         } else if btn && h.press_inside {
@@ -555,7 +569,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         // Collapsed in hover mode the pill is "hollow": opening only needs the cursor position
         // (polled above), so clicks always go to whatever is under it (a browser tab…).
         // Click-to-open needs the press itself; game / pass-through never capture.
-        let noting = !expanded && ws.noting.load(Ordering::SeqCst);
+        let noting = !expanded && (ws.noting.load(Ordering::SeqCst) || ws.tour.load(Ordering::SeqCst));
         if !expanded && (game || passthrough || !click_mode) && !(noting && !game) {
             capture = false;
         }

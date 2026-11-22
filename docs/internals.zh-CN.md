@@ -107,3 +107,20 @@ JS 覆写给每个 select / url-test / fallback / load-balance 分组加一个 `
 正在播放：`GlobalSystemMediaTransportControlsSessionManager`（MTA 线程每 1.5 秒轮询；换歌时才读封面）。
 桌面窗口 `manager.html` 与岛共用 `app.js`（`body[data-mode=manager]`），在事件循环线程上创建：在命令线程里创建的
 WebView 窗口只有收到鼠标输入后才重绘。两个窗口的 WebView2 启动参数必须一致（`additionalBrowserArgs`）。
+
+## 动效与新手教程
+
+`ui/motion.js` + `ui/motion.css` 是一层独立的动效：滚动计数器（`Odo`）、卡片跟随指针倾斜和光斑（`.tilt`）、
+按压 0.96 + 内阴影、松手超调回弹（`.pressing` / `.pop`）、底部抽屉（`Sheet`：橡皮筋、按松手速度选锚点、
+阻尼弹簧）、卡片放大成页面（`sharedZoom`）、列表依次弹入（`Cascade`）。页面每秒按 HTML 字符串重建一次，
+所以这些状态都存在 DOM 之外，重建后由 `afterRender()` 放回新元素（倾斜角、计数器上一次的数字、入场动画进度用负的
+`animation-delay` 接上）。弹簧曲线是采样好的 CSS `linear()`（`--ease-fluid` 高阻尼、`--ease-bounce` 约 15% 超调）。
+`html.no-anim` 关掉全部动效：`appearance.motion` = auto（跟随 Windows「动画效果」）/ on / off。
+
+网速图（`Charts.line` 的 `scrub` / `area` / `slide`）：单调三次曲线（不会画出数据里没有的峰谷），渐变填充按
+序列的 90 分位定位（避免一个尖峰把填充拉淡），十字线用弹簧滑到最近的采样点，上方的大数字通过 `onScrub` 跟着变；
+新采样到达时整段曲线向左平移一格而不是跳一下。
+
+新手教程（`general.tourDone`）：收起时教程卡片代替胶囊（后端 `ws.tour` 让它像通知卡片一样接收点击、不触发展开），
+展开后卡片在面板底部，脉冲描边指向当前讲的东西；教程进行时后端不会因为鼠标离开 / 点外面而收起面板。
+设置 → 关于「重新看教程」经 `tour_restart` 通知岛重新开始。
