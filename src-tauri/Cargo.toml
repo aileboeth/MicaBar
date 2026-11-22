@@ -1,6 +1,6 @@
 [package]
 name = "micabar"
-version = "0.2.17"
+version = "0.2.18"
 edition = "2021"
 description = "A Windows dynamic-island style network monitor"
 license = "MIT"
