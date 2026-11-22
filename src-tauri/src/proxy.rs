@@ -159,7 +159,24 @@ pub fn physical_ipv4() -> Option<(String, IpAddr)> {
             best = Some((metric, a.friendly_name().to_string(), ip));
         }
     }
-    best.map(|(_, n, ip)| (n, ip))
+    best.map(|(_, n, ip)| (n, ip)).or_else(uplink_without_gateway)
+}
+
+/// Dial-up style uplinks list no IPv4 gateway (Dr.COM campus clients, PPPoE "宽带连接": the
+/// gateway shows as 0.0.0.0): an up, non-TUN adapter with a real IPv4 address (not 169.254.x.x).
+pub fn uplink_without_gateway() -> Option<(String, IpAddr)> {
+    let adapters = ipconfig::get_adapters().ok()?;
+    adapters
+        .iter()
+        .filter(|a| a.oper_status() == ipconfig::OperStatus::IfOperStatusUp && !looks_like_tun(a))
+        .filter(|a| !matches!(a.if_type(), ipconfig::IfType::SoftwareLoopback))
+        .find_map(|a| {
+            let ip = a.ip_addresses().iter().find(|i| match i {
+                IpAddr::V4(v) => !v.is_loopback() && !v.is_link_local() && !v.is_unspecified(),
+                _ => false,
+            })?;
+            Some((a.friendly_name().to_string(), *ip))
+        })
 }
 
 pub fn tun_adapter() -> Option<String> {

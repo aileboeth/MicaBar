@@ -183,20 +183,10 @@ fn uplink() -> Option<(String, Ipv4Addr)> {
     best.map(|(_, n, g)| (n, g))
 }
 
-/// An up adapter with a usable IPv4 address but no gateway listed (PPPoE / dial-up, some
-/// tethering and VPN-style uplinks): the line can still work, there is just no router to ping.
+/// An up adapter with a usable IPv4 address but no gateway listed (Dr.COM / PPPoE dial-up, some
+/// tethering): the line can still work, there is just no router to ping.
 fn uplink_no_gateway() -> Option<String> {
-    let ads = ipconfig::get_adapters().ok()?;
-    ads.iter()
-        .filter(|a| a.oper_status() == ipconfig::OperStatus::IfOperStatusUp && !proxy::looks_like_tun(a))
-        .filter(|a| !matches!(a.if_type(), ipconfig::IfType::SoftwareLoopback))
-        .find(|a| {
-            a.ip_addresses().iter().any(|ip| match ip {
-                IpAddr::V4(v) => !v.is_loopback() && !v.is_link_local() && !v.is_unspecified(),
-                _ => false,
-            })
-        })
-        .map(|a| a.friendly_name().to_string())
+    proxy::uplink_without_gateway().map(|(name, _)| name)
 }
 
 /// Every adapter for the log when none looked like the uplink (so the next report says why).
