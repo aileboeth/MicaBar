@@ -11,7 +11,7 @@
 | 国家 / ASN | 代理客户端自带的 `country.mmdb`（mihomo Meta-geoip0 或 MaxMind 格式）和 `ASN.mmdb`，或 exe 旁边的 `geo\` 目录 |
 | 节点 / 规则 | mihomo 控制接口 `/connections`（命名管道 `\\.\pipe\MihomoParty\...` 或 external-controller） |
 | 出口 IP | 代理：ipinfo.io → api.ipify.org → ifconfig.me；直连：4.ipw.cn → myip.ipip.net → ip.3322.net |
-| IP 注册组织 / 类型 | `iporg.rs`：api.ipapi.is 的 company（免 key 时只有名字）+ ip-api.com 的 isp / org / hosting / mobile / proxy；类型优先级 机房 > 代理 IP > 移动 > 家宽（都没标记才算家宽）；按 IP 缓存 24 小时（`iporg-cache.json`，失败的 10 分钟后重试） |
+| IP 类型 / 归属 | `iporg.rs`：类型来自 proxycheck.io 的 type（Residential / Business / Hosting / Wireless，免 key 每天 100 次），外加 provider / organisation / hostname；ip-api.com（`lang=zh-CN`）给中文省份和 proxy 标记，它的 mobile 标记不用（国内整段固网都被标成 mobile）；国内运营商按 ASN / 名称在本地翻成中文；任一来源标代理就显示「被标代理」；按 IP 缓存 24 小时（`iporg-cache.json`，带版本号，失败的 10 分钟后重试） |
 
 直连出口检测绑定物理网卡的地址发出（Windows 按源地址选网卡），域名先用 223.5.5.5 DoH / 119.29.29.29 解析，
 所以 TUN 和分流规则（比如把「查 IP」网站送去代理的规则组）都影响不到它。

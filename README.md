@@ -7,8 +7,8 @@ connection count; hover it to see which program uses which port, where each conn
 node — and decide right there whether it goes through the proxy or direct.
 
 - **Exits per proxy group**: the exit IP and node of every group of your subscription (default proxy, AI,
-  streaming…) plus the direct exit, with country and ISP / ASN, and who the IP is registered to plus its type
-  (home broadband / data centre / mobile / known proxy).
+  streaming…) plus the direct exit, with country and ISP / ASN, and the IP's type (home / business / data centre /
+  mobile, plus a mark when it is listed as a proxy) and owner (Chinese carrier and province for mainland IPs).
 - **Rotating pill**: group exits, the song playing (cover + title), AI quota, speed and node latency take turns;
   what rotates and how fast is configurable.
 - **AI quota**: subscription usage (5-hour / weekly windows…) and reset times for Claude Code, Codex, Antigravity
@@ -141,7 +141,7 @@ requests MicaBar makes itself:
 | --- | --- | --- |
 | Proxy exit IP | ipinfo.io → api.ipify.org → ifconfig.me (through the local proxy port; group exits through each group's loopback port) | start, network / proxy change, every 5 min |
 | Direct exit IP | 4.ipw.cn → myip.ipip.net → ip.3322.net (bound to the physical NIC; resolved via 223.5.5.5 / 119.29.29.29) | same |
-| IP organisation and type | api.ipapi.is (HTTPS) and ip-api.com (HTTP only on the free tier), with each exit IP (the direct one too) as the query; through the proxy client's local port | when a new exit IP shows up; cached 24 h per IP; can be turned off in Settings → Network |
+| IP type and owner | proxycheck.io (HTTPS) and ip-api.com (HTTP only on the free tier), with each exit IP (the direct one too) as the query; through the proxy client's local port | when a new exit IP shows up; cached 24 h per IP; can be turned off in Settings → Network |
 | Node latency | measured by the mihomo core against `www.gstatic.com/generate_204` | every 15–60 s (resource profile) |
 | gfw list | cdn.jsdelivr.net / raw.githubusercontent.com (Loyalsoldier/v2ray-rules-dat) | daily, when enabled |
 | Update check | latest.json of github.com/aileboeth/MicaBar | daily, when enabled |
