@@ -12,6 +12,7 @@ mod geo;
 mod glass;
 mod guard;
 mod icon;
+mod iporg;
 mod media;
 mod mihomo;
 mod netdiag;
@@ -1292,6 +1293,51 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
         e.groups = groups;
         e.checking = false;
         e.last_check = now_ms();
+        fill_ip_org(&mut e);
+        e.clone()
+    };
+    let _ = app.emit("exit", snap);
+    enrich_ip_org(app, sh, p.local_port).await;
+}
+
+fn exit_results(e: &mut ExitState) -> impl Iterator<Item = &mut ExitResult> {
+    e.direct.iter_mut().chain(e.proxy.iter_mut()).chain(e.groups.iter_mut().map(|g| &mut g.r))
+}
+
+/// Puts the cached organisation / type on every exit result (none while the switch is off).
+fn fill_ip_org(e: &mut ExitState) {
+    let on = settings::bool_at("exit.ipOrg", true);
+    for r in exit_results(e) {
+        if !on {
+            r.reg = None;
+        } else if let Some(ip) = r.ip.clone() {
+            if let Some(v) = iporg::cached(&ip) {
+                r.reg = Some(v);
+            }
+        }
+    }
+}
+
+/// Looks up the exit IPs that have no organisation yet, then sends the exits again.
+async fn enrich_ip_org(app: AppHandle, sh: Arc<Shared>, port: Option<u16>) {
+    if !settings::bool_at("exit.ipOrg", true) {
+        return;
+    }
+    let mut missing: Vec<String> = {
+        let mut e = sh.exit.lock().unwrap();
+        exit_results(&mut e).filter(|r| r.reg.is_none()).filter_map(|r| r.ip.clone()).collect()
+    };
+    missing.sort();
+    missing.dedup();
+    if missing.is_empty() {
+        return;
+    }
+    for ip in &missing {
+        iporg::lookup(ip, port).await;
+    }
+    let snap = {
+        let mut e = sh.exit.lock().unwrap();
+        fill_ip_org(&mut e);
         e.clone()
     };
     let _ = app.emit("exit", snap);

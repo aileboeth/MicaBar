@@ -21,6 +21,8 @@ pub struct ExitResult {
     pub via: Option<String>,
     pub error: Option<String>,
     pub at: u64,
+    /// registered organisation + network type (iporg.rs), filled in after the check
+    pub reg: Option<crate::iporg::IpOrg>,
 }
 
 pub struct Probe {

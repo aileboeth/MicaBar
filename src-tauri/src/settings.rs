@@ -125,7 +125,10 @@ pub fn defaults() -> Value {
             // auto = the fallback (MATCH) group + the busiest proxy groups; manual = `groups`
             "mode": "auto",
             "groups": [],
-            "max": 4
+            "max": 4,
+            // registered organisation + type (home / hosting / mobile / proxy) of each exit IP,
+            // looked up through the proxy port (ipapi.is + ip-api.com), cached 24 h per IP
+            "ipOrg": true
         },
         // network diagnosis: quiet probes, a full check when they fail, system proxy watch
         "diag": { "on": true },

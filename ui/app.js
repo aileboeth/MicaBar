@@ -1535,11 +1535,44 @@ function notesClick(e) {
 
 // ---------- panel ----------
 
+// ---- registered organisation + network type of an exit IP (backend iporg.rs) ----
+const IP_KIND = {
+  home: ["家宽", "没被标成机房、代理或移动网络，多半是家庭或企业宽带"],
+  hosting: ["机房", "IP 库把它标成数据中心 / 云服务器"],
+  mobile: ["移动", "IP 库把它标成移动网络（手机流量）"],
+  proxy: ["代理IP", "IP 库把它标成已知的代理 / VPN 出口，部分网站可能风控"],
+};
+const regOf = (r) => (sget("exit.ipOrg", true) !== false && r?.reg) || null;
+// organisation to show: for home / mobile lines the access provider (the registered owner is
+// often just the subscriber's name), otherwise the registered owner; the ASN's name as fallback
+function orgText(r) {
+  const g = regOf(r);
+  if (!g) return r?.org || "";
+  const access = g.kind === "home" || g.kind === "mobile";
+  return (access ? g.isp || g.org : g.org || g.isp) || r?.org || "";
+}
+function ipTip(r) {
+  const g = regOf(r);
+  const k = g?.kind && IP_KIND[g.kind];
+  return [
+    k ? `类型：${k[0]} · ${k[1]}` : "",
+    g?.org ? `注册组织：${g.org}` : "",
+    g?.isp ? `接入商：${g.isp}` : "",
+    r?.asn || r?.org ? `ASN：${[r.asn ? "AS" + r.asn : "", r.org || ""].filter(Boolean).join(" ")}` : "",
+    r?.cc ? `国家 / 地区：${country(r.cc)}` : "",
+    g ? `来源：${(g.src || []).join("、") || "—"}（免费库，仅供参考）${g.error ? "\n部分失败：" + g.error : ""}` : "",
+  ].filter(Boolean).join("\n");
+}
+function kindTag(r) {
+  const k = regOf(r)?.kind;
+  return k && IP_KIND[k] ? `<span class="ipk k-${k}" title="${esc(ipTip(r))}">${IP_KIND[k][0]}</span>` : "";
+}
+
 function exitCard(title, r, opts = {}) {
   if (!r) {
     return `<div class="exit-card"><div class="label">${esc(title)}</div><div class="ip mono">—</div><div class="meta">${opts.checking ? "检测中…" : "未检测"}</div></div>`;
   }
-  const geo = [r.cc ? country(r.cc) : "", r.asn ? `AS${r.asn}` : "", r.org || ""].filter(Boolean).join(" · ");
+  const geo = [r.cc ? country(r.cc) : "", regOf(r)?.org ? "" : r.asn ? `AS${r.asn}` : "", orgText(r)].filter(Boolean).join(" · ");
   let route = "";
   if (r.node) {
     route = `<div class="route">${r.node.toUpperCase() === "DIRECT" ? "直连 DIRECT" : decorate(r.node)}${r.group ? " · " + decorate(r.group) : ""}</div>`;
@@ -1549,10 +1582,10 @@ function exitCard(title, r, opts = {}) {
     route = `<div class="route" style="color:var(--dimmer)">未经代理</div>`;
   }
   const same = opts.sameAs && r.ip && opts.sameAs === r.ip ? `<span class="same">· 与直连相同</span>` : "";
-  return `<div class="exit-card">
-    <div class="label">${esc(title)} ${same}</div>
-    ${r.ip ? `<div class="ip mono">${flagImg(r.cc)}${esc(r.ip)}</div>` : `<div class="ip mono">—</div>`}
-    ${geo ? `<div class="meta">${esc(geo)}</div>` : ""}
+  return `<div class="exit-card${opts.direct ? " direct" : ""}">
+    <div class="label">${esc(title)} ${r.ip ? kindTag(r) : ""} ${same}</div>
+    ${r.ip ? `<div class="ip mono" title="${esc(ipTip(r))}">${flagImg(r.cc)}${esc(r.ip)}</div>` : `<div class="ip mono">—</div>`}
+    ${geo ? `<div class="meta" title="${esc(ipTip(r))}">${esc(geo)}</div>` : ""}
     ${route}
     ${r.error ? `<div class="error">${esc(r.error)}</div>` : ""}
   </div>`;
@@ -1569,7 +1602,7 @@ function exitsByIp(groups) {
       if (g.node && !hit.nodes.includes(g.node)) hit.nodes.push(g.node);
       hit.isDefault ||= !!g.isDefault;
     } else {
-      out.push({ ip: g.ip, cc: g.cc, org: g.org, error: g.error, nodes: g.node ? [g.node] : [], groups: [g], isDefault: !!g.isDefault });
+      out.push({ ip: g.ip, cc: g.cc, asn: g.asn, org: g.org, reg: g.reg, error: g.error, nodes: g.node ? [g.node] : [], groups: [g], isDefault: !!g.isDefault });
     }
   }
   return out.sort((a, b) => (b.isDefault - a.isDefault) || (b.groups.length - a.groups.length) || (!!b.ip - !!a.ip));
@@ -1581,20 +1614,54 @@ function exitTag(x) {
   return shortGroup(main.group, main.isDefault) + (x.groups.length > 1 ? ` +${x.groups.length - 1}` : "");
 }
 
-// One row per exit IP: IP · node · ISP, then the groups that use it
+// One row per exit IP: IP + type, node · organisation, then the groups that use it on ONE line
+// (the ones that don't fit fold into "+N"; clicking it shows them all)
+const gxOpen = new Set();
 function groupExitCard(groups) {
   const exits = exitsByIp(groups);
   const rows = exits.map((x) => {
-    const geo = [x.cc ? country(x.cc) : "", x.org || ""].filter(Boolean).join(" · ");
-    const chips = x.groups.map((g) => `<span class="gx-chip">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</span>`).join("");
+    const org = orgText(x) || (x.cc ? country(x.cc) : "");
+    const chips = x.groups.map((g) => `<span class="gx-chip" data-gname="${esc(g.group || "")}">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</span>`).join("");
+    const key = x.ip || "err";
     return `<div class="gx-row">
-      <div class="gx-ip mono">${x.ip ? `${flagImg(x.cc)} ${esc(x.ip)}` : `<span class="crit">${esc(x.error ? "检测失败" : "—")}</span>`}</div>
-      <div class="gx-meta">${x.nodes.map(decorate).join("、")}${geo ? `${x.nodes.length ? " · " : ""}${esc(geo)}` : ""}</div>
-      <div class="gx-groups">${chips}</div>
+      <div class="gx-ip mono" title="${esc(ipTip(x))}">${x.ip ? `<span class="ip-t">${flagImg(x.cc)}${esc(x.ip)}</span>${kindTag(x)}` : `<span class="crit">${esc(x.error ? "检测失败" : "—")}</span>`}</div>
+      <div class="gx-meta" title="${esc(ipTip(x))}">${x.nodes.map(decorate).join("、")}${org ? `${x.nodes.length ? " · " : ""}${esc(org)}` : ""}</div>
+      <div class="gx-groups${gxOpen.has(key) ? " open" : ""}" data-gx="${esc(key)}">${chips}</div>
     </div>`;
   }).join("");
   const n = (groups || []).length;
   return `<div class="exit-card gx"><div class="label">代理出口<span class="gx-sum">${exits.length} 个 IP · ${n} 个分组</span></div>${rows}</div>`;
+}
+
+// keeps each chip line to one row: hides what doesn't fit and adds a "+N" chip
+function foldChips() {
+  for (const box of document.querySelectorAll("#exit-row .gx-groups")) {
+    box.querySelector(".gx-more")?.remove();
+    const chips = [...box.querySelectorAll(".gx-chip")];
+    chips.forEach((c) => (c.hidden = false));
+    if (box.classList.contains("open")) {
+      if (chips.length > 1) box.insertAdjacentHTML("beforeend", `<span class="gx-chip gx-more" title="收起">收起</span>`);
+      continue;
+    }
+    // the line doesn't wrap: a chip is out when its right edge passes the box's
+    const edge = box.getBoundingClientRect().right;
+    const out = (el) => el.getBoundingClientRect().right > edge + 0.5;
+    const over = chips.filter(out);
+    if (!over.length) continue;
+    const more = document.createElement("span");
+    more.className = "gx-chip gx-more";
+    box.appendChild(more);
+    // hide from the end until the "+N" chip fits on the line too
+    let hidden = over.length;
+    over.forEach((c) => (c.hidden = true));
+    const visible = chips.filter((c) => !c.hidden);
+    more.textContent = `+${hidden}`;
+    while (out(more) && visible.length > 1) {
+      visible.pop().hidden = true;
+      more.textContent = `+${++hidden}`;
+    }
+    more.title = "还有：" + chips.filter((c) => c.hidden).map((c) => c.dataset.gname).join("、") + "（点开看全部）";
+  }
 }
 
 // The exit shown in the pill: the default (fallback) group, else the old single proxy check.
@@ -1625,6 +1692,7 @@ function renderExit() {
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
     </button></div>`;
   $("exit-row").innerHTML = html;
+  foldChips();
 }
 
 function renderProxyLine() {
@@ -2618,9 +2686,9 @@ function homeHtml() {
   const exitCards = [];
   if (p.detected && groups.length) {
     for (const g of groups) {
-      const geo = [g.cc ? country(g.cc) : "", g.org || ""].filter(Boolean).join(" · ");
+      const geo = [g.cc ? country(g.cc) : "", orgText(g)].filter(Boolean).join(" · ");
       exitCards.push(`<div class="hx tilt" data-tilt="5">
-        <div class="hx-g">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}</div>
+        <div class="hx-g">${decorate(g.group)}${g.isDefault ? `<span class="tag">默认</span>` : ""}${g.ip ? kindTag(g) : ""}</div>
         <div class="hx-ip mono">${g.ip ? `${flagImg(g.cc)}${esc(g.ip)}` : `<span class="crit">${g.error ? "检测失败" : "—"}</span>`}</div>
         <div class="hx-m">${esc(geo)}</div>
         ${g.node ? `<div class="hx-n">${decorate(g.node)}</div>` : ""}
@@ -2628,12 +2696,12 @@ function homeHtml() {
     }
   } else if (p.detected && ex.proxy) {
     const r = ex.proxy;
-    exitCards.push(`<div class="hx tilt" data-tilt="5"><div class="hx-g">代理出口</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc([r.cc ? country(r.cc) : "", r.org || ""].filter(Boolean).join(" · "))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
+    exitCards.push(`<div class="hx tilt" data-tilt="5"><div class="hx-g">代理出口${r.ip ? kindTag(r) : ""}</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc([r.cc ? country(r.cc) : "", orgText(r)].filter(Boolean).join(" · "))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
   }
   const d = ex.direct;
-  exitCards.push(`<div class="hx direct tilt" data-tilt="5"><div class="hx-g">直连出口${p.detected ? "" : "（未检测到代理）"}</div>
+  exitCards.push(`<div class="hx direct tilt" data-tilt="5"><div class="hx-g">直连出口${p.detected ? "" : "（未检测到代理）"}${d?.ip ? kindTag(d) : ""}</div>
     <div class="hx-ip mono">${d?.ip ? `${flagImg(d.cc)}${esc(d.ip)}` : "—"}</div>
-    <div class="hx-m">${esc(d ? [d.cc ? country(d.cc) : "", d.org || ""].filter(Boolean).join(" · ") : "")}</div></div>`);
+    <div class="hx-m">${esc(d ? [d.cc ? country(d.cc) : "", orgText(d)].filter(Boolean).join(" · ") : "")}</div></div>`);
   const groupNote = p.detected && !groups.length
     ? ctrl().status === "active"
       ? `<div class="m-hint">分组出口要等覆写更新后才有：在「出口」页点「更新」</div>`
@@ -3024,6 +3092,7 @@ const SET_PAGES = {
     ${sSelect("exit.mode", "显示哪些分组", [["auto", "自动：每个不同的出口节点测一次（兜底分组和有流量的分组优先）"], ["manual", "手动勾选"]])}
     ${sNumber("exit.max", "　最多测", 1, 12, 1, "个出口", "用同一个节点的分组共用一次检测，不占名额")}
     ${sget("exit.mode") === "manual" ? groupPickerHtml() : ""}
+    ${sToggle("exit.ipOrg", "查 IP 的注册组织和类型", "家宽 / 机房 / 移动网络 / 代理 IP。每个出口 IP（包括直连）经代理端口问 ipapi.is 和 ip-api.com，同一个 IP 缓存 24 小时；类型来自免费库，仅供参考")}
   </div>
   <div class="s-sec"><div class="s-title">短暂提示<span class="s-note">发生时在胶囊上显示 5 秒，同类 1 分钟内只提示一次</span></div>
     ${sToggle("flash.exitChange", "出口 IP 变了")}
@@ -3188,7 +3257,8 @@ $("list").addEventListener("change", (e) => {
       if (!Number.isFinite(v)) return;
       v = Math.min(Number(el.max), Math.max(Number(el.min), v));
     }
-    setPath(el.dataset.sp, v);
+    const done = setPath(el.dataset.sp, v);
+    if (el.dataset.sp === "exit.ipOrg" && v) done.then(() => invoke("refresh_exit")).catch(() => {});
   } else if (el.dataset.ol) {
     const list = (sget(el.dataset.ol, []) || []).map((i) => (i.id === el.dataset.id ? { ...i, on: el.checked } : i));
     setPath(el.dataset.ol, list);
@@ -4269,8 +4339,29 @@ $("exit-row").addEventListener("click", (e) => {
     if (exitState) exitState.checking = true;
     renderExit();
     renderPill();
+    return;
+  }
+  const more = e.target.closest(".gx-more");
+  if (more) {
+    const box = more.closest(".gx-groups");
+    const key = box.dataset.gx;
+    if (gxOpen.has(key)) gxOpen.delete(key);
+    else gxOpen.add(key);
+    box.classList.toggle("open", gxOpen.has(key));
+    foldChips();
   }
 });
+// the chip lines can only be measured while the net page is showing: refold when the width changes
+{
+  let lastW = 0;
+  new ResizeObserver(() => {
+    const w = $("exit-row").clientWidth;
+    if (w && w !== lastW) {
+      lastW = w;
+      foldChips();
+    }
+  }).observe($("exit-row"));
+}
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
