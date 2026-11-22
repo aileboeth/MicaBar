@@ -104,7 +104,8 @@ html:not(.no-anim) #island.expanded #pill { filter: blur(6px); transform: scale(
 .c-grid.base { stroke-dasharray: none; }
 .c-plot.sliding { animation: c-slide 1s linear both; }
 @keyframes c-slide { from { transform: translateX(var(--dx)); } to { transform: none; } }
-.chart.scrub .c-hit { cursor: col-resize; }
+/* the guide line, dot and time chip already follow the pointer: keep the normal arrow */
+.chart.scrub .c-hit { cursor: default; }
 .chart.scrub .c-hit:hover { fill: transparent; }
 .c-hover.scrub .c-cross { stroke: var(--dim); stroke-dasharray: 3 3; }
 .c-halo { opacity: 0.22; }
