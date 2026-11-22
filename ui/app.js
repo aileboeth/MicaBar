@@ -1778,6 +1778,10 @@ let confirmDisable = false;
 let toastTimer = null;
 
 function ctrl() { return snap?.control || { status: "unavailable", rules: [] }; }
+// setting exit.control off: MicaBar never touches the proxy client's config (no prompt, no exit buttons)
+const ctlOff = () => sget("exit.control", true) === false;
+// the override is in the proxy client (also when it waits for a reload or an update)
+const ctlInstalled = () => { const c = ctrl(); return c.status === "active" || c.status === "pending" || (c.status === "available" && !!c.message); };
 
 function mainDomain(host) {
   const p = String(host || "").replace(/\.$/, "").split(".");
@@ -1846,6 +1850,7 @@ function targetRow(label, kind, process, value) {
 
 function setupPrompt() {
   const c = ctrl();
+  if (ctlOff() && !ctlInstalled()) return `<div class="m-note">${tr("出口控制已关闭：MicaBar 不会改 Clash Party 的配置（设置 → 网络 里可以打开）")}</div>`;
   if (c.status === "unavailable") {
     return `<div class="m-note">${esc(c.message || tr("出口控制需要 Clash Party / Mihomo Party。"))}</div>`;
   }
@@ -1878,7 +1883,7 @@ function connMenu(app, c) {
 
 function exitChip(app) {
   const st = ctrl().status;
-  if (st === "unavailable") return "";
+  if (st === "unavailable" || (ctlOff() && st !== "active")) return "";
   // the proxy client itself has no exit to choose: keep its place so the columns line up
   if (app.isProxy) return `<span class="exit-chip ph" aria-hidden="true">${tr("出口")}</span>`;
   const r = findRule("process", app.exe, null);
@@ -1916,7 +1921,7 @@ function bannerHtml() {
   if (c.status === "available" && c.message) {
     return `<div class="banner">${esc(c.message)} <button class="primary" data-do="enable">${tr("更新")}</button></div>`;
   }
-  if (c.status === "available" && !dismissed) {
+  if (c.status === "available" && !dismissed && !ctlOff()) {
     return `<div class="banner">${tr("检测到 {0}：可以启用「出口控制」，按程序 / 域名指定走代理、直连或拦截。", esc(c.client || "Clash Party"))}
       <button class="primary" data-do="enable">${tr("启用")}</button><button class="ghost" data-do="dismiss">${tr("不再提示")}</button></div>`;
   }
@@ -3134,6 +3139,9 @@ const SET_PAGES = {
   </div>`,
 
   network: () => `
+  <div class="s-sec"><div class="s-title">${tr("出口控制")}<span class="s-note">${tr("往 Clash Party 写一个全局覆写：MicaBar 分组、每个分组的专用端口和提前拦截规则都在里面")}</span></div>
+    ${sToggle("exit.control", tr("使用出口控制"), tr("关掉后 MicaBar 不改 Clash Party 的任何配置：不提示启用，分组出口和提前拦截也不可用；连接和出口 IP 照常显示"))}
+  </div>
   <div class="s-sec"><div class="s-title">${tr("分组出口")}<span class="s-note">${tr("每个分组单独测一次出口 IP（经覆写里只监听本机的专用端口）")}</span></div>
     ${sSelect("exit.mode", tr("显示哪些分组"), [["auto", tr("自动：每个不同的出口节点测一次（兜底分组和有流量的分组优先）")], ["manual", tr("手动勾选")]])}
     ${sNumber("exit.max", tr("　最多测"), 1, 12, 1, tr("个出口"), tr("用同一个节点的分组共用一次检测，不占名额"))}
@@ -3302,6 +3310,21 @@ $("list").addEventListener("change", (e) => {
       v = Number(v);
       if (!Number.isFinite(v)) return;
       v = Math.min(Number(el.max), Math.max(Number(el.min), v));
+    }
+    if (el.dataset.sp === "exit.control") {
+      if (!v && ctlInstalled()) {
+        // removing the override restarts the proxy client: ask first, keep the switch on meanwhile
+        el.checked = true;
+        const client = ctrl().client || "Clash Party";
+        openMenu(el, `<div class="m-title">${tr("关闭出口控制要重启 {0}", esc(client))}</div>
+          <div class="m-warn">${tr("MicaBar 会从 {0} 移除它的覆写（MicaBar 分组、分组出口端口、提前拦截规则），然后把它关掉再打开一次：", esc(client))}
+            <ul><li><b>${tr("代理会断开约 3~5 秒")}</b>${tr("，正在进行的下载、通话、游戏可能会掉线")}</li>
+            <li>${tr("你加的出口规则会保留，以后打开还能恢复")}</li></ul></div>
+          <div class="m-actions"><button class="ghost" data-do="menu-close">${tr("取消")}</button><button class="danger" data-do="ctl-off-go">${tr("现在重启并关闭")}</button></div>`);
+        return;
+      }
+      // switched back on: the enable prompt may show again
+      if (v) try { localStorage.removeItem("ni-setup-dismissed"); } catch { /* ignore */ }
     }
     const done = setPath(el.dataset.sp, v);
     if (el.dataset.sp === "exit.ipOrg" && v) done.then(() => invoke("refresh_exit")).catch(() => {});
@@ -3805,6 +3828,12 @@ async function runAction(el) {
       toast(`${tr("正在写入覆写并重启 {0}（代理会断开几秒）…", ctrl().client || "Clash Party")}`);
       await invoke("control_enable");
       toast(tr("出口控制已启用"));
+    } else if (act === "ctl-off-go") {
+      closeMenu();
+      toast(tr("正在移除覆写并重启 Clash Party…"));
+      await invoke("control_disable");
+      await setPath("exit.control", false);
+      toast(tr("出口控制已关闭，Clash Party 的配置已还原"));
     } else if (act === "menu-close") {
       closeMenu();
       return;

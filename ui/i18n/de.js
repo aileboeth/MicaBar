@@ -1004,5 +1004,14 @@ I18N.add("de", {
 "tab|连接": "Verb.",
 "tab|监听": "Ports",
 "tour|跳过": "Überspringen",
-"没认出是哪块网卡，但能连上外网": "Adapter nicht erkannt, aber das Internet funktioniert"
+"没认出是哪块网卡，但能连上外网": "Adapter nicht erkannt, aber das Internet funktioniert",
+"往 Clash Party 写一个全局覆写：MicaBar 分组、每个分组的专用端口和提前拦截规则都在里面": "Schreibt eine globale Überschreibung in Clash Party: Die MicaBar-Gruppe, ein Port pro Gruppe und die Regeln der Leckvorbeugung stecken darin",
+"使用出口控制": "Ausgangssteuerung verwenden",
+"关掉后 MicaBar 不改 Clash Party 的任何配置：不提示启用，分组出口和提前拦截也不可用；连接和出口 IP 照常显示": "Aus = MicaBar ändert nichts an der Konfiguration von Clash Party: kein Angebot zum Aktivieren, keine Gruppenausgänge und keine Leckvorbeugung; Verbindungen und Ausgangs-IPs werden weiter angezeigt",
+"出口控制已关闭：MicaBar 不会改 Clash Party 的配置（设置 → 网络 里可以打开）": "Die Ausgangssteuerung ist aus: MicaBar ändert die Konfiguration von Clash Party nicht (einschalten unter Einstellungen → Netzwerk)",
+"关闭出口控制要重启 {0}": "Zum Ausschalten der Ausgangssteuerung muss {0} neu starten",
+"MicaBar 会从 {0} 移除它的覆写（MicaBar 分组、分组出口端口、提前拦截规则），然后把它关掉再打开一次：": "MicaBar entfernt seine Überschreibung aus {0} (MicaBar-Gruppe, Ports der Gruppenausgänge, Regeln der Leckvorbeugung) und schließt und öffnet es dann einmal:",
+"你加的出口规则会保留，以后打开还能恢复": "Deine Ausgangsregeln bleiben erhalten und kommen zurück, wenn du sie wieder einschaltest",
+"现在重启并关闭": "Jetzt neu starten und ausschalten",
+"出口控制已关闭，Clash Party 的配置已还原": "Ausgangssteuerung aus; die Konfiguration von Clash Party ist wiederhergestellt"
 });

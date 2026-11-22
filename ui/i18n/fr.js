@@ -1004,5 +1004,14 @@ I18N.add("fr", {
 "tab|连接": "Conn.",
 "tab|监听": "Écoute",
 "tour|跳过": "Passer",
-"没认出是哪块网卡，但能连上外网": "Carte réseau non identifiée, mais internet fonctionne"
+"没认出是哪块网卡，但能连上外网": "Carte réseau non identifiée, mais internet fonctionne",
+"往 Clash Party 写一个全局覆写：MicaBar 分组、每个分组的专用端口和提前拦截规则都在里面": "Écrit une surcharge globale dans Clash Party : le groupe MicaBar, un port par groupe et les règles de prévention des fuites y sont regroupés",
+"使用出口控制": "Utiliser le contrôle de sortie",
+"关掉后 MicaBar 不改 Clash Party 的任何配置：不提示启用，分组出口和提前拦截也不可用；连接和出口 IP 照常显示": "Désactivé = MicaBar ne modifie rien dans la configuration de Clash Party : pas de proposition d’activation, ni sorties par groupe ni prévention des fuites ; les connexions et les IP de sortie restent affichées",
+"出口控制已关闭：MicaBar 不会改 Clash Party 的配置（设置 → 网络 里可以打开）": "Le contrôle de sortie est désactivé : MicaBar ne modifie pas la configuration de Clash Party (activable dans Réglages → Réseau)",
+"关闭出口控制要重启 {0}": "Désactiver le contrôle de sortie redémarre {0}",
+"MicaBar 会从 {0} 移除它的覆写（MicaBar 分组、分组出口端口、提前拦截规则），然后把它关掉再打开一次：": "MicaBar retire sa surcharge de {0} (groupe MicaBar, ports de sortie par groupe, règles de prévention des fuites), puis le ferme et le rouvre une fois :",
+"你加的出口规则会保留，以后打开还能恢复": "Vos règles de sortie sont conservées et reviennent si vous le réactivez",
+"现在重启并关闭": "Redémarrer maintenant et désactiver",
+"出口控制已关闭，Clash Party 的配置已还原": "Contrôle de sortie désactivé ; la configuration de Clash Party est rétablie"
 });

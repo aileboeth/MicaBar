@@ -122,6 +122,9 @@ pub fn defaults() -> Value {
             "pillStyle": "viz"
         },
         "exit": {
+            // exit control (the Clash Party override: MicaBar group, per-group ports, guard rules);
+            // false = never offered, the UI hides it (turning it off removes the override first)
+            "control": true,
             // auto = the fallback (MATCH) group + the busiest proxy groups; manual = `groups`
             "mode": "auto",
             "groups": [],

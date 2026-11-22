@@ -1004,5 +1004,14 @@ I18N.add("en", {
 "tab|连接": "Conns",
 "tab|监听": "Listen",
 "tour|跳过": "Skip",
-"没认出是哪块网卡，但能连上外网": "Couldn't tell which adapter it is, but the internet works"
+"没认出是哪块网卡，但能连上外网": "Couldn't tell which adapter it is, but the internet works",
+"往 Clash Party 写一个全局覆写：MicaBar 分组、每个分组的专用端口和提前拦截规则都在里面": "Writes a global override into Clash Party: the MicaBar group, a port per group and the leak-prevention rules all live in it",
+"使用出口控制": "Use exit control",
+"关掉后 MicaBar 不改 Clash Party 的任何配置：不提示启用，分组出口和提前拦截也不可用；连接和出口 IP 照常显示": "Off = MicaBar changes nothing in Clash Party's config: no enable prompt, no group exits or leak prevention; connections and exit IPs still show",
+"出口控制已关闭：MicaBar 不会改 Clash Party 的配置（设置 → 网络 里可以打开）": "Exit control is off: MicaBar doesn't change Clash Party's config (turn it on in Settings → Network)",
+"关闭出口控制要重启 {0}": "Turning exit control off restarts {0}",
+"MicaBar 会从 {0} 移除它的覆写（MicaBar 分组、分组出口端口、提前拦截规则），然后把它关掉再打开一次：": "MicaBar removes its override from {0} (MicaBar group, group exit ports, leak-prevention rules), then closes and reopens it once:",
+"你加的出口规则会保留，以后打开还能恢复": "Your exit rules are kept and come back if you turn it on again",
+"现在重启并关闭": "Restart now and turn off",
+"出口控制已关闭，Clash Party 的配置已还原": "Exit control is off; Clash Party's config is restored"
 });
