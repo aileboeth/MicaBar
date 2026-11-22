@@ -105,7 +105,9 @@ impl Default for Settings {
             gfw_count: 0,
             gfw_updated: 0,
             gfw_error: None,
-            force_proxy: true,
+            // off by default: it sends built-in / gfw domains to the MicaBar group, which changes the
+            // subscription's own routing (a friend's complaint, 2026-11-22); turned on in the alerts tab
+            force_proxy: false,
             notify: true,
             custom: Vec::new(),
             imports: Vec::new(),
