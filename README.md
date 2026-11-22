@@ -144,7 +144,7 @@ requests MicaBar makes itself:
 | gfw list | cdn.jsdelivr.net / raw.githubusercontent.com (Loyalsoldier/v2ray-rules-dat) | daily, when enabled |
 | Update check | latest.json of github.com/aileboeth/MicaBar | daily, when enabled |
 | AI quota | api.anthropic.com (Claude Code), chatgpt.com (Codex), cli-chat-proxy.grok.com (Grok), the local Antigravity language server | every 10 min (configurable), when enabled; always through the proxy client's local port, never direct (no port found = no query) |
-| Network diagnosis | direct: the HTTP resolve APIs of 119.29.29.29 / 223.5.5.5 (looking up qq.com); through the proxy: `www.gstatic.com/generate_204`; a full check also pings the router and resolves www.baidu.com | when enabled: one small request every 10 s (direct) and 30 s (proxy); the full check only when they fail |
+| Network diagnosis | direct: the HTTP resolve APIs of 119.29.29.29 / 223.5.5.5 (looking up qq.com); through the proxy: `www.gstatic.com/generate_204`; DNS: a fresh lookup of www.baidu.com through the system DNS; a full check also pings the router | when enabled: one small request every 10 s (direct), every 30 s through the proxy and to DNS; the full check only when they fail |
 
 Country / ASN lookups use the offline databases shipped with the proxy client (`country.mmdb`, `ASN.mmdb`);
 connection IPs are never sent anywhere. AI quota uses the sign-in each tool keeps on this PC and sends it only to

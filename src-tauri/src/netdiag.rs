@@ -99,13 +99,27 @@ static W: Mutex<Watch> = Mutex::new(Watch { last: None, problem: None, good_prox
 static INFO: Mutex<Option<InfoFn>> = Mutex::new(None);
 static CLIENT_EXE: Mutex<Option<String>> = Mutex::new(None);
 
-/// The proxy client's exe as last seen running.
+fn client_file() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base).join("MicaBar").join("proxy-client.txt")
+}
+
+/// The proxy client's exe as last seen running (kept on disk: after a restart of MicaBar the
+/// client may be the one that is gone).
 pub fn remember_client(exe: &str) {
-    *CLIENT_EXE.lock().unwrap() = Some(exe.to_string());
+    let mut g = CLIENT_EXE.lock().unwrap();
+    if g.as_deref() != Some(exe) {
+        *g = Some(exe.to_string());
+        let _ = std::fs::write(client_file(), exe);
+    }
 }
 
 pub fn client_exe() -> Option<String> {
-    CLIENT_EXE.lock().unwrap().clone()
+    let mut g = CLIENT_EXE.lock().unwrap();
+    if g.is_none() {
+        *g = std::fs::read_to_string(client_file()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && std::path::Path::new(s).exists());
+    }
+    g.clone()
 }
 
 fn info() -> Info {
@@ -446,7 +460,16 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     } else if st(2) == "fail" {
         (Some("DNS 坏了"), "能连外网，但域名解析失败".into(), "网址变不成 IP，所以网页打不开。先刷新 DNS 缓存；还不行就把网卡的 DNS 改成 223.5.5.5 / 119.29.29.29。".into(), vec![fix("flushdns", "刷新 DNS 缓存", true), fix("netsettings", "打开网络设置", false)])
     } else if proxied && !core_ok {
-        (Some("代理挂了"), format!("{} 没在工作", inf.client.clone().unwrap_or_else(|| "代理软件".into())), "直连是好的，只有走代理的网站打不开。重启一下代理软件。".into(), proxy_fixes(&inf))
+        (
+            Some("代理挂了"),
+            format!("{} 没在工作", inf.client.clone().unwrap_or_else(|| "代理软件".into())),
+            if inf.client_running {
+                "直连是好的，只有走代理的网站打不开。重启一下代理软件。".into()
+            } else {
+                "直连是好的，但代理软件已经退出了，系统代理还指着它，所以浏览器打不开网页。把它打开就好。".into()
+            },
+            proxy_fixes(&inf),
+        )
     } else if proxied && st(5) == "fail" {
         let mut f = Vec::new();
         if inf.controller {
@@ -473,7 +496,7 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
 fn proxy_fixes(inf: &Info) -> Vec<Fix> {
     let name = inf.client.clone().unwrap_or_else(|| "代理软件".into());
     let mut f = Vec::new();
-    if inf.clash_party {
+    if inf.clash_party && inf.client_running {
         f.push(fix("restart-proxy", format!("重启 {name}"), true));
     } else if inf.client_exe.is_some() {
         f.push(fix("start-proxy", format!("打开 {name}"), true));
@@ -611,8 +634,12 @@ fn watch_loop() {
     let started = Instant::now();
     let mut next_direct = Instant::now() + Duration::from_secs(20);
     let mut next_proxy = Instant::now() + Duration::from_secs(30);
+    // the two probes above avoid the system DNS (plain IPs / the core resolves): a broken DNS
+    // server needs its own probe
+    let mut next_dns = Instant::now() + Duration::from_secs(25);
     let mut direct_fail = 0u32;
     let mut proxy_fail = 0u32;
+    let mut dns_fail = 0u32;
     let mut good_streak = 0u32;
     loop {
         std::thread::sleep(Duration::from_secs(1));
@@ -662,24 +689,38 @@ fn watch_loop() {
         } else if !proxied && sys_port.is_none() {
             proxy_fail = 0;
         }
+        if Instant::now() >= next_dns {
+            probed = true;
+            if resolve("www.baidu.com", Duration::from_secs(3)).is_err() && resolve("www.qq.com", Duration::from_secs(3)).is_err() {
+                dns_fail += 1;
+                failed = true;
+            } else {
+                dns_fail = 0;
+            }
+            next_dns = Instant::now() + if dns_fail == 1 { Duration::from_secs(5) } else if showing { every } else { Duration::from_secs(if saver { 60 } else { 30 }) };
+        }
         if !probed || started.elapsed() < Duration::from_secs(20) {
             continue;
         }
         if showing {
-            // back to normal after two good rounds in a row: confirm with the full check
-            good_streak = if failed { 0 } else { good_streak + 1 };
+            // back to normal after two good rounds in a row (every kind of probe passing, not just
+            // the one that ran this round): confirm with the full check
+            good_streak = if failed || direct_fail > 0 || proxy_fail > 0 || dns_fail > 0 { 0 } else { good_streak + 1 };
             if good_streak >= 2 && claim() {
                 good_streak = 0;
                 finish(diagnose(true, &|_| {}));
             }
-        } else if (direct_fail >= 2 || proxy_fail >= 2) && claim() {
-            direct_fail = 0;
-            proxy_fail = 0;
+        } else if (direct_fail >= 2 || proxy_fail >= 2 || dns_fail >= 2) && claim() {
             let r = diagnose(true, &|_| {});
             if r.ok {
-                // a blip: nothing to report
+                // a blip: nothing to report, start counting again
+                direct_fail = 0;
+                proxy_fail = 0;
+                dns_fail = 0;
                 W.lock().unwrap().running = false;
             } else {
+                // the failure counts stay: recovery needs every kind of probe passing again
+                good_streak = 0;
                 finish(r);
             }
         }

@@ -860,14 +860,14 @@ function diagSheetHtml() {
     verdict = `<div class="dg-verdict"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>还没检查过</b><span>点下面的按钮开始</span></div></div>`;
   } else if (r.ok) {
     const n = (r.steps || []).filter((s) => s.status === "ok").length;
-    verdict = `<div class="dg-verdict ok"><span class="dg-big">${svgI(DG_BADGE.ok, 22, 2.6)}</span><div><b>${esc(r.verdict || "网络正常")}</b><span>${n ? `${n} 项检查都通过了` : ""}${r.tookMs ? ` · 用时 ${(r.tookMs / 1000).toFixed(1)} 秒` : ""}</span></div></div>`;
+    verdict = `<div class="dg-verdict ok"><span class="dg-big">${svgI(DG_BADGE.ok, 22, 2.6)}</span><div><b>${esc(r.verdict || "网络正常")}</b><span>${n ? `${n} 项检查都通过了` : esc(r.advice || "")}${r.tookMs ? ` · 用时 ${(r.tookMs / 1000).toFixed(1)} 秒` : ""}</span></div></div>`;
   } else {
     const since = r.downSince ? `<span class="dg-since">已持续 ${durText(Date.now() - r.downSince)}</span>` : "";
     verdict = `<div class="dg-verdict ${r.kind === "sysproxy" ? "warn" : "bad"}"><span class="dg-big">${svgI(r.kind === "sysproxy" ? DG_PATH.plug : DG_BADGE.fail, 22, 2.4)}</span>
       <div><b>${esc(r.verdict)}</b>${since}<span>${esc(r.advice || "")}</span></div></div>
       ${r.fixes?.length ? `<div class="dg-fixes">${r.fixes.map((f) => `<button class="${f.primary ? "primary" : "ghost"}" data-dg-fix="${esc(f.id)}">${esc(f.label)}</button>`).join("")}</div>` : ""}`;
   }
-  const when = r && !running ? `${r.auto ? "自动发现" : "手动检测"} · ${ago(r.at)}` : running ? "检测中" : "";
+  const when = r && !running ? (r.kind === "sysproxy" && r.ok ? `刚刚处理 · ${ago(r.at)}` : `${r.auto ? "自动发现" : "手动检测"} · ${ago(r.at)}`) : running ? "检测中" : "";
   return `<div class="as-head dg-head" data-sheet-drag><span class="dg-logo">${svgI(DG_PATH.pulse, 18, 2.2)}</span><div class="as-title"><b>网络诊断</b><span>${esc(when)}</span></div>
       <button class="ghost" data-sheet-do="close" title="关闭（Esc）">✕</button></div>
     ${chain}${verdict}
@@ -926,6 +926,10 @@ listen("netdiag", (e) => {
   diag.last = s.last || diag.last;
   diag.problem = s.problem || null;
   if (!s.running) { diag.running = false; diag.prog = null; } else diag.running = true;
+  if (was?.kind === "sysproxy" && !diag.problem) {
+    // fixed (restored here, by the client, or "是我关的"): the sheet says so instead of going blank
+    diag.last = { at: Date.now(), ok: true, kind: "sysproxy", steps: [], verdict: "系统代理好了", advice: "浏览器等程序会重新经过代理软件。", tookMs: 0 };
+  }
   if (was?.kind === "net" && !diag.problem && diag.last?.recoveredMs) {
     fireFlash("recover", `网络恢复了 · 断了 ${durText(diag.last.recoveredMs)}`, "info");
   } else if (!was && diag.problem) {
@@ -1200,7 +1204,7 @@ function noteCardHtml(n, close) {
       <div class="n-body">${esc(t.body)}</div>
       ${t.sub ? `<div class="n-sub">${n.kind === "done" ? "✓ " : n.kind === "ask" ? "● " : ""}${esc(t.sub)}</div>` : ""}
       ${n.actions?.length ? `<div class="n-acts">${n.actions.map((a) => `<button class="n-act ${esc(a.style)}" data-nact="${esc(a.id)}">${esc(a.label)}</button>`).join("")}</div>`
-        : n.done ? `<div class="n-done ${n.done}">${n.done === "block" ? "⛔ 已阻止联网" : "✓ 已允许"}</div>` : ""}
+        : n.done ? `<div class="n-done ${n.done}${n.doneWarn ? " warn" : ""}">${n.doneWarn ? "⚠ " : n.done === "block" ? "⛔ " : "✓ "}${esc(n.doneMsg || (n.done === "block" ? "已阻止联网" : "已允许"))}</div>` : ""}
     </div>
     ${close ? `<button class="n-x" data-nclose="${n.id}" title="关闭" aria-label="关闭">✕</button>` : ""}
   </div>`;
@@ -1306,9 +1310,13 @@ function noteAction(btn) {
     n.actions = [];
     n.read = true;
     n.done = act;
-    if (msg) say(msg);
+    // the outcome goes on the card itself (a flash in the pill would hide behind it); a rule that
+    // can't take effect yet (firewall off…) is a warning and stays readable longer
+    n.doneMsg = msg || "";
+    n.doneWarn = /但|还要/.test(msg || "");
+    if (nst.on && noteById(nst.active[0])?.id === id) { renderNote(); armNoteTimer(n.doneWarn ? 8000 : 2500); }
+    else if (msg) say(msg, n.doneWarn);
     fnLoad(true);
-    if (nst.on) { renderNote(); armNoteTimer(2500); }
     afterNotesChange();
   }).catch((e) => {
     btn.closest(".n-acts")?.querySelectorAll("button").forEach((b) => (b.disabled = false));
@@ -3999,8 +4007,7 @@ async function guardAction(el) {
   try {
     if (d.block) {
       const { path, exe } = JSON.parse(d.block);
-      const n = await invoke("guard_block", { path, exe });
-      toast(`已禁止 ${exe} 直连${n ? `，断开了 ${n} 条连接` : ""}`);
+      toast(await invoke("guard_block", { path, exe }));
     } else if (d.unblock) {
       await invoke("guard_unblock", { path: d.unblock });
       toast("已解除");

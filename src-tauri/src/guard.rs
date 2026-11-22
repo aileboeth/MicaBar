@@ -482,8 +482,9 @@ pub fn reset_connections(pid_set: &HashSet<u32>) -> usize {
             continue;
         }
         let mut row = Row { state: 12, local_addr: s.local_addr, local_port: s.local_port, remote_addr: s.remote_addr, remote_port: s.remote_port };
-        if unsafe { SetTcpEntry(&mut row) } == 0 {
-            n += 1;
+        match unsafe { SetTcpEntry(&mut row) } {
+            0 => n += 1,
+            rc => log(format!("guard: reset {rip} (pid {}) failed: error {rc}", s.pid)),
         }
     }
     n

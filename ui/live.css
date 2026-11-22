@@ -207,6 +207,7 @@
 .n-act:disabled { opacity: 0.5; cursor: default; }
 .n-done { margin-top: 7px; font-size: 12px; font-weight: 600; color: var(--green); animation: rise 0.4s var(--ease-fluid, ease) both; }
 .n-done.block { color: var(--red); }
+.n-done.warn { color: var(--amber); font-weight: 500; line-height: 1.5; }
 .n-ico .n-fn {
   position: absolute; right: -4px; bottom: -4px; width: 18px; height: 18px; border-radius: 50%;
   display: grid; place-items: center; color: #fff; background: var(--blue); box-shadow: 0 0 0 2px var(--menu-bg);

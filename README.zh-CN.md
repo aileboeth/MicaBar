@@ -109,7 +109,7 @@ v2fly、Clash 规则格式）。两种泄漏：
 | gfw 列表 | cdn.jsdelivr.net / raw.githubusercontent.com（Loyalsoldier/v2ray-rules-dat） | 开启时每天一次 |
 | 检查更新 | github.com/aileboeth/MicaBar 的 latest.json | 开启时每天一次 |
 | AI 额度 | api.anthropic.com（Claude Code）、chatgpt.com（Codex）、cli-chat-proxy.grok.com（Grok）、本机的 Antigravity 语言服务器 | 开启时每 10 分钟（可改）；一律经代理软件的本地端口发出，绝不直连（找不到端口就不查） |
-| 断网诊断 | 直连：119.29.29.29 / 223.5.5.5 的 HTTP 解析接口（查 qq.com）；经代理：`www.gstatic.com/generate_204`；诊断时再 ping 路由器、解析 www.baidu.com | 开启时直连每 10 秒、经代理每 30 秒各一个小请求；不通时才做完整诊断 |
+| 断网诊断 | 直连：119.29.29.29 / 223.5.5.5 的 HTTP 解析接口（查 qq.com）；经代理：`www.gstatic.com/generate_204`；DNS：经系统 DNS 解析 www.baidu.com（不用缓存）；诊断时再 ping 路由器 | 开启时直连每 10 秒、经代理和 DNS 每 30 秒各一次；不通时才做完整诊断 |
 
 国家 / ASN 用的是代理客户端自带的离线库（`country.mmdb`、`ASN.mmdb`），不会把连接的 IP 发给任何服务。
 AI 额度用各工具在本机已登录的凭据，只发给那个工具自己的服务，不保存、不写日志、不续期。

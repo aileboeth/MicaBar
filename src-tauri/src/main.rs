@@ -384,8 +384,12 @@ impl Collector {
             self.cfg = cfg;
             self.cfg_at = Some(Instant::now());
             // the proxy client's exe, so the diagnosis can start it again after it quit
-            if let Some(exe) = list.iter().find(|(pid, exe)| proxy::client_name(&[(*pid, exe.clone())]).0.is_some()).and_then(|(pid, _)| procinfo::image_path(*pid)) {
-                netdiag::remember_client(&exe);
+            // (the image file must carry the client's own name: an updater can show up under it)
+            let found = list.iter().filter(|(pid, exe)| proxy::client_name(&[(*pid, exe.clone())]).0.is_some()).find_map(|(pid, exe)| {
+                procinfo::image_path(*pid).filter(|p| p.rsplit(['\\', '/']).next().map(|f| f.eq_ignore_ascii_case(exe)).unwrap_or(false))
+            });
+            if let Some(path) = found {
+                netdiag::remember_client(&path);
             }
         }
         if Self::due(&self.tun_at, Duration::from_secs(5)) {
@@ -1984,7 +1988,7 @@ async fn guard_import_set(state: tauri::State<'_, Arc<Shared>>, url: String, ena
 
 /// Windows Firewall: block the program's direct traffic to public addresses.
 #[tauri::command]
-async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: String) -> Result<usize, String> {
+async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: String) -> Result<String, String> {
     let sh = state.inner().clone();
     blocking(move || {
         if sh.proxy.lock().unwrap().tun.is_some() {
@@ -1997,12 +2001,11 @@ async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: St
             s.blocked.push(guard::Blocked { path: path.clone(), exe: exe.clone(), rule: name, at: now_ms() });
             guard::save_settings(&s);
         }
-        let pids: HashSet<u32> = procinfo::list_processes()
-            .into_iter()
-            .filter(|(p, _)| procinfo::image_path(*p).map(|x| x.eq_ignore_ascii_case(&path)).unwrap_or(false))
-            .map(|(p, _)| p)
-            .collect();
-        Ok(guard::reset_connections(&pids))
+        let n = guard::reset_connections(&pids_of(&sh, &path));
+        Ok(match firstnet::firewall_warning() {
+            Some(w) => format!("已添加禁止 {exe} 直连的规则，{w}"),
+            None => format!("已禁止 {exe} 直连{}", if n > 0 { format!("，断开了 {n} 条连接") } else { String::new() }),
+        })
     })
     .await
 }
@@ -2163,6 +2166,25 @@ async fn netdiag_fix(state: tauri::State<'_, Arc<Shared>>, id: String) -> Result
 
 // ---------- programs going online for the first time ----------
 
+/// Processes of a program: the last snapshot's pids for it, plus any running process whose image
+/// is that path.
+fn pids_of(sh: &Shared, path: &str) -> HashSet<u32> {
+    let mut pids: HashSet<u32> = sh
+        .last
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.apps.iter().filter(|a| a.path.as_deref().map(|p| p.eq_ignore_ascii_case(path)).unwrap_or(false)).flat_map(|a| a.pids.clone()).collect())
+        .unwrap_or_default();
+    pids.extend(
+        procinfo::list_processes()
+            .into_iter()
+            .filter(|(p, _)| procinfo::image_path(*p).map(|x| x.eq_ignore_ascii_case(path)).unwrap_or(false))
+            .map(|(p, _)| p),
+    );
+    pids
+}
+
 /// Programs with a connection to a public address this round; new ones get a note.
 fn first_net(apps: &[AppRow]) {
     let seen: Vec<(String, String, String)> = apps
@@ -2259,19 +2281,20 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
                 } else {
                     String::new()
                 };
-                let pids: HashSet<u32> = procinfo::list_processes()
-                    .into_iter()
-                    .filter(|(p, _)| procinfo::image_path(*p).map(|x| x.eq_ignore_ascii_case(&path)).unwrap_or(false))
-                    .map(|(p, _)| p)
-                    .collect();
-                guard::reset_connections(&pids);
+                let pids = pids_of(&sh, &path);
+                let n = guard::reset_connections(&pids);
+                log(format!("firstnet: reset {n} connection(s) of pids {pids:?}"));
                 firstnet::set_blocked(&path, true, &rule, &core_rule);
                 let p = sh.proxy.lock().unwrap().clone();
-                if core_rule.is_empty() && p.system_proxy.is_some() && p.tun.is_none() {
+                let mut msg = if core_rule.is_empty() && p.system_proxy.is_some() && p.tun.is_none() {
                     format!("已阻止 {exe} 直接联网；它若走系统代理，还要开启「出口控制」才能完全拦住")
                 } else {
                     format!("已阻止 {exe} 联网")
+                };
+                if let Some(w) = firstnet::firewall_warning() {
+                    msg = format!("已添加 {exe} 的阻止规则，{w}");
                 }
+                msg
             }
             "unblock" => {
                 let k = firstnet::get(&path).ok_or("没有这个程序的记录")?;

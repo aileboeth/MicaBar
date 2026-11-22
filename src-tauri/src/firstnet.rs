@@ -170,6 +170,33 @@ pub fn learning_until() -> u64 {
     BOOK.lock().unwrap().as_ref().map(|b| b.learn_until).unwrap_or(0)
 }
 
+/// Network profiles whose Windows Firewall is switched off ("域" / "专用" / "公用"); a group
+/// policy setting wins over the local one. Rules added there don't do anything.
+pub fn firewall_off() -> Vec<&'static str> {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    let hk = winreg::RegKey::predef(HKEY_LOCAL_MACHINE);
+    let read = |path: &str| hk.open_subkey(path).ok().and_then(|k| k.get_value::<u32, _>("EnableFirewall").ok());
+    [("DomainProfile", "DomainProfile", "域"), ("StandardProfile", "PrivateProfile", "专用"), ("PublicProfile", "PublicProfile", "公用")]
+        .into_iter()
+        .filter(|(local, policy, _)| {
+            let p = read(&format!(r"SOFTWARE\Policies\Microsoft\WindowsFirewall\{policy}"));
+            let l = read(&format!(r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\{local}"));
+            p.or(l) == Some(0)
+        })
+        .map(|(_, _, name)| name)
+        .collect()
+}
+
+/// A warning to add after a firewall rule was written, when the firewall can't enforce it.
+pub fn firewall_warning() -> Option<String> {
+    let off = firewall_off();
+    match off.len() {
+        0 => None,
+        3 => Some("但 Windows 防火墙现在是关着的，规则要等防火墙打开后才生效".into()),
+        _ => Some(format!("但 Windows 防火墙在「{}」网络下是关着的，连这类网络时规则不生效", off.join("、"))),
+    }
+}
+
 fn rule_name(exe: &str) -> String {
     format!("MicaBar 禁止联网 - {exe}")
 }

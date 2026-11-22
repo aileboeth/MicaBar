@@ -53,7 +53,12 @@ pub fn is_core_exe(exe: &str) -> bool {
         return false;
     }
     let stem = l.trim_end_matches(".exe");
-    if stem.starts_with("clash-verge") {
+    if stem.starts_with("clash-verge") || stem.starts_with("clash-party") || stem.starts_with("mihomo-party") {
+        return false;
+    }
+    // installers and updaters ("clash-party-windows-2.0.5-x64-setup.exe" looked like a core
+    // named clash-…, found while Clash Party updated itself in the test VM)
+    if ["setup", "install", "update", "uninst"].iter().any(|w| stem.contains(w)) {
         return false;
     }
     CORES.iter().any(|c| stem == *c || stem.starts_with(&format!("{c}-")))
