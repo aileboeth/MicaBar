@@ -95,6 +95,8 @@ pub fn defaults() -> Value {
         },
         "ai": {
             "on": true,
+            // running Claude Code sessions in the pill (started by the hooks)
+            "live": true,
             // minutes between queries (Claude: at least 10)
             "interval": 10,
             // proxy port the quota queries go through (0 = the proxy client's own port, found
@@ -125,6 +127,11 @@ pub fn defaults() -> Value {
             "groups": [],
             "max": 4
         },
+        // network diagnosis: quiet probes, a full check when they fail, system proxy watch
+        "diag": { "on": true },
+        // a note when a program reaches the internet for the first time (system programs under
+        // the Windows folder only with "system")
+        "firstNet": { "on": true, "system": false },
         "flash": {
             "exitChange": true,
             "nodeDown": true,

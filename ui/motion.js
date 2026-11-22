@@ -145,7 +145,7 @@ const PRESS_SEL = "button:not(.no-press), .tile.go, .sp-row, .top-row, [data-pre
 // k = stiffness, c = damping; c / (2·√k) ≈ 0.9 is the "heavy fluid" feel: no wobble, soft stop.
 function springTo(get, setv, target, { v = 0, k = 0.0005, c = 0.04, done } = {}) {
   let x = get(), vel = v, last = performance.now(), raf = 0, stopped = false;
-  if (motionOff()) { setv(target); done?.(); return { stop() {} }; }
+  if (motionOff()) { setv(target); done?.(); return { target, stop() {} }; }
   const step = (now) => {
     if (stopped) return;
     const dt = Math.min(32, now - last);
@@ -164,7 +164,7 @@ function springTo(get, setv, target, { v = 0, k = 0.0005, c = 0.04, done } = {})
     raf = requestAnimationFrame(step);
   };
   raf = requestAnimationFrame(step);
-  return { stop() { stopped = true; cancelAnimationFrame(raf); } };
+  return { target, stop() { stopped = true; cancelAnimationFrame(raf); } };
 }
 
 // ---------- bottom sheet ----------
@@ -173,11 +173,16 @@ function springTo(get, setv, target, { v = 0, k = 0.0005, c = 0.04, done } = {})
 // heading for (closed / half / full), faster throws skip to the next one.
 const Sheet = (() => {
   let host = null, el = null, scrim = null, body = null;
-  let vis = 0, anim = null, onClose = null, drag = null;
+  let vis = 0, anim = null, onClose = null, drag = null, clickFn = null, fit = false;
   const RUBBER = 70;
 
   const full = () => Math.max(160, (host?.clientHeight || 400) - 28);
-  const half = () => Math.min(full(), Math.max(230, Math.round((host?.clientHeight || 400) * 0.6)));
+  // "fit": the middle anchor is the content's own height (a short sheet shows all of it)
+  const needed = () => (el ? el.querySelector(".sheet-bar").offsetHeight + body.scrollHeight + 2 : 0);
+  const half = () => {
+    const h = Math.max(230, Math.round((host?.clientHeight || 400) * 0.6));
+    return Math.min(full(), fit ? Math.max(h, needed()) : h);
+  };
   const anchors = () => [0, half(), full()];
 
   // the sheet's height is what shows (its body scrolls inside), so nothing hides below the host
@@ -206,9 +211,11 @@ const Sheet = (() => {
     cb?.();
   }
 
-  function open(h, html, { onClose: oc, onClick } = {}) {
+  function open(h, html, { onClose: oc, onClick, fit: f = false } = {}) {
     if (el && host !== h) { anim?.stop(); teardown(); }
     onClose = oc || null;
+    clickFn = onClick || null;
+    fit = f;
     if (!el) {
       host = h;
       scrim = document.createElement("div");
@@ -220,7 +227,7 @@ const Sheet = (() => {
       el.innerHTML = `<div class="sheet-bar" data-nograb title="上下拖动；往下甩关闭"><i></i></div><div class="sheet-body"></div>`;
       body = el.querySelector(".sheet-body");
       host.append(scrim, el);
-      el.addEventListener("click", (e) => onClick?.(e));
+      el.addEventListener("click", (e) => clickFn?.(e));
       el.querySelector(".sheet-bar").addEventListener("pointerdown", startDrag);
       el.addEventListener("pointerdown", (e) => { if (e.target.closest("[data-sheet-drag]") && !e.target.closest("button")) startDrag(e); });
       vis = 0;
@@ -241,6 +248,8 @@ const Sheet = (() => {
     const s = body.scrollTop;
     body.innerHTML = html;
     body.scrollTop = s;
+    // a fitted sheet resting on its middle anchor follows its content's height
+    if (fit && vis > 0 && vis < full() - 4 && Math.abs(half() - vis) > 4 && (!anim || anim.target !== 0)) to(half());
   }
 
   function close() { if (el) to(0); }

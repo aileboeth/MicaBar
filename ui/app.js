@@ -234,7 +234,8 @@ let panelHNow = 540;
 function measurePanel() {
   if (MANAGER) return;
   let h;
-  if (editing) h = panelH();
+  // a bottom sheet rises from the panel's bottom edge: the island stands at full height meanwhile
+  if (editing || (expanded && Sheet.isOpen())) h = panelH();
   else {
     const list = $("list");
     const foot = $("foot");
@@ -401,7 +402,15 @@ function expand() {
     if (tour.step === 0) tour.step = 1;
     renderTour();
   }
+  // the pill's network alert was clicked, or a problem not looked at yet: the diagnosis first
+  const p = diag.problem;
+  if (!tour.on && (diagWant || (p && sget("diag.on", true) && diagSeen !== p.downSince))) {
+    diagWant = false;
+    if (p) diagSeen = p.downSince;
+    setTimeout(() => { if (expanded) openDiagSheet(true); }, 360);
+  }
 }
+let diagSeen = null;
 
 function collapse() {
   if (!expanded || MANAGER) return;
@@ -709,6 +718,273 @@ function rotateCards(cards, name) {
   return html;
 }
 
+// ---------- live activities (front of the pill): AI sessions at work, network trouble ----------
+
+let agents = [];
+const diag = { last: null, problem: null, running: false, prog: null };
+let diagSheetOpen = false;
+let diagWant = false; // open the diagnosis sheet once the island has opened
+
+function elapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(x)}` : `${m}:${p(x)}`;
+}
+const durText = (ms) => {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+  return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
+};
+
+// These items are rebuilt every second (their timers tick): looping animations get a negative
+// delay from the clock so they carry on instead of restarting, and the entrance plays only
+// during the first half second an item exists.
+const livePhase = () => {
+  const t = Date.now();
+  return `--ph9:-${t % 900}ms;--ph11:-${t % 1100}ms;--ph14:-${t % 1400}ms;--ph16:-${t % 1600}ms;--ph18:-${t % 1800}ms`;
+};
+const liveBorn = new Map();
+function liveEnter(key) {
+  const now = Date.now();
+  if (!liveBorn.has(key)) liveBorn.set(key, now);
+  return now - liveBorn.get(key) < 500 ? " lv-enter" : "";
+}
+function liveForget(keys) {
+  for (const k of liveBorn.keys()) if (!keys.includes(k)) liveBorn.delete(k);
+}
+
+// the session to jump to: one waiting for the user first, then the longest running
+const agentLead = () => agents.find((a) => a.state === "ask") || [...agents].sort((a, b) => a.started - b.started)[0];
+
+function agentsPill() {
+  if (!agents.length || !sget("ai.live", true)) return "";
+  const ask = agents.filter((a) => a.state === "ask").length;
+  const lead = agentLead();
+  const st = ask ? "ask" : "run";
+  const tip = agents.map((a) => `${a.project}：${a.state === "ask" ? a.ask || "等你确认" : "运行 " + elapsed(Date.now() - a.started)}`).join("\n") + "\n点一下切到它的窗口";
+  const name = agents.length === 1 ? esc(lead.project) : `${agents.length} 个任务`;
+  const tail = ask
+    ? `<span class="ag-ask">${agents.length === 1 ? "等你确认" : `${ask} 个等你`}</span>`
+    : `<span class="ag-t mono">${elapsed(Date.now() - lead.started)}</span>`;
+  return `<span class="ag-pill ${st}${liveEnter("pill-ag")}" style="${livePhase()}" data-ag="${esc(lead.id)}" title="${esc(tip)}"><span class="ag-ic ${st}">${brandIcon(lead.tool, 15)}<i class="ag-orbit"></i></span><span class="ag-name">${name}</span>${tail}</span>`;
+}
+
+const DG_PATH = {
+  wifiOff: "M2 2l20 20M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 5.2-2.7M19 12.9a10 10 0 0 0-1.9-1.5M2 8.8a15 15 0 0 1 4.3-2.6M22 8.8a15 15 0 0 0-11-3.7M12 20h.01",
+  plug: "M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5",
+  pulse: "M3 12h4l3-8 4 16 3-8h4",
+};
+
+function diagPill() {
+  const p = diag.problem;
+  if (!p || !sget("diag.on", true)) return "";
+  const sys = p.kind === "sysproxy";
+  const since = !sys && p.downSince ? `<span class="dg-t mono">${elapsed(Date.now() - p.downSince)}</span>` : "";
+  return `<span class="dg-pill ${sys ? "warn" : "bad"}${liveEnter("pill-dg")}" style="${livePhase()}" data-dg="1" title="${esc(p.verdict || "")}\n点一下看诊断">
+    <span class="dg-ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="${sys ? DG_PATH.plug : DG_PATH.wifiOff}"/></svg></span>
+    <span class="dg-txt">${esc(p.problem || "网络异常")}</span>${since}</span>`;
+}
+
+// a short press on a live item: jump to the session's window / open the diagnosis
+function liveClick(t) {
+  const ag = t?.closest?.("[data-ag]");
+  if (ag) {
+    invoke("agents_focus", { id: ag.dataset.ag }).catch((e) => fireFlash("agent", String(e), "warn"));
+    return true;
+  }
+  if (t?.closest?.("[data-dg]")) {
+    diagWant = true;
+    invoke("pill_click").catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+listen("agents", (e) => {
+  agents = e.payload || [];
+  renderPill();
+  if (expanded) renderLiveBar();
+  if (expanded && tab === "ai") renderList();
+});
+invoke("agents_get").then((l) => { agents = l || []; renderPill(); }).catch(() => {});
+
+// ----- network diagnosis -----
+
+const DG_STEPS = [["nic", "网卡"], ["gw", "路由器"], ["dns", "DNS"], ["net", "互联网"], ["core", "代理软件"], ["node", "节点"]];
+const DG_ICON = {
+  nic: "M3 5h18v11H3zM8 20h8M12 16v4",
+  gw: "M3 14h18v6H3zM7 17h.01M11 17h.01M8.5 10a5 5 0 0 1 7 0M6 7.5a8.5 8.5 0 0 1 12 0",
+  dns: "M12 3v18M5 5h11l2.5 2.5L16 10H5zM19 13H8l-2.5 2.5L8 18h11z",
+  net: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3z",
+  core: "M12 3l8 3v6c0 4.6-3.3 7.9-8 9-4.7-1.1-8-4.4-8-9V6z",
+  node: "M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.1 11.6 3.3 3.3 0 0 0 7 18z",
+};
+const DG_BADGE = { ok: "M6 12.5l4 4 8-9", fail: "M7 7l10 10M17 7L7 17", warn: "M12 7v6M12 17h.01" };
+const svgI = (d, w = 18, sw = 1.9) => `<svg width="${w}" height="${w}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+
+function dgLink(a, b) {
+  if (b.status === "run") return "flow";
+  if (a.status === "fail" || b.status === "fail") return "broken";
+  if (b.status === "skip" || b.status === "wait") return "idle";
+  if (a.status === "warn" || b.status === "warn") return "warn";
+  return "ok";
+}
+
+// what the sheet shows: the check in progress, a system proxy problem, or the last check
+function dgShown() {
+  if (diag.running && diag.prog) return diag.prog;
+  if (diag.problem?.kind === "sysproxy") return diag.problem;
+  return diag.last || diag.problem;
+}
+
+function diagSheetHtml() {
+  const r = dgShown();
+  const running = diag.running;
+  const steps = r?.steps?.length ? r.steps : r?.kind === "sysproxy" ? [] : DG_STEPS.map(([id, label]) => ({ id, label, status: "wait", detail: "" }));
+  const chain = steps.length ? `<div class="dg-chain">${steps.map((s, i) => {
+    const link = i ? `<span class="dg-link ${dgLink(steps[i - 1], s)}"><i></i></span>` : "";
+    const badge = DG_BADGE[s.status] ? `<b class="dg-badge">${svgI(DG_BADGE[s.status], 10, 3.2)}</b>` : "";
+    const det = s.detail || (s.status === "run" ? "检测中…" : s.status === "skip" ? "跳过" : "");
+    return `${link}<div class="dg-node ${s.status}" style="--i:${i}">
+      <span class="dg-orb">${svgI(DG_ICON[s.id] || DG_ICON.net)}${badge}</span>
+      <span class="dg-lab">${esc(s.label)}</span>
+      <span class="dg-det" title="${esc(det)}">${esc(det)}${s.ms != null && s.status === "ok" ? `<i class="mono">${s.ms} ms</i>` : ""}</span>
+    </div>`;
+  }).join("")}</div>` : "";
+  let verdict;
+  if (running) {
+    verdict = `<div class="dg-verdict run"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>正在逐项检查…</b><span>从网卡一路查到节点，十秒内出结果</span></div></div>`;
+  } else if (!r) {
+    verdict = `<div class="dg-verdict"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>还没检查过</b><span>点下面的按钮开始</span></div></div>`;
+  } else if (r.ok) {
+    const n = (r.steps || []).filter((s) => s.status === "ok").length;
+    verdict = `<div class="dg-verdict ok"><span class="dg-big">${svgI(DG_BADGE.ok, 22, 2.6)}</span><div><b>${esc(r.verdict || "网络正常")}</b><span>${n ? `${n} 项检查都通过了` : ""}${r.tookMs ? ` · 用时 ${(r.tookMs / 1000).toFixed(1)} 秒` : ""}</span></div></div>`;
+  } else {
+    const since = r.downSince ? `<span class="dg-since">已持续 ${durText(Date.now() - r.downSince)}</span>` : "";
+    verdict = `<div class="dg-verdict ${r.kind === "sysproxy" ? "warn" : "bad"}"><span class="dg-big">${svgI(r.kind === "sysproxy" ? DG_PATH.plug : DG_BADGE.fail, 22, 2.4)}</span>
+      <div><b>${esc(r.verdict)}</b>${since}<span>${esc(r.advice || "")}</span></div></div>
+      ${r.fixes?.length ? `<div class="dg-fixes">${r.fixes.map((f) => `<button class="${f.primary ? "primary" : "ghost"}" data-dg-fix="${esc(f.id)}">${esc(f.label)}</button>`).join("")}</div>` : ""}`;
+  }
+  const when = r && !running ? `${r.auto ? "自动发现" : "手动检测"} · ${ago(r.at)}` : running ? "检测中" : "";
+  return `<div class="as-head dg-head" data-sheet-drag><span class="dg-logo">${svgI(DG_PATH.pulse, 18, 2.2)}</span><div class="as-title"><b>网络诊断</b><span>${esc(when)}</span></div>
+      <button class="ghost" data-sheet-do="close" title="关闭（Esc）">✕</button></div>
+    ${chain}${verdict}
+    <div class="m-actions end dg-foot"><button class="ghost" data-dg-fix="retry" ${running ? "disabled" : ""}>${running ? "检测中…" : "重新检测"}</button></div>`;
+}
+
+function diagSync() {
+  if (diagSheetOpen && Sheet.isOpen()) Sheet.update(diagSheetHtml());
+}
+
+function startDiag() {
+  if (diag.running) return;
+  diag.running = true;
+  diag.prog = { steps: DG_STEPS.map(([id, label]) => ({ id, label, status: "wait", detail: "" })) };
+  diagSync();
+  invoke("netdiag_run").then((r) => {
+    diag.running = false;
+    diag.prog = null;
+    diag.last = r;
+    diagSync();
+  }).catch((e) => { diag.running = false; diag.prog = null; diagSync(); toast(String(e), true); });
+}
+
+function openDiagSheet(run) {
+  if (MANAGER) return;
+  sheetApp = null;
+  diagSheetOpen = true;
+  Sheet.open($("panel"), diagSheetHtml(), {
+    fit: true,
+    onClose: () => { diagSheetOpen = false; measurePanel(); },
+    onClick: (e) => {
+      if (e.target.closest("[data-sheet-do='close']")) { Sheet.close(); return; }
+      const b = e.target.closest("[data-dg-fix]");
+      if (!b || b.disabled) return;
+      const id = b.dataset.dgFix;
+      if (id === "retry") { startDiag(); return; }
+      b.disabled = true;
+      invoke("netdiag_fix", { id }).then((msg) => {
+        if (msg) toast(msg);
+        // check again once the fix had time to work
+        const wait = { flushdns: 600, "switch-node": 1500, "restart-proxy": 5000, "start-proxy": 5000 }[id];
+        if (wait) setTimeout(startDiag, wait);
+        else diagSync();
+      }).catch((err) => { b.disabled = false; toast(String(err), true); });
+    },
+  });
+  measurePanel();
+  // a fresh check unless one just ran (or is running)
+  const fresh = diag.last && Date.now() - diag.last.at < 15_000;
+  if (run && !diag.running && !fresh && diag.problem?.kind !== "sysproxy") startDiag();
+}
+
+listen("netdiag", (e) => {
+  const s = e.payload || {};
+  const was = diag.problem;
+  diag.last = s.last || diag.last;
+  diag.problem = s.problem || null;
+  if (!s.running) { diag.running = false; diag.prog = null; } else diag.running = true;
+  if (was?.kind === "net" && !diag.problem && diag.last?.recoveredMs) {
+    fireFlash("recover", `网络恢复了 · 断了 ${durText(diag.last.recoveredMs)}`, "info");
+  } else if (!was && diag.problem) {
+    invoke("log_js", { msg: `netdiag problem: ${diag.problem.problem}` }).catch(() => {});
+  }
+  diagSync();
+  renderPill();
+  if (expanded) renderLiveBar();
+  if (expanded && tab === "conns") renderList();
+});
+listen("netdiag-progress", (e) => {
+  diag.running = true;
+  diag.prog = e.payload;
+  diagSync();
+});
+invoke("netdiag_get").then((s) => { diag.last = s?.last || null; diag.problem = s?.problem || null; diag.running = !!s?.running; renderPill(); }).catch(() => {});
+
+// chips in the open island's top bar (clickable in every interaction mode)
+let liveBarLast = "";
+function renderLiveBar() {
+  if (MANAGER) return;
+  const el = $("pg-live");
+  if (!el) return;
+  const chips = [];
+  if (diag.problem && sget("diag.on", true)) {
+    const sys = diag.problem.kind === "sysproxy";
+    chips.push(`<button class="lv-chip dg ${sys ? "warn" : "bad"}${liveEnter("bar-dg")}" style="${livePhase()}" data-do="diag-open" title="${esc(diag.problem.verdict || "")}">${svgI(sys ? DG_PATH.plug : DG_PATH.wifiOff, 13, 2.2)}<span>${esc(diag.problem.problem || "网络异常")}</span></button>`);
+  }
+  if (sget("ai.live", true)) {
+    const list = [...agents].sort((a, b) => (a.state === "ask") === (b.state === "ask") ? a.started - b.started : a.state === "ask" ? -1 : 1);
+    const shown = list.slice(0, chips.length ? 1 : 2);
+    for (const a of shown) {
+      chips.push(`<button class="lv-chip ag ${a.state}${liveEnter("bar-" + a.id)}" style="${livePhase()}" data-do="agent-focus" data-id="${esc(a.id)}" title="${esc(a.project)}：${a.state === "ask" ? esc(a.ask || "等你确认") : "正在工作"}\n点一下切到它的窗口">
+        <span class="ag-ic ${a.state}">${brandIcon(a.tool, 13)}<i class="ag-orbit"></i></span><span class="lv-name">${esc(a.project)}</span>${a.state === "ask" ? `<span class="ag-ask">等你</span>` : `<span class="mono lv-t">${elapsed(Date.now() - a.started)}</span>`}</button>`);
+    }
+    const more = agents.length - shown.length;
+    if (more > 0) chips.push(`<button class="lv-chip more" data-do="page-ai">+${more}</button>`);
+  }
+  const keep = [...liveBorn.keys()].filter((k) => k.startsWith("pill-") || (k === "bar-dg" && diag.problem) || agents.some((a) => k === "bar-" + a.id));
+  liveForget(keep);
+  const html = chips.join("");
+  if (html.replace(/style="[^"]*"/g, "") !== liveBarLast.replace(/style="[^"]*"/g, "")) {
+    liveBarLast = html;
+    el.innerHTML = html;
+  }
+}
+
+function agentsSectionHtml() {
+  if (!agents.length || !sget("ai.live", true)) return "";
+  const rows = [...agents].sort((a, b) => (a.state === "ask") === (b.state === "ask") ? a.started - b.started : a.state === "ask" ? -1 : 1).map((a) => `
+    <div class="ag-row ${a.state}" style="${livePhase()}">
+      <span class="ag-ic big ${a.state}">${brandIcon(a.tool, 20)}<i class="ag-orbit"></i></span>
+      <div class="ag-main"><b>${esc(a.project)}</b><span>${a.state === "ask" ? esc(a.ask || "等你确认") : "正在工作"}</span></div>
+      <span class="ag-time mono">${elapsed(Date.now() - a.started)}</span>
+      <button class="${a.state === "ask" ? "primary" : "ghost"}" data-do="agent-focus" data-id="${esc(a.id)}">${a.state === "ask" ? "去确认" : "切过去"}</button>
+    </div>`).join("");
+  return `<div class="ag-list"><div class="ag-h">进行中<span>${agents.length}</span></div>${rows}</div>`;
+}
+
 // ---------- threshold flashes (5 s message in the pill) ----------
 
 const flash = { msg: null, until: 0, cool: {}, prevExit: null, latAt: 0, latOk: true, latMs: null, hist: [] };
@@ -768,8 +1044,10 @@ function renderPill() {
   if (target?.ip) dot += p?.detected ? " ok" : " warn";
   else if (target?.error) dot += " err";
   if (snap?.guard?.unacked) dot = "dot err busy";
+  const netDown = diag.problem?.kind === "net" && sget("diag.on", true);
+  if (netDown) dot = "dot err busy";
   // the thin-line style shows the same status as a colour
-  const st = snap?.guard?.unacked || (!target?.ip && target?.error) ? "err" : target?.ip ? (p?.detected ? "ok" : "warn") : "idle";
+  const st = netDown || snap?.guard?.unacked || (!target?.ip && target?.error) ? "err" : target?.ip ? (p?.detected ? "ok" : "warn") : "idle";
   for (const s of ["ok", "warn", "err", "idle"]) island.classList.toggle("st-" + s, s === st);
 
   let html;
@@ -790,7 +1068,10 @@ function renderPill() {
         return { id: "rotate", cards, html: rotateCards(cards, "main") };
       })
       .filter((i) => i.html);
-    html = foldPill(dot, items);
+    // live activities lead the pill (they never fold away: folding starts from the end)
+    const live = [{ id: "diag", html: diagPill() }, { id: "agents", html: agentsPill() }].filter((i) => i.html);
+    liveForget([...live.map((i) => "pill-" + (i.id === "diag" ? "dg" : "ag")), ...[...liveBorn.keys()].filter((k) => !k.startsWith("pill-"))]);
+    html = foldPill(dot, [...live, ...items]);
   }
   const full = `<span class="${dot}"></span>${html}`;
   if (full !== pillLast) {
@@ -882,6 +1163,7 @@ const unreadCount = () => notes.filter((n) => !n.read).length;
 // privacy: 0 = everything, 1 = no message text (default "source": app + sender), 2 = only the
 // app ("smart" while a fullscreen app is in front or a screen recorder runs)
 function noteHidden(n) {
+  if (n.source === "micabar") return 0; // MicaBar's own notes carry no private text
   const p = sget("notify.privacy", "source");
   if (p === "full") return 0;
   if (p === "smart") return gameOn || n.capturing ? 2 : 0;
@@ -895,6 +1177,7 @@ function noteIcon(n) {
       ? iconHtml({ path: n.icon, name: n.app })
       : noteGlyph(n);
   if (n.avatar && noteHidden(n) < 2) return `<div class="n-ico avatar"><img class="n-av" src="${n.avatar}" alt=""><span class="n-badge">${app}</span></div>`;
+  if (n.kind === "firstnet") return `<div class="n-ico">${n.icon ? iconHtml({ path: n.icon, name: n.title }) : app}<span class="n-fn">${svgI(DG_ICON.net, 11, 2.4)}</span></div>`;
   return `<div class="n-ico">${app}</div>`;
 }
 
@@ -916,6 +1199,8 @@ function noteCardHtml(n, close) {
       <div class="n-top">${showApp ? `<span class="n-app">${esc(n.app)}</span>` : ""}<b class="n-title">${esc(t.title)}</b>${cnt}<span class="n-time">${esc(ago(n.at))}</span></div>
       <div class="n-body">${esc(t.body)}</div>
       ${t.sub ? `<div class="n-sub">${n.kind === "done" ? "✓ " : n.kind === "ask" ? "● " : ""}${esc(t.sub)}</div>` : ""}
+      ${n.actions?.length ? `<div class="n-acts">${n.actions.map((a) => `<button class="n-act ${esc(a.style)}" data-nact="${esc(a.id)}">${esc(a.label)}</button>`).join("")}</div>`
+        : n.done ? `<div class="n-done ${n.done}">${n.done === "block" ? "⛔ 已阻止联网" : "✓ 已允许"}</div>` : ""}
     </div>
     ${close ? `<button class="n-x" data-nclose="${n.id}" title="关闭" aria-label="关闭">✕</button>` : ""}
   </div>`;
@@ -949,7 +1234,8 @@ function inlineNoteHtml() {
 function announceNote(n) {
   if (MANAGER || editing) return;
   const st = noteStyle();
-  if (st === "card") { showNote(n.id); return; }
+  // a note with buttons always springs out as a card (the buttons have to be reachable)
+  if (st === "card" || n.actions?.length) { showNote(n.id); return; }
   if (expanded) return; // the notes page / the dot on its icon show it
   if (st === "inline") {
     const showing = nfl.until > Date.now();
@@ -1001,7 +1287,33 @@ function showNote(id) {
 function armNoteTimer(ms) {
   clearTimeout(nst.timer);
   if (nst.hover) return;
-  nst.timer = setTimeout(hideNotes, ms ?? Math.min(30, Math.max(2, Number(sget("notify.duration", 5)) || 5)) * 1000);
+  const base = Math.min(30, Math.max(2, Number(sget("notify.duration", 5)) || 5)) * 1000;
+  // a card waiting for a decision stays up longer
+  const waits = noteById(nst.active[0])?.actions?.length;
+  nst.timer = setTimeout(hideNotes, ms ?? (waits ? Math.max(base, 15000) : base));
+}
+
+// a button on a note card (MicaBar's own notes): act, then show the outcome on the card
+function noteAction(btn) {
+  const id = Number(btn.closest("[data-nid]")?.dataset.nid);
+  const n = noteById(id);
+  if (!n || btn.disabled) return;
+  const act = btn.dataset.nact;
+  btn.closest(".n-acts")?.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  const say = (msg, bad) => (MANAGER || expanded ? toast(msg, bad) : fireFlash("fn", msg, bad ? "bad" : "info"));
+  if (n.kind !== "firstnet") return;
+  invoke("firstnet_action", { path: n.data, action: act, note: id }).then((msg) => {
+    n.actions = [];
+    n.read = true;
+    n.done = act;
+    if (msg) say(msg);
+    fnLoad(true);
+    if (nst.on) { renderNote(); armNoteTimer(2500); }
+    afterNotesChange();
+  }).catch((e) => {
+    btn.closest(".n-acts")?.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    say(String(e), true);
+  });
 }
 
 function hideNotes() {
@@ -1060,6 +1372,8 @@ if (!MANAGER) {
   el.addEventListener("mouseenter", () => { nst.hover = true; clearTimeout(nst.timer); renderNote(); });
   el.addEventListener("mouseleave", () => { nst.hover = false; if (nst.on) { renderNote(); armNoteTimer(2500); } });
   el.addEventListener("click", (e) => {
+    const act = e.target.closest("[data-nact]");
+    if (act) { noteAction(act); return; }
     const x = e.target.closest("[data-nclose]");
     const c = e.target.closest("[data-nid]");
     const id = Number((x || c)?.dataset[x ? "nclose" : "nid"]);
@@ -1180,6 +1494,8 @@ function notesContext(e) {
 }
 
 function notesClick(e) {
+  const act = e.target.closest("#list [data-nact]");
+  if (act) { noteAction(act); return true; }
   const tg = e.target.closest("[data-ngtoggle]");
   if (tg && (tg.tagName === "BUTTON" || !e.target.closest("button"))) {
     const k = tg.dataset.ngtoggle;
@@ -1296,6 +1612,7 @@ function renderExit() {
   const spin = ex.checking ? "spin" : "";
   const when = ex.lastCheck ? ago(ex.lastCheck) : "";
   html = `<div class="exit-wrap">${html}
+    <button id="diag-btn" class="${diag.problem ? "hot" : ""}" style="${livePhase()}" data-do="diag-open" title="网络诊断：从网卡一路查到节点">${svgI(DG_PATH.pulse, 13, 2.4)}</button>
     <button id="refresh" class="${spin}" title="重新检测出口 IP${when ? "（上次 " + when + "）" : ""}">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
     </button></div>`;
@@ -1669,8 +1986,9 @@ function sheetSync() {
 function openAppSheet(key) {
   if (!appHist.get(key)) return;
   sheetApp = key;
+  diagSheetOpen = false;
   Sheet.open($("panel"), "", {
-    onClose: () => { sheetApp = null; document.querySelectorAll(".sp-row.open").forEach((r) => r.classList.remove("open")); },
+    onClose: () => { sheetApp = null; document.querySelectorAll(".sp-row.open").forEach((r) => r.classList.remove("open")); measurePanel(); },
     onClick: (e) => {
       const b = e.target.closest("[data-sheet-do]");
       if (!b) return;
@@ -1692,6 +2010,7 @@ function openAppSheet(key) {
     },
   });
   document.querySelectorAll(".sp-row").forEach((r) => r.classList.toggle("open", r.dataset.sheetApp === key));
+  measurePanel();
   sheetSync();
 }
 
@@ -1702,7 +2021,7 @@ function afterRender() {
   if (tab === "speed") {
     speedRead(Charts.scrubIndex("speed"));
     sheetSync();
-  } else if (Sheet.isOpen()) {
+  } else if (Sheet.isOpen() && !diagSheetOpen) {
     Sheet.close();
   }
 }
@@ -1949,11 +2268,12 @@ function aiCard(q, compact) {
 }
 
 function aiTabHtml() {
-  if (!sget("ai.on", true)) return `<div class="empty">AI 额度已关闭（设置 → 额度与圆环）</div>`;
+  const live = agentsSectionHtml();
+  if (!sget("ai.on", true)) return live + `<div class="empty">AI 额度已关闭（设置 → 额度与圆环）</div>`;
   const list = aiState.length ? aiState.map((q) => aiCard(q, false)).join("") : `<div class="empty">正在查询…</div>`;
   const last = aiState.reduce((m, q) => Math.max(m, q.at || 0), 0);
   const via = [...new Set(aiState.filter((q) => q.via).map((q) => q.via))];
-  return `<div class="viz">
+  return `${live}<div class="viz">
     <div class="viz-head"><span class="viz-sel">订阅额度：用了多少、什么时候重置${last ? ` · 更新于 ${ago(last)}` : ""}${via.length ? ` · 经代理 127.0.0.1:${via.join("/")}` : ""}</span>
       <button class="ghost" data-do="ai-refresh">立即刷新</button></div>
     <div class="ai-grid">${list}</div>
@@ -2704,10 +3024,18 @@ const SET_PAGES = {
     ${sNumber("flash.latencyMs", "　延迟超过", 100, 5000, 50, "ms")}
     ${sToggle("flash.speedSpike", "网速突增")}
     ${sNumber("flash.speedMBps", "　突增到超过", 1, 1000, 1, "MB/s")}
+  </div>
+  <div class="s-sec"><div class="s-title">断网诊断<span class="s-note">后台每 10 秒轻轻探一次，连着两次不通就从网卡一路查到节点</span></div>
+    ${sToggle("diag.on", "自动发现断网", "胶囊最前面显示哪一环断了（网卡 / 路由器 / DNS / 宽带 / 代理软件 / 节点），点开有修复按钮；系统代理被别的软件关掉或改掉也会提醒")}
+  </div>
+  <div class="s-sec"><div class="s-title">新程序联网<span class="s-note">程序第一次连上公网时提醒，可以一键阻止</span></div>
+    ${sToggle("firstNet.on", "提醒第一次联网的程序", "第一次开启时先花 10 分钟熟悉常用程序，不会一下子弹一堆；程序更新换了版本号目录也认得出来")}
+    ${sToggle("firstNet.system", "　也提醒 Windows 自带的程序", "C:\\Windows 下的系统组件，数量多，一般不用开")}
   </div>`,
 
   ai: () => `
   <div class="s-sec"><div class="s-title">AI 额度<span class="s-note">用本机已登录的凭据向各家官方查询，只读，不保存、不外传</span></div>
+    ${sToggle("ai.live", "正在跑的 AI 任务", "Claude Code 干活时胶囊最前面显示项目名和用时，等你批准时变成橙色；点一下切到它的终端。需要在「通知」里接好 Claude Code 钩子")}
     ${sToggle("ai.on", "显示 AI 额度")}
     ${sToggle("ai.claude", "　Claude Code")}
     ${sToggle("ai.codex", "　Codex", "需要用 ChatGPT 账号登录的 Codex")}
@@ -2973,6 +3301,42 @@ $("list").addEventListener("click", (e) => {
 
 // ---------- leak guard tab ----------
 
+// programs that went online for the first time (loaded on demand, refreshed after actions)
+let fnView = null;
+let fnAt = 0;
+function fnLoad(force) {
+  if (!force && Date.now() - fnAt < 5000) return;
+  fnAt = Date.now();
+  invoke("firstnet_list").then((v) => { fnView = v; if (tab === "guard") renderList(true); }).catch(() => {});
+}
+
+function firstNetHtml() {
+  fnLoad();
+  const v = fnView;
+  const on = sget("firstNet.on", true);
+  const learning = v && v.learnUntil > Date.now();
+  const rows = (v?.apps || []).map((k) => {
+    const st = k.blocked ? "blocked" : k.allowed ? "allowed" : "new";
+    const badge = { blocked: `<span class="fn-st blocked">已阻止</span>`, allowed: `<span class="fn-st allowed">已允许</span>`, new: `<span class="fn-st new">待处理</span>` }[st];
+    const acts = k.blocked
+      ? `<button data-do="fn" data-fn="unblock" data-path="${esc(k.path)}">恢复联网</button>`
+      : `${st === "new" ? `<button data-do="fn" data-fn="allow" data-path="${esc(k.path)}">允许</button>` : ""}<button class="danger" data-do="fn" data-fn="block" data-path="${esc(k.path)}">阻止联网</button>`;
+    return `<div class="fn-row ${st}">
+      ${iconHtml({ path: k.path, name: k.name, exe: k.exe })}
+      <div class="fn-main"><div class="fn-top"><b>${esc(k.name)}</b>${badge}<span class="fn-when">${ago(k.first)}</span></div>
+        <div class="fn-sub" title="${esc(k.path)}">→ ${esc(k.dest || "")}<span class="fn-path">${esc(k.path)}</span></div></div>
+      <div class="fn-acts">${acts}</div>
+    </div>`;
+  }).join("");
+  const note = !on ? "已关闭"
+    : learning ? `正在熟悉这台电脑上常用的程序（还剩 ${Math.ceil((v.learnUntil - Date.now()) / 60000)} 分钟），之后第一次联网的程序会弹出提醒`
+    : "程序第一次连上公网时在岛上提醒，可以一键阻止（Windows 防火墙规则）";
+  return `<div class="g-sec fn-sec">
+    <div class="g-head"><b>新程序联网</b><span class="g-note">${note}</span><span class="sp"></span><button data-do="fn-toggle">${on ? "关闭" : "开启"}</button></div>
+    ${rows || (on ? `<div class="empty fn-empty">${learning ? "学习中…" : "还没有新程序联网"}</div>` : "")}
+  </div>`;
+}
+
 function guardTabHtml() {
   const g = snap.guard || {};
   const s = g.settings || {};
@@ -3024,6 +3388,7 @@ function guardTabHtml() {
         ${alerts.some((a) => !a.active) ? `<button data-do="clear-alerts">清除已结束</button>` : ""}
       </div>${cards}
     </div>
+    ${firstNetHtml()}
     <div class="g-sec">
       <div class="g-head"><b>应走代理的规则库</b><span>共 ${g.total || 0} 条</span></div>
       ${opt("builtin", "内置常见服务", `${srcCount("内置")} 个主域：Google、YouTube、GitHub、Telegram、X、OpenAI、Claude…`)}
@@ -3182,6 +3547,10 @@ function renderListNow(force) {
     rows.push(guardTabHtml());
   } else if (tab === "conns") {
     const leaks = snap.guard?.unacked || 0;
+    if (diag.problem && sget("diag.on", true)) {
+      const dp = diag.problem;
+      rows.push(`<div class="banner alert dg-banner ${dp.kind === "sysproxy" ? "warn" : ""}">${svgI(dp.kind === "sysproxy" ? DG_PATH.plug : DG_PATH.wifiOff, 15, 2.2)}<span><b>${esc(dp.problem || "网络异常")}</b> · ${esc(dp.verdict || "")}</span><button class="primary" data-do="diag-open">查看诊断</button></div>`);
+    }
     if (leaks) rows.push(`<div class="banner alert">⚠ 检测到 ${leaks} 条代理泄漏：本该走代理的连接直连了。<button class="primary" data-do="goto-guard">查看</button></div>`);
     const b = bannerHtml();
     if (b) rows.push(b);
@@ -3239,6 +3608,7 @@ function renderListNow(force) {
 
 function renderPanel() {
   if (!expanded) return;
+  renderLiveBar();
   renderExit();
   renderProxyLine();
   const setCount = (id, v) => { const el = $("tab-" + id); if (el) el.textContent = v; };
@@ -3270,7 +3640,26 @@ function renderPanel() {
 async function runAction(el) {
   const act = el.dataset.do;
   try {
-    if (act === "enable") {
+    if (act === "diag-open") {
+      openDiagSheet(true);
+      return;
+    } else if (act === "agent-focus") {
+      await invoke("agents_focus", { id: el.dataset.id });
+      return;
+    } else if (act === "page-ai") {
+      switchPage("ai");
+      return;
+    } else if (act === "fn") {
+      el.disabled = true;
+      const msg = await invoke("firstnet_action", { path: el.dataset.path, action: el.dataset.fn, note: null });
+      if (msg) toast(msg);
+      fnLoad(true);
+      return;
+    } else if (act === "fn-toggle") {
+      await setPath("firstNet.on", !sget("firstNet.on", true));
+      fnLoad(true);
+      return;
+    } else if (act === "enable") {
       // installing / updating the override restarts the proxy client: ask first
       const c = ctrl();
       const client = c.client || "Clash Party";
@@ -4177,7 +4566,7 @@ island.addEventListener("pointerdown", (e) => {
   if (onScrollbar(e)) return;
   const ev = { pointerId: e.pointerId, screenX: e.screenX, screenY: e.screenY };
   const hold = Math.min(1000, Math.max(150, Number(sget("interaction.holdMs", 260)) || 260));
-  press = { sx: e.screenX, sy: e.screenY, timer: setTimeout(() => startGrab(ev), hold) };
+  press = { sx: e.screenX, sy: e.screenY, target: e.target, timer: setTimeout(() => startGrab(ev), hold) };
 });
 
 // Images (flags, covers, app icons) must not start the browser's own drag and drop: a long press
@@ -4225,8 +4614,10 @@ document.addEventListener("pointermove", (e) => {
 
 document.addEventListener("pointerup", (e) => {
   if (press) {
-    // a short press: in click mode that's the click that opens the island
+    // a short press: on a live item it acts on it; otherwise, in click mode, it opens the island
+    const t = press.target;
     cancelPress();
+    if (!expanded && !fling.active && liveClick(t)) return;
     if (!expanded && !fling.active && sget("interaction.expand", "hover") === "click") invoke("pill_click").catch(() => {});
     return;
   }

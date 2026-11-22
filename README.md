@@ -11,7 +11,17 @@ node — and decide right there whether it goes through the proxy or direct.
 - **Rotating pill**: group exits, the song playing (cover + title), AI quota, speed and node latency take turns;
   what rotates and how fast is configurable.
 - **AI quota**: subscription usage (5-hour / weekly windows…) and reset times for Claude Code, Codex, Antigravity
-  and Grok.
+  and Grok, each ring with the tool's own mark.
+- **AI tasks at work**: while Claude Code works, the front of the pill shows the project and the time so far; it turns
+  amber ("等你确认") when it waits for your approval. Also at the top of the open island; one click brings its terminal
+  to the front. Interrupting with Esc or closing the terminal clears it.
+- **Network diagnosis**: a light probe every 10 s; two failures in a row run a full check along the chain (adapter →
+  router → DNS → internet → proxy client → node). The pill says which link broke ("DNS 坏了", "节点挂了", "宽带断了"…)
+  and the sheet offers a fix: flush the DNS cache, switch to a working node, restart the proxy client… Recovery shows
+  how long it was down. A system proxy switched off or changed by another program is reported with a one-click restore.
+- **First network access**: a card on the island when a program reaches the internet for the first time — "允许" or
+  "阻止联网" (a Windows Firewall rule; with exit control on, its traffic through the system proxy is rejected too).
+  The first run learns your usual programs for 10 minutes; version folders are folded, so updates don't count as new.
 - **Notifications**: new messages from WeChat, Telegram, mail and other apps, and Claude Code / Codex finishing a
   task or waiting for approval show on the island — a small app icon at the pill's end, one line inside the pill, or
   a card, your choice; a notes page groups them by app. Message text is hidden by default (app + sender only);
@@ -134,6 +144,7 @@ requests MicaBar makes itself:
 | gfw list | cdn.jsdelivr.net / raw.githubusercontent.com (Loyalsoldier/v2ray-rules-dat) | daily, when enabled |
 | Update check | latest.json of github.com/aileboeth/MicaBar | daily, when enabled |
 | AI quota | api.anthropic.com (Claude Code), chatgpt.com (Codex), cli-chat-proxy.grok.com (Grok), the local Antigravity language server | every 10 min (configurable), when enabled; always through the proxy client's local port, never direct (no port found = no query) |
+| Network diagnosis | direct: the HTTP resolve APIs of 119.29.29.29 / 223.5.5.5 (looking up qq.com); through the proxy: `www.gstatic.com/generate_204`; a full check also pings the router and resolves www.baidu.com | when enabled: one small request every 10 s (direct) and 30 s (proxy); the full check only when they fail |
 
 Country / ASN lookups use the offline databases shipped with the proxy client (`country.mmdb`, `ASN.mmdb`);
 connection IPs are never sent anywhere. AI quota uses the sign-in each tool keeps on this PC and sends it only to

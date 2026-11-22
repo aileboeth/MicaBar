@@ -1,17 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agents;
 mod ai;
 mod audio;
 mod conn;
 mod control;
 mod dns;
 mod exitip;
+mod firstnet;
 mod geo;
 mod glass;
 mod guard;
 mod icon;
 mod media;
 mod mihomo;
+mod netdiag;
 mod notify;
 mod procinfo;
 mod proxy;
@@ -311,6 +314,7 @@ struct Collector {
     traffic_flush: Option<Instant>,
     animations: bool,
     animations_at: Option<Instant>,
+    firstnet_at: Option<Instant>,
 }
 
 fn network_signature() -> String {
@@ -358,6 +362,7 @@ impl Collector {
             traffic_flush: Some(Instant::now()),
             animations: true,
             animations_at: None,
+            firstnet_at: None,
         }
     }
 
@@ -378,6 +383,10 @@ impl Collector {
             }
             self.cfg = cfg;
             self.cfg_at = Some(Instant::now());
+            // the proxy client's exe, so the diagnosis can start it again after it quit
+            if let Some(exe) = list.iter().find(|(pid, exe)| proxy::client_name(&[(*pid, exe.clone())]).0.is_some()).and_then(|(pid, _)| procinfo::image_path(*pid)) {
+                netdiag::remember_client(&exe);
+            }
         }
         if Self::due(&self.tun_at, Duration::from_secs(5)) {
             self.tun = proxy::tun_adapter();
@@ -717,6 +726,10 @@ impl Collector {
         let conn_count = out.iter().map(|a| a.conns.len()).sum();
         let listen_count = out.iter().map(|a| a.listen.len()).sum();
         self.account_traffic(sh, &out);
+        if Self::due(&self.firstnet_at, Duration::from_secs(2)) {
+            self.firstnet_at = Some(Instant::now());
+            first_net(&out);
+        }
         let guard = self.detect_leaks(sh, &mut out, state.tun.is_some());
         let (want_cpu, want_mem) = (settings::item_on("pill.items", "cpu"), settings::item_on("pill.items", "mem"));
         let sys = (want_cpu || want_mem).then(|| self.sampler.sample(want_cpu, want_mem));
@@ -2031,6 +2044,272 @@ fn alert_clear(state: tauri::State<'_, Arc<Shared>>) {
 
 /// Proxy port for the AI services: the one set in the settings, else the proxy client's local port
 /// (mixed / http port, or the system proxy's). None = no query at all, never a direct one.
+// ---------- live AI sessions ----------
+
+#[tauri::command]
+fn agents_get() -> Vec<agents::Session> {
+    agents::list()
+}
+
+#[tauri::command]
+fn agents_focus(id: String) -> Result<(), String> {
+    agents::focus(&id)
+}
+
+// ---------- network diagnosis ----------
+
+fn diag_info(sh: &Shared) -> netdiag::Info {
+    let p = sh.proxy.lock().unwrap().clone();
+    let node = {
+        let ex = sh.exit.lock().unwrap();
+        ex.groups.iter().find(|g| g.is_default).and_then(|g| g.r.node.clone()).or_else(|| ex.proxy.as_ref().and_then(|e| e.node.clone()))
+    };
+    netdiag::Info {
+        detected: p.detected,
+        client: p.client.clone(),
+        core_running: !p.core_pids.is_empty(),
+        local_port: p.local_port,
+        tun: p.tun.is_some(),
+        system_proxy: p.system_proxy.clone(),
+        node: node.filter(|n| n != "DIRECT"),
+        controller: sh.mihomo.lock().unwrap().ctl.is_some(),
+        ..Default::default()
+    }
+}
+
+#[tauri::command]
+fn netdiag_get() -> netdiag::State {
+    netdiag::state()
+}
+
+#[tauri::command]
+async fn netdiag_run() -> Result<netdiag::Report, String> {
+    blocking(|| Ok(netdiag::run_manual())).await
+}
+
+/// Picks the fastest working node of the main exit's group (a selector); an automatic group is
+/// only re-tested (it moves to a working node on its own).
+fn switch_node(sh: &Shared) -> Result<String, String> {
+    let (ctl, secret) = ctl_link(sh)?;
+    let group = {
+        let ex = sh.exit.lock().unwrap();
+        ex.groups.iter().find(|g| g.is_default).and_then(|g| g.r.group.clone()).or_else(|| ex.proxy.as_ref().and_then(|e| e.group.clone()))
+    }
+    .ok_or("还不知道当前用的是哪个代理分组")?;
+    let b = mihomo::get(&ctl, &format!("/proxies/{}", pct(&group)), secret.as_deref())?;
+    let v: serde_json::Value = serde_json::from_slice(&b).map_err(|e| e.to_string())?;
+    let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let now = v.get("now").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let url = "https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204";
+    let d = mihomo::get(&ctl, &format!("/group/{}/delay?url={url}&timeout=3000", pct(&group)), secret.as_deref())?;
+    let delays: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&d).unwrap_or_default();
+    if !kind.eq_ignore_ascii_case("Selector") {
+        sh.exit_trigger.store(true, Ordering::SeqCst);
+        return Ok(format!("{group} 是自动选择的分组，已重新测速，它会自己换到能用的节点"));
+    }
+    let best = delays
+        .iter()
+        .filter_map(|(n, ms)| ms.as_u64().filter(|m| *m > 0).map(|m| (n.clone(), m)))
+        .filter(|(n, _)| *n != now && n != "DIRECT" && !n.starts_with("REJECT"))
+        .min_by_key(|(_, m)| *m)
+        .ok_or("这个分组里没有能用的节点了，试试在代理软件里更新订阅")?;
+    let body = serde_json::json!({ "name": best.0 }).to_string();
+    mihomo::request(&ctl, "PUT", &format!("/proxies/{}", pct(&group)), Some(&body), secret.as_deref())?;
+    // existing connections move over
+    if let Ok(conns) = mihomo::connections(&ctl, secret.as_deref()) {
+        for c in conns.iter().filter(|c| c.chains.iter().any(|x| *x == group)) {
+            let _ = mihomo::request(&ctl, "DELETE", &format!("/connections/{}", c.id), None, secret.as_deref());
+        }
+    }
+    log(format!("netdiag: {group} switched {now} -> {} ({} ms)", best.0, best.1));
+    sh.exit_trigger.store(true, Ordering::SeqCst);
+    Ok(format!("{group} 换到了 {}（{} ms）", best.0, best.1))
+}
+
+#[tauri::command]
+async fn netdiag_fix(state: tauri::State<'_, Arc<Shared>>, id: String) -> Result<String, String> {
+    let sh = state.inner().clone();
+    blocking(move || match id.as_str() {
+        "netsettings" => {
+            netdiag::open_net_settings();
+            Ok(String::new())
+        }
+        "flushdns" => netdiag::flush_dns().map(|_| "DNS 缓存已刷新".into()),
+        "restore-sysproxy" => netdiag::restore_system_proxy().map(|_| "系统代理已恢复".into()),
+        "ignore-sysproxy" => {
+            netdiag::ignore_system_proxy();
+            Ok("好的，系统代理再打开之前不再提醒".into())
+        }
+        "switch-node" => switch_node(&sh),
+        "restart-proxy" | "start-proxy" => {
+            let list = procinfo::list_processes();
+            if let Some(cp) = control::find_clash_party(&list) {
+                let cores = proxy::client_name(&list).1;
+                control::restart_party(&cp, &cores)?;
+                sh.exit_trigger.store(true, Ordering::SeqCst);
+                Ok("代理软件已重启".into())
+            } else {
+                let exe = netdiag::client_exe().ok_or("不知道代理软件装在哪里，请手动打开它")?;
+                // de-elevated through explorer, like a double click
+                std::process::Command::new("explorer.exe").arg(&exe).spawn().map_err(|e| e.to_string())?;
+                sh.exit_trigger.store(true, Ordering::SeqCst);
+                Ok("正在打开代理软件".into())
+            }
+        }
+        _ => Err("未知的操作".into()),
+    })
+    .await
+}
+
+// ---------- programs going online for the first time ----------
+
+/// Programs with a connection to a public address this round; new ones get a note.
+fn first_net(apps: &[AppRow]) {
+    let seen: Vec<(String, String, String)> = apps
+        .iter()
+        .filter(|a| !a.is_proxy)
+        .filter_map(|a| {
+            let path = a.path.clone()?;
+            let c = a.conns.iter().find(|c| {
+                let ip: Option<IpAddr> = c.remote.as_deref().and_then(|r| r.parse().ok());
+                ip.map(|i| !geo::is_private(&i) && !is_loopback(&i)).unwrap_or(false) && (c.state == "ESTABLISHED" || c.node.is_some())
+            })?;
+            let what = c.host.clone().or_else(|| c.remote.clone()).unwrap_or_default();
+            let dest = match &c.cc {
+                Some(cc) if !cc.is_empty() => format!("{what} · {}", cc.to_uppercase()),
+                _ => what,
+            };
+            Some((a.name.clone(), path, dest))
+        })
+        .collect();
+    for k in firstnet::observe(&seen) {
+        notify::push(notify::Note {
+            key: "micabar-firstnet".into(),
+            app: "新程序联网".into(),
+            icon: Some(k.path.clone()),
+            title: k.name.clone(),
+            body: format!("第一次连上网 → {}", k.dest),
+            sub: k.path.clone(),
+            kind: "firstnet".into(),
+            source: "micabar".into(),
+            actions: vec![
+                notify::NoteAction { id: "allow".into(), label: "允许".into(), style: "plain".into() },
+                notify::NoteAction { id: "block".into(), label: "阻止联网".into(), style: "danger".into() },
+            ],
+            data: k.path.clone(),
+            ..Default::default()
+        });
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FirstNetView {
+    on: bool,
+    learn_until: u64,
+    apps: Vec<firstnet::Known>,
+}
+
+#[tauri::command]
+fn firstnet_list() -> FirstNetView {
+    FirstNetView { on: settings::bool_at("firstNet.on", true), learn_until: firstnet::learning_until(), apps: firstnet::recent() }
+}
+
+/// allow | block | unblock | dismiss one program (and settle its note's buttons).
+#[tauri::command]
+async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, action: String, note: Option<u64>) -> Result<String, String> {
+    let sh = state.inner().clone();
+    let r = blocking(move || {
+        let exe = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+        let msg = match action.as_str() {
+            "allow" => {
+                firstnet::allow(&path);
+                format!("已允许 {exe} 联网")
+            }
+            "dismiss" => {
+                firstnet::dismiss(&path);
+                String::new()
+            }
+            "block" => {
+                if !sh.admin {
+                    return Err("改防火墙需要以管理员身份运行 MicaBar".into());
+                }
+                let rule = firstnet::firewall_block(&path)?;
+                // a program on the system proxy reaches the internet through the core: a REJECT
+                // rule there (exit control on) stops that part too
+                let core_rule = if sh.control.lock().unwrap().status == "active" {
+                    (|| -> Result<String, String> {
+                        let (ctl, secret) = ctl_link(&sh)?;
+                        let home = sh.core_home.lock().unwrap().clone().ok_or("还不知道内核目录")?;
+                        let r = {
+                            let mut rules = sh.rules.lock().unwrap();
+                            let r = control::upsert(&mut rules, "process", Some(exe.clone()), None, "reject");
+                            control::persist(&home, &rules)?;
+                            r
+                        };
+                        control::reload_providers(&ctl, secret.as_deref())?;
+                        control::close_matching(&ctl, secret.as_deref(), &r);
+                        sh.control.lock().unwrap().rules = sh.rules.lock().unwrap().clone();
+                        Ok(r.id)
+                    })()
+                    .unwrap_or_else(|e| {
+                        log(format!("firstnet: core reject rule failed: {e}"));
+                        String::new()
+                    })
+                } else {
+                    String::new()
+                };
+                let pids: HashSet<u32> = procinfo::list_processes()
+                    .into_iter()
+                    .filter(|(p, _)| procinfo::image_path(*p).map(|x| x.eq_ignore_ascii_case(&path)).unwrap_or(false))
+                    .map(|(p, _)| p)
+                    .collect();
+                guard::reset_connections(&pids);
+                firstnet::set_blocked(&path, true, &rule, &core_rule);
+                let p = sh.proxy.lock().unwrap().clone();
+                if core_rule.is_empty() && p.system_proxy.is_some() && p.tun.is_none() {
+                    format!("已阻止 {exe} 直接联网；它若走系统代理，还要开启「出口控制」才能完全拦住")
+                } else {
+                    format!("已阻止 {exe} 联网")
+                }
+            }
+            "unblock" => {
+                let k = firstnet::get(&path).ok_or("没有这个程序的记录")?;
+                if !k.rule.is_empty() {
+                    firstnet::firewall_unblock(&k.rule, &path)?;
+                }
+                if !k.core_rule.is_empty() {
+                    if let (Ok((ctl, secret)), Some(home)) = (ctl_link(&sh), sh.core_home.lock().unwrap().clone()) {
+                        let removed = {
+                            let mut rules = sh.rules.lock().unwrap();
+                            let r = rules.iter().find(|r| r.id == k.core_rule).cloned();
+                            rules.retain(|r| r.id != k.core_rule);
+                            let _ = control::persist(&home, &rules);
+                            r
+                        };
+                        let _ = control::reload_providers(&ctl, secret.as_deref());
+                        if let Some(r) = removed {
+                            control::close_matching(&ctl, secret.as_deref(), &r);
+                        }
+                        sh.control.lock().unwrap().rules = sh.rules.lock().unwrap().clone();
+                    }
+                }
+                firstnet::set_blocked(&path, false, "", "");
+                format!("已恢复 {exe} 联网")
+            }
+            _ => return Err("未知的操作".into()),
+        };
+        Ok(msg)
+    })
+    .await;
+    if r.is_ok() {
+        if let Some(id) = note {
+            notify::settle(id);
+        }
+    }
+    r
+}
+
 fn ai_proxy(sh: &Shared) -> Option<u16> {
     let fixed = settings::num_at("ai.proxyPort", 0.0);
     if (1.0..=65535.0).contains(&fixed) {
@@ -2514,6 +2793,13 @@ fn main() {
             layout_edit,
             tour_mode,
             tour_restart,
+            agents_get,
+            agents_focus,
+            netdiag_get,
+            netdiag_run,
+            netdiag_fix,
+            firstnet_list,
+            firstnet_action,
             grab_start,
             grab_free,
             grab_end,
@@ -2595,6 +2881,13 @@ fn main() {
             });
             ai_loop(handle.clone(), shared.clone());
             notify::start(handle.clone());
+            let sh = shared.clone();
+            netdiag::start(Arc::new(move || diag_info(&sh)));
+            let sh = shared.clone();
+            std::thread::spawn(move || {
+                let history = traffic::all_programs(&sh.traffic.lock().unwrap());
+                firstnet::init(history);
+            });
             let h_media = handle.clone();
             media::start(shared.media.clone(), move |np| {
                 let _ = h_media.emit("media", np);

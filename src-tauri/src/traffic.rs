@@ -148,6 +148,22 @@ impl Book {
     }
 }
 
+/// Every program in the kept history: (name, path).
+pub fn all_programs(book: &Book) -> Vec<(String, String)> {
+    let mut seen: HashMap<String, (String, String)> = HashMap::new();
+    let (today, today_apps) = book.today();
+    for ago in 0..=KEEP_DAYS {
+        let date = local_date(ago);
+        let data = if date == today { today_apps.clone() } else { load(&date) };
+        for a in data.into_values() {
+            if let Some(p) = a.path {
+                seen.entry(p.to_lowercase()).or_insert((a.name, p));
+            }
+        }
+    }
+    seen.into_values().collect()
+}
+
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DayTotal {

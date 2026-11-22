@@ -43,6 +43,20 @@ extern "system" {
 const DNS_TYPE_A: u16 = 1;
 const DNS_TYPE_AAAA: u16 = 28;
 const DNS_QUERY_NO_WIRE_QUERY: u32 = 0x10;
+const DNS_QUERY_BYPASS_CACHE: u32 = 0x8;
+
+/// A fresh A lookup on the wire (the cache bypassed); the DnsQuery status code (0 = ok).
+pub fn query_fresh(host: &str) -> i32 {
+    let w: Vec<u16> = host.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut res: *mut DnsRecordHead = std::ptr::null_mut();
+    unsafe {
+        let rc = DnsQuery_W(w.as_ptr(), DNS_TYPE_A, DNS_QUERY_BYPASS_CACHE, std::ptr::null_mut(), &mut res, std::ptr::null_mut());
+        if !res.is_null() {
+            DnsRecordListFree(res, DNS_FREE_RECORD_LIST);
+        }
+        rc
+    }
+}
 const DNS_FREE_FLAT: i32 = 0;
 const DNS_FREE_RECORD_LIST: i32 = 1;
 

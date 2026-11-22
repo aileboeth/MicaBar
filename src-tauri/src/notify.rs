@@ -48,6 +48,10 @@ pub struct Note {
     pub read: bool,
     /// a screen recorder / sharing tool is running (the page hides the text in "smart" mode)
     pub capturing: bool,
+    /// buttons on the card (MicaBar's own notes: "允许" / "阻止联网"…)
+    pub actions: Vec<NoteAction>,
+    /// what the actions act on (a program path…)
+    pub data: String,
     #[serde(skip)]
     pub target: Target,
     /// notes with the same merge key (and still unread) become one, counted
@@ -61,6 +65,14 @@ pub struct Note {
     /// dropped
     #[serde(skip)]
     pub owner: String,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct NoteAction {
+    pub id: String,
+    pub label: String,
+    /// primary | danger | plain
+    pub style: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -102,7 +114,7 @@ fn book() -> &'static Mutex<Book> {
     BOOK.get_or_init(|| Mutex::new(Book::default()))
 }
 
-fn emit<S: Serialize + Clone>(ev: &str, v: S) {
+pub(crate) fn emit<S: Serialize + Clone>(ev: &str, v: S) {
     if let Some(a) = APP.get() {
         let _ = a.emit(ev, v);
     }
@@ -246,7 +258,21 @@ pub fn open(id: u64) -> Result<(), String> {
         n.read = true;
         n.target.clone()
     };
-    match target {
+    focus_target(&target);
+    Ok(())
+}
+
+/// The note's / session's window still exists (a process target: the process still runs).
+pub(crate) fn target_alive(t: &Target) -> bool {
+    match t {
+        Target::Hwnd(h, _) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(*h as _) != 0 },
+        Target::Pid(p) => procinfo::image_path(*p).is_some(),
+        _ => true,
+    }
+}
+
+pub(crate) fn focus_target(target: &Target) {
+    match target.clone() {
         Target::Hwnd(h, exe) => {
             if !focus_window(h) {
                 if let Some(p) = exe {
@@ -265,7 +291,15 @@ pub fn open(id: u64) -> Result<(), String> {
         }
         Target::None => {}
     }
-    Ok(())
+}
+
+/// Marks one note read and drops its buttons (an action on it was taken).
+pub fn settle(id: u64) {
+    let mut b = book().lock().unwrap();
+    if let Some(n) = b.notes.iter_mut().find(|n| n.id == id) {
+        n.read = true;
+        n.actions.clear();
+    }
 }
 
 /// A sample, so the look can be tried from the settings.
@@ -1618,11 +1652,14 @@ fn ai_event(tool: &str, event: &str, j: &Value, host: (Target, Option<String>)) 
         _ => return,
     };
     let session = s("session_id");
+    let project = |cwd: &str| if cwd.is_empty() { app.to_string() } else { project_of(cwd) };
     match (tool, event) {
         ("claude", "prompt") => {
-            STARTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(session, Instant::now());
+            STARTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(session.clone(), Instant::now());
+            crate::agents::started(&session, tool, &project(&s("cwd")), &s("transcript_path"), target);
         }
         ("claude", "stop") => {
+            crate::agents::stopped(&session);
             let cwd = s("cwd");
             let took = STARTS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&session).map(|t| t.elapsed());
             DONE_AT.lock().unwrap().get_or_insert_with(HashMap::new).insert(session.clone(), Instant::now());
@@ -1652,8 +1689,13 @@ fn ai_event(tool: &str, event: &str, j: &Value, host: (Target, Option<String>)) 
                     return;
                 }
             }
-            let body = if let Some(rest) = msg.split("permission to use ").nth(1) {
-                format!("需要你批准：使用 {}", rest.trim_end_matches('.'))
+            let tool_name = msg.split("permission to use ").nth(1).map(|r| r.trim_end_matches('.').to_string());
+            if !lower.contains("waiting for your input") {
+                let what = tool_name.as_ref().map(|t| format!("批准使用 {t}")).unwrap_or_else(|| if msg.is_empty() { "需要你看一下".into() } else { msg.clone() });
+                crate::agents::asking(&session, tool, &project(&s("cwd")), &what, &s("transcript_path"), target.clone());
+            }
+            let body = if let Some(rest) = &tool_name {
+                format!("需要你批准：使用 {rest}")
             } else if lower.contains("waiting for your input") {
                 "在等你回复".to_string()
             } else if msg.is_empty() {
@@ -1918,4 +1960,5 @@ pub fn start(app: AppHandle) {
     shell_thread();
     toast_thread();
     ai_server();
+    crate::agents::start();
 }

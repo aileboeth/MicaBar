@@ -455,6 +455,13 @@ fn kill(pid: u32) {
     }
 }
 
+/// Stops Clash Party with its core and starts it again (same elevation).
+pub fn restart_party(cp: &ClashParty, core_pids: &[u32]) -> Result<(), String> {
+    log(format!("control: restarting {}", cp.exe));
+    stop_party(cp, core_pids);
+    start_party(cp)
+}
+
 fn stop_party(cp: &ClashParty, core_pids: &[u32]) {
     for p in &cp.pids {
         kill(*p);
