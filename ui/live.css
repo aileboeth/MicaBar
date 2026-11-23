@@ -205,7 +205,10 @@
 .n-act.danger:hover { background: color-mix(in srgb, var(--red) 28%, transparent); }
 .n-act.primary { background: var(--blue); color: var(--on-accent); }
 .n-act:disabled { opacity: 0.5; cursor: default; }
-.n-done { margin-top: 7px; font-size: 12px; font-weight: 600; color: var(--green); animation: rise 0.4s var(--ease-fluid, ease) both; }
+.n-done { margin-top: 7px; font-size: 12px; font-weight: 600; color: var(--green); }
+/* only right after the button press: the notes page is rebuilt on every snapshot, and replaying the
+   rise each time made the line flash and jump */
+.n-done.fresh { animation: rise 0.4s var(--ease-fluid, ease) both; }
 .n-done.block { color: var(--red); }
 .n-done.warn { color: var(--amber); font-weight: 500; line-height: 1.5; }
 .n-ico .n-fn {

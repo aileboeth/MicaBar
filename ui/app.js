@@ -1210,7 +1210,7 @@ function noteCardHtml(n, close) {
       <div class="n-body">${esc(t.body)}</div>
       ${t.sub ? `<div class="n-sub">${n.kind === "done" ? "✓ " : n.kind === "ask" ? "● " : ""}${esc(t.sub)}</div>` : ""}
       ${n.actions?.length ? `<div class="n-acts">${n.actions.map((a) => `<button class="n-act ${esc(a.style)}" data-nact="${esc(a.id)}">${esc(a.label)}</button>`).join("")}</div>`
-        : n.done ? `<div class="n-done ${n.done}${n.doneWarn ? " warn" : ""}">${n.doneWarn ? "⚠ " : n.done === "block" ? "⛔ " : "✓ "}${esc(n.doneMsg || (n.done === "block" ? tr("已阻止联网") : tr("已允许")))}</div>` : ""}
+        : n.done ? `<div class="n-done ${n.done}${n.doneWarn ? " warn" : ""}${Date.now() - (n.doneAt || 0) < 400 ? " fresh" : ""}">${n.doneWarn ? "⚠ " : n.done === "block" ? "⛔ " : "✓ "}${esc(n.doneMsg || (n.done === "block" ? tr("已阻止联网") : tr("已允许")))}</div>` : ""}
     </div>
     ${close ? `<button class="n-x" data-nclose="${n.id}" title="${tr("关闭")}" aria-label="${tr("关闭")}">✕</button>` : ""}
   </div>`;
@@ -1316,6 +1316,7 @@ function noteAction(btn) {
     n.actions = [];
     n.read = true;
     n.done = act;
+    n.doneAt = Date.now();
     // the outcome goes on the card itself (a flash in the pill would hide behind it); a rule that
     // can't take effect yet (firewall off…) is a warning and stays readable longer
     // "warn:" = a rule that cannot take effect yet (firewall off, system proxy without exit control)
