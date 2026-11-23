@@ -5275,6 +5275,8 @@ window.addEventListener("resize", () => {
 });
 if (MANAGER) {
   listen("goto", (e) => {
+    // diagnosis (opening the window lagged once mid-game): when the page got the request
+    invoke("log_js", { msg: `manager goto ${e.payload} received` }).catch(() => {});
     const [page, cat] = String(e.payload || "home").split("/");
     if (cat && SET_CATS.includes(cat)) {
       setCat = cat;

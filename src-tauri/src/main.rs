@@ -2577,10 +2577,13 @@ async fn media_control(action: String) -> Result<(), String> {
 /// Opens (or focuses) the desktop manager window on a page.
 fn open_manager_window(app: &AppHandle, page: &str) {
     if let Some(w) = app.get_webview_window("manager") {
+        // timed: opening it lagged once while a game was running (2026-11-22)
+        let t = std::time::Instant::now();
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
         let _ = app.emit_to("manager", "goto", page.to_string());
+        log(format!("manager window shown ({page}) in {} ms, minimized={:?}", t.elapsed().as_millis(), w.is_minimized().ok()));
         return;
     }
     let s = settings::get();
@@ -3086,6 +3089,29 @@ fn main() {
             let h = handle.clone();
             std::thread::spawn(move || window_ctl::hover_loop(h, ws));
             window_ctl::hotkey_thread(shared.ws.clone());
+
+            // watchdog: the tray, window changes and sync commands all run on the main thread; a
+            // stall there makes clicks "do nothing for a while" (seen once mid-game), so log it
+            let h = handle.clone();
+            std::thread::spawn(move || {
+                let beat = Arc::new(std::sync::atomic::AtomicU64::new(now_ms()));
+                let mut since: Option<u64> = None;
+                loop {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let b = beat.clone();
+                    let _ = h.run_on_main_thread(move || b.store(now_ms(), Ordering::SeqCst));
+                    let last = beat.load(Ordering::SeqCst);
+                    let gap = now_ms().saturating_sub(last);
+                    if gap > 1500 && since.is_none() {
+                        since = Some(last);
+                        log(format!("main thread: no response for {gap} ms"));
+                    } else if gap <= 1500 {
+                        if let Some(s) = since.take() {
+                            log(format!("main thread: responsive again after ~{} ms", last.saturating_sub(s)));
+                        }
+                    }
+                }
+            });
             let ws = shared.ws.clone();
             let chan = shared.glass.clone();
             std::thread::spawn(move || glass::glass_loop(ws, chan));
