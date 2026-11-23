@@ -51,6 +51,7 @@ e por qual nó de proxy — e decidir ali mesmo se vai pelo proxy ou direto.
   jogos em tela cheia; animações fluidas que seguem a configuração de animação do Windows.
 - **10 idiomas de interface**: 简体中文, 繁體中文, English, 日本語, 한국어, Русский, Español, Português (Brasil),
   Français, Deutsch — segue o idioma de exibição do Windows por padrão.
+- **Histórico da área de transferência**: textos e imagens copiados ficam na página «Área de transferência» da ilha; um clique copia de volta. Pesquisa, fixar, limpeza automática por idade e quantidade; o que um gerenciador de senhas marca como privado não é guardado.
 
 > O visual e a interação se inspiram no [fly-island](https://github.com/flyl1u/fly-island), algumas ideias de recursos no
 > [BrimDeck](https://github.com/MoFeng2223/BrimDeck); todo o código foi escrito de forma independente.
@@ -236,6 +237,14 @@ As notificações vêm de três lugares, todos lidos localmente:
   Claude Code ou ao `~/.codex/config.toml` do Codex (com backup antes, removível com um clique); quando uma tarefa termina ou
   precisa de aprovação, ele avisa `127.0.0.1:47900` com `curl` (com um token aleatório).
 
+## Histórico da área de transferência
+
+- Textos e imagens copiados (capturas de tela etc.) aparecem por ordem de tempo na página «Área de transferência» do painel, com os fixados no topo; copiar o mesmo conteúdo de novo só o leva para o topo.
+- Clicar num item só o coloca de volta na área de transferência — você cola com Ctrl+V. Passe o mouse sobre um item para fixá-lo ou apagá-lo; a pesquisa fica no topo.
+- Configurações → Área de transferência: guardar também imagens, guardar o histórico no disco deste PC (criptografado com a chave da conta do Windows atual, continua após reiniciar) ou só na memória, quantos dias e quantos itens manter. Itens fixados nunca são removidos automaticamente.
+- Gerenciadores de senhas como Bitwarden, KeePass e 1Password marcam as senhas copiadas como «não guardar»; esse conteúdo é ignorado por padrão.
+- Um ícone de área de transferência no fim da cápsula pula a cada cópia nova (dá para desligar em Configurações → Aparência recolhida).
+
 ## Alertas de vazamento
 
 A biblioteca «deveria ir pelo proxy» = uma lista embutida de serviços comuns (~140 domínios principais) + a lista gfw
@@ -272,6 +281,8 @@ sem acessar a rede. As notificações também não acessam a rede: as do dia fic
 é gravado em disco nem no log (e por padrão não aparece na ilha); a porta loopback `127.0.0.1:47900` só aceita as chamadas
 dos hooks de IA com o token. O segredo do controlador do mihomo é lido da configuração dele em tempo de execução e nunca é
 salvo nem enviado.
+
+O histórico da área de transferência nunca se conecta à internet: os itens ficam neste PC (`%LOCALAPPDATA%\MicaBar\clipboard`, criptografado) ou só na memória, e nunca no log.
 
 ## Compilar a partir do código
 

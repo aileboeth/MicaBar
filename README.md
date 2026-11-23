@@ -49,6 +49,7 @@ which proxy node — and decide right there whether it goes through the proxy or
   games; fluid animations that follow the Windows animation setting.
 - **10 interface languages**: 简体中文, 繁體中文, English, 日本語, 한국어, Русский, Español, Português (Brasil),
   Français, Deutsch — follows the Windows display language by default.
+- **Clipboard history**: text and pictures you copy are kept on the island's "Clipboard" page; click one to copy it back. Search, pin, automatic clean-up by age and count; content a password manager marks as private isn't recorded.
 
 > The look and interaction are inspired by [fly-island](https://github.com/flyl1u/fly-island), some feature ideas
 > by [BrimDeck](https://github.com/MoFeng2223/BrimDeck); all code is written independently.
@@ -231,6 +232,14 @@ Notifications come from three places, all read locally:
   Codex's `~/.codex/config.toml` (backed up first, removable with one click); when a task finishes or needs approval
   it notifies `127.0.0.1:47900` with `curl` (with a random token).
 
+## Clipboard history
+
+- Copied text and pictures (screenshots etc.) are listed by time on the panel's "Clipboard" page, pinned ones on top; copying the same content again only moves it to the top.
+- Clicking an entry only puts it back on the clipboard — paste with Ctrl+V yourself. Hover an entry to pin or delete it; search at the top.
+- Settings → Clipboard: record pictures or not, keep the history on this PC's disk (encrypted with the current Windows account's key, survives restarts) or in memory only, how many days and how many entries to keep. Pinned entries are never removed automatically.
+- Password managers such as Bitwarden, KeePass and 1Password mark copied passwords "don't record"; such content is skipped by default.
+- A clipboard icon at the pill's right end bounces on a new copy (Settings → Collapsed look can turn it off).
+
 ## Leak alerts
 
 The "should go through the proxy" library = a built-in list of common services (~140 main domains) + the gfw list
@@ -266,6 +275,8 @@ makes no network request. Notifications make no network request either: today's 
 only, message text is never written to disk or the log (and is not shown on the island by default); the loopback
 port `127.0.0.1:47900` only accepts the AI hooks' calls carrying the token. The mihomo controller secret is read from
 its config at runtime and never stored or sent.
+
+The clipboard history never goes online: entries stay on this PC (`%LOCALAPPDATA%\MicaBar\clipboard`, encrypted) or in memory only, and never in the log.
 
 ## Build from source
 

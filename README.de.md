@@ -52,6 +52,7 @@ wohin jede Verbindung geht und über welchen Proxy-Knoten — und gleich dort fe
   Vollbildspiele; flüssige Animationen, die der Windows-Animationseinstellung folgen.
 - **10 Sprachen der Oberfläche**: 简体中文, 繁體中文, English, 日本語, 한국어, Русский, Español, Português (Brasil),
   Français, Deutsch — standardmäßig wie die Windows-Anzeigesprache.
+- **Zwischenablage-Verlauf**: kopierte Texte und Bilder landen auf der Seite „Zwischenablage“ der Insel; ein Klick kopiert sie wieder. Suche, Anheften, automatische Bereinigung nach Alter und Anzahl; was ein Passwortmanager als privat markiert, wird nicht aufgezeichnet.
 
 > Aussehen und Bedienung sind von [fly-island](https://github.com/flyl1u/fly-island) inspiriert, einige Funktionsideen von
 > [BrimDeck](https://github.com/MoFeng2223/BrimDeck); der gesamte Code ist eigenständig geschrieben.
@@ -245,6 +246,14 @@ Benachrichtigungen kommen aus drei Quellen, alle lokal gelesen:
   Code oder `~/.codex/config.toml` von Codex einen Hook hinzu (vorher gesichert, per Klick entfernbar); ist eine Aufgabe
   fertig oder braucht sie eine Freigabe, meldet er das per `curl` an `127.0.0.1:47900` (mit zufälligem Token).
 
+## Zwischenablage-Verlauf
+
+- Kopierte Texte und Bilder (Screenshots usw.) stehen zeitlich geordnet auf der Seite „Zwischenablage“ des Panels, angeheftete oben; denselben Inhalt erneut kopieren schiebt ihn nur nach oben.
+- Ein Klick auf einen Eintrag legt ihn nur wieder in die Zwischenablage – einfügen Sie selbst mit Strg+V. Mit der Maus über einem Eintrag lässt er sich anheften oder löschen; oben ist die Suche.
+- Einstellungen → Zwischenablage: Bilder mit aufzeichnen, den Verlauf auf der Festplatte dieses PCs speichern (mit dem Schlüssel des aktuellen Windows-Kontos verschlüsselt, bleibt nach Neustart) oder nur im Speicher, wie viele Tage und Einträge behalten werden. Angeheftete Einträge werden nie automatisch entfernt.
+- Passwortmanager wie Bitwarden, KeePass und 1Password markieren kopierte Passwörter als „nicht aufzeichnen“; solche Inhalte werden standardmäßig übersprungen.
+- Ein Zwischenablage-Symbol am rechten Ende der Kapsel hüpft bei jeder neuen Kopie (abschaltbar unter Einstellungen → Eingeklappte Ansicht).
+
 ## Leck-Warnungen
 
 Die Bibliothek „sollte über Proxy“ = eine eingebaute Liste gängiger Dienste (~140 Hauptdomains) + die gfw-Liste (täglich
@@ -281,6 +290,8 @@ Mediensteuerung von Windows ohne Netzwerkzugriff. Auch Benachrichtigungen greife
 nur im Arbeitsspeicher, Nachrichtentexte werden nie auf die Festplatte oder ins Protokoll geschrieben (und standardmäßig
 nicht auf der Insel gezeigt); der Loopback-Port `127.0.0.1:47900` nimmt nur Aufrufe der KI-Hooks mit Token an. Das Geheimnis
 des mihomo-Controllers wird zur Laufzeit aus dessen Konfiguration gelesen und nie gespeichert oder weitergegeben.
+
+Der Zwischenablage-Verlauf geht nie ins Internet: Einträge bleiben auf diesem PC (`%LOCALAPPDATA%\MicaBar\clipboard`, verschlüsselt) oder nur im Speicher und nie im Protokoll.
 
 ## Aus dem Quellcode bauen
 

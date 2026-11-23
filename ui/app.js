@@ -46,7 +46,7 @@ for (const el of document.querySelectorAll("[data-do='layout-edit']")) el.textCo
 // ---------- settings ----------
 
 let S = null; // settings document from the backend
-// redraw counters for the once-a-minute "perf" log line (declared first: used during start-up)
+// redraw counters for the "perf" log line (every 10 minutes) (declared first: used during start-up)
 var JSPERF = { pill: 0, list: 0, snap: 0, snapMs: 0, glass: 0, glassMs: 0, viz: 0, raf: 0 };
 // animation frames the page asks for (a loop that never stops keeps the GPU process busy)
 {
@@ -5310,7 +5310,7 @@ listen("game", (e) => {
 // cursor resting on the collapsed (click-through) pill: let the window below show through
 listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded));
 
-// self-measurement (one log line a minute): how often the page redraws, and the time spent
+// self-measurement (one log line every 10 minutes): how often the page redraws, and the time spent
 setInterval(() => {
   const p = JSPERF;
   // CSS animations / transitions running right now, by name
@@ -5323,7 +5323,7 @@ setInterval(() => {
   const anims = Object.entries(run).map(([k, v]) => (v > 1 ? `${k}x${v}` : k)).join(" ") || "none";
   invoke("log_js", { msg: `perf ${MANAGER ? "manager" : "island"}: pill ${p.pill}, list ${p.list}, snapshots ${p.snap} (${p.snapMs.toFixed(0)} ms), glass ${p.glass} (${p.glassMs.toFixed(0)} ms), bars ${p.viz}, raf ${p.raf}, anims ${anims}, heap ${performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) + "M" : "?"}` }).catch(() => {});
   for (const k in p) p[k] = 0;
-}, 60_000);
+}, 600_000);
 
 let snapErr = 0;
 listen("snapshot", (e) => {

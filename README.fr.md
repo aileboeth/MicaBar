@@ -54,6 +54,7 @@ connexion et par quel nœud proxy — et décider sur-le-champ si elle passe par
   clavier ; ne gêne pas les jeux en plein écran ; animations fluides qui suivent le réglage d’animation de Windows.
 - **10 langues d’interface** : 简体中文, 繁體中文, English, 日本語, 한국어, Русский, Español, Português (Brasil),
   Français, Deutsch — suit la langue d’affichage de Windows par défaut.
+- **Historique du presse-papiers** : le texte et les images copiés sont gardés sur la page « Presse-papiers » de l’îlot ; un clic les recopie. Recherche, épinglage, nettoyage automatique par âge et par nombre ; ce qu’un gestionnaire de mots de passe marque comme privé n’est pas enregistré.
 
 > L’apparence et l’interaction s’inspirent de [fly-island](https://github.com/flyl1u/fly-island), certaines idées de
 > fonctionnalités de [BrimDeck](https://github.com/MoFeng2223/BrimDeck) ; tout le code est écrit de manière indépendante.
@@ -248,6 +249,14 @@ Les notifications viennent de trois sources, toutes lues localement :
   Claude Code ou `~/.codex/config.toml` de Codex (sauvegarde préalable, retrait en un clic) ; quand une tâche se termine ou
   attend un accord, il prévient `127.0.0.1:47900` avec `curl` (avec un jeton aléatoire).
 
+## Historique du presse-papiers
+
+- Le texte et les images copiés (captures d’écran, etc.) s’affichent par ordre chronologique sur la page « Presse-papiers » du panneau, les éléments épinglés en haut ; recopier le même contenu le remonte simplement en haut.
+- Un clic sur un élément le remet seulement dans le presse-papiers — vous collez vous-même avec Ctrl+V. Survolez un élément pour l’épingler ou le supprimer ; la recherche est en haut.
+- Réglages → Presse-papiers : enregistrer aussi les images, garder l’historique sur le disque de ce PC (chiffré avec la clé du compte Windows actuel, conservé après redémarrage) ou en mémoire seulement, combien de jours et d’éléments conserver. Les éléments épinglés ne sont jamais supprimés automatiquement.
+- Les gestionnaires de mots de passe comme Bitwarden, KeePass et 1Password marquent les mots de passe copiés « ne pas enregistrer » ; ce contenu est ignoré par défaut.
+- Une icône de presse-papiers au bout de la capsule rebondit à chaque nouvelle copie (désactivable dans Réglages → Aspect replié).
+
 ## Alertes de fuite
 
 La bibliothèque « doit passer par le proxy » = une liste intégrée de services courants (~140 domaines principaux) + la
@@ -285,6 +294,8 @@ contrôles multimédias de Windows sans requête réseau. Les notifications non 
 texte des messages n’est jamais écrit sur le disque ni dans le journal (et n’est pas affiché sur l’îlot par défaut) ; le
 port loopback `127.0.0.1:47900` n’accepte que les appels des hooks IA portant le jeton. Le secret du contrôleur mihomo est
 lu dans sa configuration à l’exécution et n’est jamais enregistré ni transmis.
+
+L’historique du presse-papiers ne se connecte jamais à Internet : les éléments restent sur ce PC (`%LOCALAPPDATA%\MicaBar\clipboard`, chiffré) ou en mémoire seulement, et jamais dans le journal.
 
 ## Compiler depuis les sources
 

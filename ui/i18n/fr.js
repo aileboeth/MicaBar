@@ -1023,7 +1023,7 @@ I18N.add("fr", {
 "还没有复制过东西": "Rien copié pour l’instant",
 "最近": "Récents",
 "正在读取剪贴板历史…": "Lecture de l’historique du presse-papiers…",
-"剪贴板历史已关闭（设置 → 剪贴板）": "L’historique du presse-papiers est désactivé (Paramètres → Presse-papiers)",
+"剪贴板历史已关闭（设置 → 剪贴板）": "L’historique du presse-papiers est désactivé (Réglages → Presse-papiers)",
 "保留 {0} 天、最多 {1} 条": "conservé {0} jours, {1} éléments au plus",
 "最多 {0} 条": "{0} éléments au plus",
 "只在内存": "en mémoire seulement",

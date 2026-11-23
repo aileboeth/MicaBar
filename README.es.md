@@ -53,6 +53,7 @@ cada conexión y por qué nodo de proxy, y decide ahí mismo si va por el proxy 
   animaciones de Windows.
 - **10 idiomas de interfaz**: 简体中文, 繁體中文, English, 日本語, 한국어, Русский, Español, Português (Brasil),
   Français, Deutsch — sigue el idioma de pantalla de Windows por defecto.
+- **Historial del portapapeles**: el texto y las imágenes que copias se guardan en la página «Portapapeles» de la isla; un clic las copia de nuevo. Búsqueda, fijar, limpieza automática por antigüedad y cantidad; no se guarda lo que un gestor de contraseñas marca como privado.
 
 > El aspecto y la interacción se inspiran en [fly-island](https://github.com/flyl1u/fly-island), algunas ideas de
 > funciones en [BrimDeck](https://github.com/MoFeng2223/BrimDeck); todo el código está escrito de forma independiente.
@@ -240,6 +241,14 @@ Las notificaciones vienen de tres sitios, todos leídos en local:
   Claude Code o `~/.codex/config.toml` de Codex (con copia previa, se quita con un clic); cuando una tarea termina o
   necesita aprobación, avisa a `127.0.0.1:47900` con `curl` (con un token aleatorio).
 
+## Historial del portapapeles
+
+- El texto y las imágenes copiadas (capturas, etc.) aparecen por orden de tiempo en la página «Portapapeles» del panel, con las fijadas arriba; copiar otra vez lo mismo solo lo sube arriba.
+- Al hacer clic en una entrada solo vuelve al portapapeles: pegas tú con Ctrl+V. Pasa el ratón por una entrada para fijarla o borrarla; arriba puedes buscar.
+- Ajustes → Portapapeles: guardar también imágenes, guardar el historial en el disco de este PC (cifrado con la clave de la cuenta de Windows actual, sigue tras reiniciar) o solo en memoria, cuántos días y cuántas entradas conservar. Las fijadas nunca se borran automáticamente.
+- Los gestores de contraseñas como Bitwarden, KeePass y 1Password marcan las contraseñas copiadas como «no guardar»; ese contenido se omite por defecto.
+- Un icono de portapapeles al final de la cápsula salta con cada copia nueva (se desactiva en Ajustes → Aspecto contraído).
+
 ## Alertas de fuga
 
 La biblioteca «debería ir por proxy» = una lista integrada de servicios comunes (~140 dominios principales) + la lista
@@ -277,6 +286,8 @@ controles multimedia de Windows sin conectarse a la red. Las notificaciones tamp
 solo en memoria, el texto de los mensajes nunca se escribe en disco ni en el registro (y por defecto no se muestra en la
 isla); el puerto loopback `127.0.0.1:47900` solo acepta las llamadas de los hooks de IA con el token. El secreto del
 controlador de mihomo se lee de su configuración en tiempo de ejecución y nunca se guarda ni se envía.
+
+El historial del portapapeles nunca se conecta a internet: las entradas se quedan en este PC (`%LOCALAPPDATA%\MicaBar\clipboard`, cifrado) o solo en memoria, y nunca en el registro.
 
 ## Compilar desde el código
 

@@ -1,4 +1,4 @@
-//! Self-measurement: CPU time per background part and a few counters, one log line a minute
+//! Self-measurement: CPU time per background part and a few counters, one log line every 10 minutes
 //! ("perf: …"), plus the WebView2 processes (the page) and memory. Cheap: a part records its
 //! thread's CPU total (one GetThreadTimes call) when it goes round its loop.
 
@@ -86,14 +86,14 @@ fn tree() -> Vec<(u32, String)> {
     out
 }
 
-/// Starts the once-a-minute line.
+/// Starts the line every 10 minutes (percentages are averages over that time).
 pub fn start() {
     std::thread::spawn(|| {
         let mut prev_threads: HashMap<u32, u64> = HashMap::new();
         let mut prev_procs: HashMap<u32, u64> = HashMap::new();
         let mut at = Instant::now();
         loop {
-            std::thread::sleep(Duration::from_secs(60));
+            std::thread::sleep(Duration::from_secs(600));
             let wall = at.elapsed().as_secs_f64() * 1e7; // in 100 ns
             at = Instant::now();
             let pct = |d: u64| d as f64 / wall * 100.0;
