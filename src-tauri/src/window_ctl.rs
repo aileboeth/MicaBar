@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_LBUTTON, VK_MBUTTON, VK_MENU, VK_RBUTTON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, IsWindow, SetForegroundWindow,
+    GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow,
     SetWindowPos, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, WM_HOTKEY,
 };
 
@@ -213,7 +213,7 @@ fn foreground_is_maximized(own: isize) -> bool {
         if fg.is_null() || fg as isize == own {
             return false;
         }
-        if IsZoomed(fg) == 0 {
+        if IsZoomed(fg) == 0 || IsWindowVisible(fg) == 0 || cloaked(fg) {
             return false;
         }
         let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
@@ -235,6 +235,13 @@ fn foreground_is_fullscreen(own: isize) -> bool {
         if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
             return false;
         }
+        // not on screen: minimized, hidden, or cloaked by the shell. The input method's
+        // "Windows Input Experience" CoreWindow covers the whole monitor while cloaked and can hold
+        // the focus after Win+D; counting it kept the island in game mode (click-through) long
+        // after the game was gone.
+        if IsIconic(fg) != 0 || IsWindowVisible(fg) == 0 || cloaked(fg) {
+            return false;
+        }
         let mut r: RECT = std::mem::zeroed();
         if GetWindowRect(fg, &mut r) == 0 {
             return false;
@@ -247,6 +254,34 @@ fn foreground_is_fullscreen(own: isize) -> bool {
         }
         let m = mi.rcMonitor;
         r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+fn cloaked(h: HWND) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    let mut v: u32 = 0;
+    let hr = unsafe { DwmGetWindowAttribute(h, DWMWA_CLOAKED as u32, &mut v as *mut u32 as *mut _, 4) };
+    hr == 0 && v != 0
+}
+
+/// The foreground window for the log: "exe | class | rect", so a wrong game-mode switch can be
+/// traced to the window that caused it.
+fn describe_foreground() -> String {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() {
+            return "none".into();
+        }
+        let mut cls = [0u16; 128];
+        let n = GetClassNameW(fg, cls.as_mut_ptr(), 128);
+        let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, &mut pid);
+        let exe = crate::procinfo::image_path(pid).map(|p| p.rsplit('\\').next().unwrap_or("").to_string()).unwrap_or_else(|| format!("pid {pid}"));
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(fg, &mut r);
+        format!("{exe} | {cls} | {},{} {}x{}{}{}", r.left, r.top, r.right - r.left, r.bottom - r.top, if IsIconic(fg) != 0 { " min" } else { "" }, if cloaked(fg) { " cloaked" } else { "" })
     }
 }
 
@@ -426,7 +461,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         if n % 33 == 0 {
             let fs = foreground_is_fullscreen(own);
             if ws.game.swap(fs, Ordering::SeqCst) != fs {
-                log(format!("fullscreen foreground: {fs}"));
+                log(format!("fullscreen foreground: {fs} ({})", describe_foreground()));
                 let _ = app.emit("game", fs);
             }
             // fullscreen behaviour: keep the pill, or hide the island completely

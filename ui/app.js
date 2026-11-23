@@ -284,7 +284,8 @@ function setMaximized(v) {
 function shape() {
   const dock = sget("shape.dock", "top");
   let style = sget("shape.style", "capsule");
-  if (maximized && sget("shape.lineWhenMaximized", false) && Date.now() >= maxHint.until) style = "line";
+  // a fullscreen game / video counts too (no hint first: nobody reads the pill mid-game)
+  if ((maximized || gameOn) && sget("shape.lineWhenMaximized", false) && (gameOn || Date.now() >= maxHint.until)) style = "line";
   const vertical = dock === "left" || dock === "right";
   if (vertical && style === "capsule") style = "notch"; // a sideways capsule = a notch on that edge
   return { style, dock, vertical };
@@ -1158,7 +1159,7 @@ if (!MANAGER) setInterval(() => { if (!expanded) renderPill(); }, 1000);
 let notes = []; // newest first
 const NOTE_W = 400;
 const nst = { active: [], hover: false, fan: false, timer: 0, h: 0, on: false };
-let gameOn = false;
+var gameOn = false; // var: shape() may run before this line (no TDZ)
 const BELL = "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0";
 // a note without an app icon: the AI tool's mark, else the app's initial
 const NOTE_BRAND = { claude: "brands/claude-tile.svg", codex: "brands/codex.svg" };
@@ -3082,7 +3083,7 @@ const SET_PAGES = {
     ${shapeCardsHtml()}
     ${sSelect("shape.dock", tr("停靠位置"), [["top", tr("屏幕上边")], ["bottom", tr("屏幕下边（任务栏上方）")], ["left", tr("屏幕左边")], ["right", tr("屏幕右边")]], tr("左右两边时，胶囊会变成竖着的刘海；也可以长按岛往屏幕中间拉开，拖到另一条边松手"))}
     ${sSelect("shape.anchor", tr("在这条边上的位置"), [["start", tr("靠左（停靠左右两边时为靠上）")], ["center", tr("居中")], ["end", tr("靠右（停靠左右两边时为靠下）")]], tr("也可以长按岛把它甩过去：展开后长按面板，或按住 Alt 长按收起的胶囊"))}
-    ${sToggle("shape.lineWhenMaximized", tr("前台窗口最大化时缩成指示条"), tr("和岛在同一块屏幕上的最大化窗口在前台时，胶囊 / 刘海临时变成指示条；切到别的窗口就变回来。每次启动后第一次变的时候，胶囊上会先提示一下"))}
+    ${sToggle("shape.lineWhenMaximized", tr("前台窗口最大化或全屏时缩成指示条"), tr("和岛在同一块屏幕上的最大化窗口或全屏程序（游戏、视频）在前台时，胶囊 / 刘海临时变成指示条；切到别的窗口就变回来。每次启动后第一次因最大化变的时候，胶囊上会先提示一下"))}
   </div>
   <div class="s-sec"><div class="s-title">${tr("显示内容")}<span class="s-note">${tr("拖动 ⠿ 调整顺序；宽度放不下时，排在后面的几项和轮换区合成最后一格轮流显示（指示条只显示状态色）")}</span></div>
     ${sDragList("pill.items", PILL_ITEM_LABEL)}
@@ -5142,6 +5143,7 @@ listen("game", (e) => {
   gameOn = !!e.payload;
   island.classList.toggle("game", gameOn);
   if (nst.on) renderNote(); // privacy: hide / show the text
+  if (sget("shape.lineWhenMaximized", false)) { pillLast = ""; renderPill(); applySize(); } // to / from the indicator bar
 });
 // cursor resting on the collapsed (click-through) pill: let the window below show through
 listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded));
