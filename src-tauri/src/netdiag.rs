@@ -678,6 +678,7 @@ fn watch_loop() {
     let mut dns_fail = 0u32;
     let mut good_streak = 0u32;
     loop {
+        crate::perf::tick("netdiag");
         std::thread::sleep(Duration::from_secs(1));
         if !crate::settings::bool_at("diag.on", true) {
             continue;

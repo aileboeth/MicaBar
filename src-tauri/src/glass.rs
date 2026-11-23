@@ -22,13 +22,57 @@ use crate::window_ctl::WinState;
 
 pub type FrameChannel = Arc<Mutex<Option<Channel<InvokeResponseBody>>>>;
 
-/// Minimum time between frames, by resource profile (saver 10 fps, balanced 30, smooth 60).
+/// Minimum time between frames, by resource profile (saver 5 fps, balanced 15, smooth 30): the
+/// backdrop is heavily blurred, more frames only cost CPU / GPU (measured 2026-11-22: 30 fps of a
+/// window-sized frame took ~60% of a core across MicaBar and WebView2).
 fn frame_interval() -> Duration {
     Duration::from_millis(match crate::settings::str_at("general.profile", "balanced").as_str() {
-        "saver" => 100,
-        "smooth" => 16,
-        _ => 33,
+        "saver" => 200,
+        "smooth" => 33,
+        _ => 66,
     })
+}
+
+/// Physical px around the island that are captured too: the blur (3 box passes of BLUR_RADIUS
+/// quarter-px) reaches that far, so the visible part has no clamped edge.
+const CROP_MARGIN: i32 = 3 * BLUR_RADIUS as i32 * 4;
+/// The captured area snaps to this grid (window-relative), so small size changes of the pill
+/// don't restart the capture.
+const CROP_GRID: i32 = 128;
+
+/// The part of the window worth capturing: the island (pill, card or panel) plus the blur margin,
+/// on the grid, inside the window and the monitor.
+fn crop_rect(win: &RECT, island: &crate::window_ctl::Rect, out: &RECT) -> RECT {
+    let lo = |v: i32| v.div_euclid(CROP_GRID) * CROP_GRID;
+    let hi = |v: i32| (v + CROP_GRID - 1).div_euclid(CROP_GRID) * CROP_GRID;
+    let l = lo(island.x as i32 - CROP_MARGIN).max(0);
+    let t = lo(island.y as i32 - CROP_MARGIN).max(0);
+    let r = hi((island.x + island.w) as i32 + CROP_MARGIN);
+    let b = hi((island.y + island.h) as i32 + CROP_MARGIN);
+    RECT {
+        left: (win.left + l).max(out.left),
+        top: (win.top + t).max(out.top),
+        right: (win.left + r).min(win.right).min(out.right),
+        bottom: (win.top + b).min(win.bottom).min(out.bottom),
+    }
+}
+
+/// The new frame looks the same as the last one sent (mean difference under one level per
+/// channel, sampled): a blinking caret or a ticking clock behind the blur isn't worth a frame.
+fn similar(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() || a.is_empty() {
+        return false;
+    }
+    let (mut sum, mut n) = (0u64, 0u64);
+    let mut i = 0;
+    while i + 3 < a.len() {
+        for c in 0..3 {
+            sum += (a[i + c] as i32 - b[i + c] as i32).unsigned_abs() as u64;
+        }
+        n += 3;
+        i += 12; // every third pixel
+    }
+    sum < n
 }
 const BLUR_RADIUS: usize = 7; // in quarter-resolution pixels, 3 box passes ≈ gaussian
 
@@ -288,9 +332,13 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
     let mut cap: Option<Capture> = None;
     let mut last_sent = Instant::now() - frame_interval();
     let mut last_region = RECT::default();
+    let mut last_crop: Option<RECT> = None;
+    // the last frame sent, before blurring (to skip frames that look the same)
+    let mut last_raw: Vec<u8> = Vec::new();
     let mut fail_until: Option<Instant> = None;
     let mut logged_err = false;
     loop {
+        crate::perf::tick("glass");
         let paused = ws.game.load(Ordering::SeqCst)
             || ws.hidden.load(Ordering::SeqCst)
             || ws.free.load(Ordering::SeqCst)
@@ -326,6 +374,7 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
                     logged_err = false;
                     cap = Some(c);
                     last_region = RECT::default();
+                    last_crop = None;
                 }
                 Err(e) => {
                     if !logged_err {
@@ -344,21 +393,42 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
             continue;
         }
         let c = cap.as_mut().unwrap();
-        match c.frame(region, watch, force) {
+        // only the island's part of the window (the pill alone is a thin strip of it)
+        let crop = crop_rect(&region, &hr, &c.out);
+        let same_crop = last_crop.map(|l| l.left == crop.left && l.top == crop.top && l.right == crop.right && l.bottom == crop.bottom).unwrap_or(false);
+        if !same_crop && last_crop.is_some() {
+            // expanded / collapsed / grew: a new duplication delivers a full frame at once
+            cap = None;
+            continue;
+        }
+        match c.frame(crop, watch, force || !same_crop) {
             Ok(Some((w, h, mut px))) => {
                 last_region = region;
+                if same_crop && similar(&px, &last_raw) {
+                    continue;
+                }
+                last_crop = Some(crop);
+                last_raw.clear();
+                last_raw.extend_from_slice(&px);
                 blur(&mut px, w as usize, h as usize, BLUR_RADIUS);
                 finish(&mut px);
                 let wait = frame_interval().saturating_sub(last_sent.elapsed());
                 if !wait.is_zero() {
                     std::thread::sleep(wait);
                 }
-                let mut msg = Vec::with_capacity(8 + px.len());
-                msg.extend_from_slice(&w.to_le_bytes());
-                msg.extend_from_slice(&h.to_le_bytes());
+                // header: piece size, its offset and the whole window (all in quarter px)
+                let ox = ((crop.left - region.left) >> 2) as u32;
+                let oy = ((crop.top - region.top) >> 2) as u32;
+                let ww = ((region.right - region.left) >> 2) as u32;
+                let wh = ((region.bottom - region.top) >> 2) as u32;
+                let mut msg = Vec::with_capacity(24 + px.len());
+                for v in [w, h, ox, oy, ww, wh] {
+                    msg.extend_from_slice(&v.to_le_bytes());
+                }
                 msg.extend_from_slice(&px);
                 if let Some(ch) = chan.lock().unwrap().as_ref() {
                     let _ = ch.send(InvokeResponseBody::Raw(msg));
+                    crate::perf::count("glass frames", 1);
                 }
                 last_sent = Instant::now();
             }

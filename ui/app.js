@@ -46,6 +46,8 @@ for (const el of document.querySelectorAll("[data-do='layout-edit']")) el.textCo
 // ---------- settings ----------
 
 let S = null; // settings document from the backend
+// redraw counters for the once-a-minute "perf" log line (declared first: used during start-up)
+var JSPERF = { pill: 0, list: 0, snap: 0, snapMs: 0, glass: 0, glassMs: 0, viz: 0 };
 const sget = (path, dflt) => path.split(".").reduce((o, k) => (o == null ? o : o[k]), S) ?? dflt;
 const itemOn = (listPath, id) => (sget(listPath, []) || []).some((i) => i.id === id && i.on);
 
@@ -553,6 +555,7 @@ function updateViz() {
   if (!want) document.querySelectorAll(".mviz i").forEach((b) => (b.style.transform = ""));
 }
 listen("viz", (e) => {
+  JSPERF.viz++;
   const b = e.payload || [];
   document.querySelectorAll(".mviz").forEach((el) => {
     const bars = el.children;
@@ -1095,6 +1098,7 @@ function renderPill() {
   if (full !== pillLast) {
     pillLast = full;
     pill.innerHTML = full;
+    JSPERF.pill++;
   }
   if (!expanded) applySize();
   updateViz();
@@ -3772,6 +3776,7 @@ function renderList(force = false) {
 }
 
 function renderListNow(force) {
+  JSPERF.list++;
   const list = $("list");
   if (listPress && !force) return;
   if (tab === "settings") {
@@ -5300,11 +5305,21 @@ listen("game", (e) => {
 // cursor resting on the collapsed (click-through) pill: let the window below show through
 listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded));
 
+// self-measurement (one log line a minute): how often the page redraws, and the time spent
+setInterval(() => {
+  const p = JSPERF;
+  invoke("log_js", { msg: `perf ${MANAGER ? "manager" : "island"}: pill ${p.pill}, list ${p.list}, snapshots ${p.snap} (${p.snapMs.toFixed(0)} ms), glass ${p.glass} (${p.glassMs.toFixed(0)} ms), bars ${p.viz}, heap ${performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) + "M" : "?"}` }).catch(() => {});
+  for (const k in p) p[k] = 0;
+}, 60_000);
+
 let snapErr = 0;
 listen("snapshot", (e) => {
+  const t0 = performance.now();
   try { onSnapshot(e); } catch (err) {
     if (snapErr++ < 3) invoke("log_js", { msg: `${MANAGER ? "manager" : "island"} snapshot error: ${err && err.stack || err}` }).catch(() => {});
   }
+  JSPERF.snap++;
+  JSPERF.snapMs += performance.now() - t0;
 });
 function onSnapshot(e) {
   snap = e.payload;
@@ -5338,12 +5353,12 @@ const gctx = glassCanvas.getContext("2d", { alpha: false });
 let glassFrames = 0;
 
 // Darker tint over bright backgrounds keeps text readable; lighter over dark ones keeps it glassy.
-function adaptTint(px, w, h) {
-  const vw = window.innerWidth || 1;
+// px is a piece (w x h) of the window-sized backdrop (W x H), at ox, oy (all in quarter px)
+function adaptTint(px, w, h, ox, oy, W, H) {
   const r = islandRect(expanded);
-  const sx = w / vw, sy = h / (window.innerHeight || 1);
-  const x0 = Math.max(0, Math.floor(r.x * sx)), x1 = Math.min(w, Math.ceil((r.x + r.w) * sx));
-  const y0 = Math.max(0, Math.floor(r.y * sy)), y1 = Math.min(h, Math.ceil((r.y + r.h) * sy));
+  const sx = W / (window.innerWidth || 1), sy = H / (window.innerHeight || 1);
+  const x0 = Math.max(0, Math.floor(r.x * sx) - ox), x1 = Math.min(w, Math.ceil((r.x + r.w) * sx) - ox);
+  const y0 = Math.max(0, Math.floor(r.y * sy) - oy), y1 = Math.min(h, Math.ceil((r.y + r.h) * sy) - oy);
   let sum = 0, n = 0;
   for (let y = y0; y < y1; y += 3) {
     for (let x = x0; x < x1; x += 3) {
@@ -5392,21 +5407,26 @@ function legible(px) {
 function startGlass() {
   const ch = new T.core.Channel();
   ch.onmessage = (msg) => {
+    const t0 = performance.now();
     const ab = msg instanceof ArrayBuffer ? msg : msg?.buffer instanceof ArrayBuffer ? msg.buffer : new Uint8Array(msg).buffer;
     const dv = new DataView(ab);
-    const w = dv.getUint32(0, true), h = dv.getUint32(4, true);
-    if (!w || !h || ab.byteLength < 8 + w * h * 4) return;
-    const px = new Uint8ClampedArray(ab, 8, w * h * 4);
-    if (glassCanvas.width !== w || glassCanvas.height !== h) {
-      glassCanvas.width = w;
-      glassCanvas.height = h;
+    // header: the piece's size, where it sits, the whole window (quarter px); only the island's
+    // part of the window is sent, the canvas keeps the window's size
+    const [w, h, ox, oy, W, H] = [0, 4, 8, 12, 16, 20].map((o) => dv.getUint32(o, true));
+    if (!w || !h || !W || !H || ab.byteLength < 24 + w * h * 4) return;
+    const px = new Uint8ClampedArray(ab, 24, w * h * 4);
+    if (glassCanvas.width !== W || glassCanvas.height !== H) {
+      glassCanvas.width = W;
+      glassCanvas.height = H;
     }
     legible(px);
-    gctx.putImageData(new ImageData(px, w, h), 0, 0);
-    adaptTint(px, w, h);
+    gctx.putImageData(new ImageData(px, w, h), ox, oy);
+    adaptTint(px, w, h, ox, oy, W, H);
+    JSPERF.glass++;
+    JSPERF.glassMs += performance.now() - t0;
     if (glassFrames++ === 0) {
       island.classList.add("glass");
-      invoke("log_js", { msg: `glass first frame ${w}x${h}` }).catch(() => {});
+      invoke("log_js", { msg: `glass first frame ${w}x${h} at ${ox},${oy} of ${W}x${H}` }).catch(() => {});
     }
   };
   invoke("start_glass", { onFrame: ch }).catch((e) => invoke("log_js", { msg: `start_glass failed: ${e}` }));

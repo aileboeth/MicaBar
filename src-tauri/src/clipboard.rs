@@ -545,6 +545,7 @@ fn preview_of(t: &str) -> String {
 }
 
 fn on_update(hwnd: HWND) {
+    crate::perf::tick("clipboard");
     if !settings::bool_at("clip.on", true) {
         return;
     }

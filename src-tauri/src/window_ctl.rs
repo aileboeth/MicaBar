@@ -449,6 +449,9 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
     loop {
         std::thread::sleep(Duration::from_millis(15));
         n += 1;
+        if n % 4 == 0 {
+            crate::perf::tick("hover");
+        }
         // placement: every 2 s, or every 0.3 s when following the cursor across monitors
         let follow = n % 20 == 0 && !ws.expanded.load(Ordering::SeqCst) && crate::settings::str_at("general.monitor", "primary") == "cursor";
         if (n % 130 == 0 || follow) && !ws.grab.load(Ordering::SeqCst) {

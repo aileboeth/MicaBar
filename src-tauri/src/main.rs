@@ -19,6 +19,7 @@ mod media;
 mod mihomo;
 mod netdiag;
 mod notify;
+mod perf;
 mod procinfo;
 mod proxy;
 mod settings;
@@ -70,6 +71,23 @@ pub fn log(msg: impl AsRef<str>) {
         let t = now_ms();
         let _ = writeln!(f, "[{}] {}", fmt_time(t), msg.as_ref());
     }
+}
+
+/// Logs a recurring status line only when it changed, or every 30 minutes (the exit checks ran
+/// once a minute and filled most of the log with the same two lines).
+fn log_changed(key: &str, msg: String) {
+    static LAST: Mutex<Option<HashMap<String, (String, u64)>>> = Mutex::new(None);
+    let now = now_ms();
+    let mut g = LAST.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    if let Some((last, at)) = m.get(key) {
+        if *last == msg && now.saturating_sub(*at) < 30 * 60_000 {
+            return;
+        }
+    }
+    m.insert(key.to_string(), (msg.clone(), now));
+    drop(g);
+    log(msg);
 }
 
 fn now_ms() -> u64 {
@@ -1242,7 +1260,7 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
     } else {
         None
     };
-    log(format!(
+    log_changed("exit", format!(
         "exit check: direct={:?}/{:?} via={:?} node={:?} err={:?}; proxy={:?}",
         direct.ip,
         direct.cc,
@@ -1283,7 +1301,7 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
         }
     }
     if !groups.is_empty() {
-        log(format!(
+        log_changed("groups", format!(
             "group exits: {}",
             groups.iter().map(|g| format!("{}={:?}", g.r.group.as_deref().unwrap_or(""), g.r.ip)).collect::<Vec<_>>().join(", ")
         ));
@@ -3015,6 +3033,7 @@ fn main() {
             ai_loop(handle.clone(), shared.clone());
             notify::start(handle.clone());
             clipboard::start(handle.clone());
+            perf::start();
             let sh = shared.clone();
             netdiag::start(Arc::new(move || diag_info(&sh)));
             let sh = shared.clone();
@@ -3056,8 +3075,10 @@ fn main() {
                 sh.exit_trigger.store(true, Ordering::SeqCst);
                 loop {
                     let t = Instant::now();
+                    crate::perf::tick("collector");
                     let snap = col.tick(&sh);
                     let _ = h.emit("snapshot", &snap);
+                    crate::perf::count("snapshots", 1);
                     *sh.last.lock().unwrap() = Some(snap);
                     let spent = t.elapsed();
                     let period = if settings::str_at("general.profile", "balanced") == "saver" { 2000 } else { 1000 };

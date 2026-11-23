@@ -118,6 +118,7 @@ pub fn start(state: Shared, on_change: impl Fn(Option<NowPlaying>) + Send + 'sta
         let (mut last_key, mut last_cover, mut prev_cover, mut rereads) = (String::new(), None, None, 0u32);
         let mut fails = 0u32;
         loop {
+            crate::perf::tick("media");
             let on = crate::settings::bool_at("media.on", true);
             if !on {
                 if state.lock().unwrap().take().is_some() {

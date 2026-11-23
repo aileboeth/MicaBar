@@ -1,0 +1,137 @@
+//! Self-measurement: CPU time per background part and a few counters, one log line a minute
+//! ("perf: …"), plus the WebView2 processes (the page) and memory. Cheap: a part records its
+//! thread's CPU total (one GetThreadTimes call) when it goes round its loop.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+use windows_sys::Win32::System::Threading::{GetCurrentThread, GetCurrentThreadId, GetProcessTimes, GetThreadTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+use crate::log;
+
+/// thread id -> (part, CPU total in 100 ns)
+static THREADS: Mutex<Option<HashMap<u32, (&'static str, u64)>>> = Mutex::new(None);
+/// counter name -> count since the last line
+static COUNTS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
+
+fn ft(f: &FILETIME) -> u64 {
+    ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64
+}
+
+/// The calling thread works for `part`: records its CPU time so far.
+pub fn tick(part: &'static str) {
+    let cpu = unsafe {
+        let (mut a, mut b, mut k, mut u) = std::mem::zeroed::<(FILETIME, FILETIME, FILETIME, FILETIME)>();
+        if GetThreadTimes(GetCurrentThread(), &mut a, &mut b, &mut k, &mut u) == 0 {
+            return;
+        }
+        ft(&k) + ft(&u)
+    };
+    let id = unsafe { GetCurrentThreadId() };
+    THREADS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, (part, cpu));
+}
+
+pub fn count(name: &'static str, n: u64) {
+    *COUNTS.lock().unwrap().get_or_insert_with(HashMap::new).entry(name).or_insert(0) += n;
+}
+
+unsafe fn proc_cpu_mem(pid: u32) -> Option<(u64, u64)> {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+    let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if h.is_null() {
+        return None;
+    }
+    let (mut a, mut b, mut k, mut u) = std::mem::zeroed::<(FILETIME, FILETIME, FILETIME, FILETIME)>();
+    let cpu = if GetProcessTimes(h, &mut a, &mut b, &mut k, &mut u) != 0 { ft(&k) + ft(&u) } else { 0 };
+    let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+    m.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+    let private = if K32GetProcessMemoryInfo(h, &mut m as *mut _ as *mut _, m.cb) != 0 { m.PrivateUsage as u64 } else { 0 };
+    CloseHandle(h);
+    Some((cpu, private))
+}
+
+/// Our process and every process below it (the WebView2 browser, GPU, renderer…): pid -> exe.
+fn tree() -> Vec<(u32, String)> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let mut all = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap.is_null() || snap as isize == -1 {
+            return Vec::new();
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            all.push((e.th32ProcessID, e.th32ParentProcessID, String::from_utf16_lossy(&e.szExeFile[..n])));
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+    }
+    let me = std::process::id();
+    let mut out = vec![(me, "micabar".to_string())];
+    let mut i = 0;
+    while i < out.len() {
+        let p = out[i].0;
+        for (pid, parent, exe) in &all {
+            if *parent == p && *pid != p && !out.iter().any(|(x, _)| x == pid) {
+                out.push((*pid, exe.trim_end_matches(".exe").to_string()));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Starts the once-a-minute line.
+pub fn start() {
+    std::thread::spawn(|| {
+        let mut prev_threads: HashMap<u32, u64> = HashMap::new();
+        let mut prev_procs: HashMap<u32, u64> = HashMap::new();
+        let mut at = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            let wall = at.elapsed().as_secs_f64() * 1e7; // in 100 ns
+            at = Instant::now();
+            let pct = |d: u64| d as f64 / wall * 100.0;
+            // parts of MicaBar's own process
+            let threads = THREADS.lock().unwrap().clone().unwrap_or_default();
+            let mut parts: HashMap<&str, u64> = HashMap::new();
+            for (id, (part, cpu)) in &threads {
+                let d = cpu.saturating_sub(*prev_threads.get(id).unwrap_or(cpu));
+                *parts.entry(part).or_insert(0) += d;
+                prev_threads.insert(*id, *cpu);
+            }
+            // processes: MicaBar + the WebView2 tree
+            let mut procs: Vec<(String, u64, u64)> = Vec::new();
+            let mut alive = HashMap::new();
+            for (pid, exe) in tree() {
+                if let Some((cpu, mem)) = unsafe { proc_cpu_mem(pid) } {
+                    let d = prev_procs.get(&pid).map(|p| cpu.saturating_sub(*p)).unwrap_or(0);
+                    alive.insert(pid, cpu);
+                    procs.push((exe, d, mem));
+                }
+            }
+            prev_procs = alive;
+            let own = procs.first().map(|p| p.1).unwrap_or(0);
+            let tracked: u64 = parts.values().sum();
+            let mut pv: Vec<(&str, u64)> = parts.into_iter().filter(|(_, d)| *d > 0).collect();
+            pv.sort_by(|a, b| b.1.cmp(&a.1));
+            let mut line = format!("perf: micabar {:.1}% [", pct(own));
+            line += &pv.iter().map(|(p, d)| format!("{p} {:.1}%", pct(*d))).collect::<Vec<_>>().join(", ");
+            line += &format!(", other {:.1}%]", pct(own.saturating_sub(tracked)));
+            let web: Vec<String> = procs.iter().skip(1).filter(|p| p.2 > 0).map(|(e, d, m)| format!("{} {:.1}%/{}M", e.replace("msedgewebview2", "wv"), pct(*d), m / 1_048_576)).collect();
+            line += &format!(" | mem {}M | {}", procs.first().map(|p| p.2 / 1_048_576).unwrap_or(0), web.join(", "));
+            let counts = COUNTS.lock().unwrap().take().unwrap_or_default();
+            if !counts.is_empty() {
+                let mut cv: Vec<_> = counts.into_iter().collect();
+                cv.sort();
+                line += &format!(" | {}", cv.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
+            }
+            log(line);
+        }
+    });
+}

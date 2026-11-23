@@ -928,6 +928,7 @@ fn toast_thread() {
         let mut failed = false;
         loop {
             std::thread::sleep(Duration::from_millis(900));
+            crate::perf::tick("notify");
             if !settings::bool_at("notify.on", true) || !settings::bool_at("notify.toast", true) {
                 last_id = None; // start fresh when switched back on (no flood of old toasts)
                 continue;

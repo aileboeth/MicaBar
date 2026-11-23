@@ -119,6 +119,8 @@ fn capture(emit: &impl Fn([f32; BANDS])) -> windows::core::Result<()> {
                     out[b] = if target > out[b] { target } else { out[b] * 0.78 + target * 0.22 };
                 }
                 emit(out);
+            crate::perf::tick("music bars");
+            crate::perf::count("bar frames", 1);
             }
             std::thread::sleep(Duration::from_millis(10));
         }

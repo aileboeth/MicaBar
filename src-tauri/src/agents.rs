@@ -195,6 +195,7 @@ fn interrupted(path: &str) -> bool {
 
 fn watch() {
     loop {
+        crate::perf::tick("agents");
         std::thread::sleep(Duration::from_secs(2));
         let now = now_ms();
         let mut changed = false;

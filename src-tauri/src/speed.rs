@@ -76,6 +76,12 @@ pub fn start() -> Result<Counters, String> {
     let provider = Provider::by_guid(KERNEL_NETWORK)
         .any(0x10 | 0x20) // KERNEL_NETWORK_KEYWORD_IPV4 | IPV6
         .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
+            // measured in batches (a busy network sends thousands a second)
+            thread_local!(static N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+            N.with(|n| {
+                let v = n.get() + 1;
+                n.set(if v >= 1000 { crate::perf::tick("etw"); crate::perf::count("etw events", v); 0 } else { v });
+            });
             let id = record.event_id();
             let send = matches!(id, 10 | 26 | 42 | 58);
             let recv = matches!(id, 11 | 27 | 43 | 59);
