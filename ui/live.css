@@ -290,3 +290,32 @@ html.no-anim .lv-chip, html.no-anim .lv-enter, html.no-anim #diag-btn.hot, html.
 #island.vertical .ring-item .mono { font-size: 10px; line-height: 1.1; }
 #island.vertical .ring-item .rg-sub { display: none; }
 #island.vertical #pill .pill-speed { display: grid; grid-template-columns: auto auto; column-gap: 1px; font-size: 10px; line-height: 1.2; }
+
+/* ---------- clipboard history ---------- */
+.clip .viz-head .clip-q { flex: 0 1 180px; min-width: 90px; height: 26px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--ov1); color: var(--text); font: inherit; font-size: 12px; outline: none; }
+.clip .viz-head .clip-q:focus { border-color: var(--accent); }
+.clip-sec { margin: 10px 4px 6px; font-size: 11.5px; color: var(--dim); }
+.clip-list > .clip-sec:first-child { margin-top: 2px; }
+.clip-row { position: relative; padding: 9px 12px 8px; margin-bottom: 6px; border-radius: 14px; background: var(--card); cursor: pointer; transition: background 0.15s ease; font-family: var(--font-ui); }
+.clip-row:hover { background: var(--card-2); }
+.clip-row.pinned { box-shadow: inset 0 0 0 1px var(--ov3); }
+.clip-row.copied { animation: clip-copied 0.6s ease; }
+@keyframes clip-copied { 0% { box-shadow: inset 0 0 0 2px var(--accent); } 100% { box-shadow: inset 0 0 0 2px transparent; } }
+.clip-text { font-size: 13px; line-height: 1.4; color: var(--text); padding-right: 52px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; }
+.clip-pic { padding-right: 52px; }
+.clip-pic img { display: block; max-width: 100%; max-height: 120px; border-radius: 8px; background: repeating-conic-gradient(var(--ov2) 0 25%, transparent 0 50%) 0 0 / 12px 12px; }
+.clip-meta { display: flex; align-items: center; gap: 8px; margin-top: 5px; font-size: 11px; color: var(--dimmer); min-width: 0; }
+.clip-app { display: inline-flex; align-items: center; gap: 4px; min-width: 0; color: var(--dim); }
+.clip-app > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
+.clip-app .app-icon { width: 14px !important; height: 14px !important; border-radius: 3px; }
+.clip-btns { position: absolute; top: 7px; right: 8px; display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s ease; }
+.clip-row:hover .clip-btns, .clip-row.pinned .clip-btns, .clip-btns:focus-within { opacity: 1; }
+.clip-row.pinned:not(:hover) .clip-b:not(.on) { visibility: hidden; }
+.clip-b { width: 22px; height: 22px; border-radius: 50%; border: none; padding: 0; display: grid; place-items: center; background: var(--ov3); color: var(--dim); font-size: 10px; cursor: pointer; }
+.clip-b:hover { color: var(--text); }
+.clip-b.on { color: var(--accent); }
+/* the pill icon; a new copy bounces it */
+.pill-clip { display: inline-flex; align-items: center; color: var(--dim); }
+.pill-clip.pop { animation: clip-pop 0.9s var(--spring, ease) both; color: var(--accent); }
+@keyframes clip-pop { 0% { transform: scale(1); } 25% { transform: scale(1.35) rotate(-8deg); } 55% { transform: scale(0.92) rotate(4deg); } 100% { transform: none; } }
+html.no-anim .pill-clip.pop, html.no-anim .clip-row.copied { animation: none; }

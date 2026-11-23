@@ -3,6 +3,7 @@
 mod agents;
 mod ai;
 mod audio;
+mod clipboard;
 mod conn;
 mod control;
 mod dns;
@@ -1845,6 +1846,10 @@ fn settings_set(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, patch: ser
     }
     let s = settings::update(&patch);
     apply_settings_backend(&app, &state.ws);
+    if patch.get("clip").is_some() {
+        // limits / storage changed: applied off the main thread (it may move files)
+        std::thread::spawn(clipboard::apply_settings);
+    }
     let _ = app.emit("settings", &s);
     Ok(s)
 }
@@ -2572,6 +2577,35 @@ async fn media_control(action: String) -> Result<(), String> {
     .await
 }
 
+// ---------- clipboard history ----------
+// all async: the store may be busy writing an encrypted picture, and sync commands run on the
+// main thread
+
+#[tauri::command]
+async fn clip_list() -> Result<Vec<clipboard::View>, String> {
+    blocking(|| Ok(clipboard::list())).await
+}
+
+#[tauri::command]
+async fn clip_copy(id: u64) -> Result<(), String> {
+    blocking(move || clipboard::copy(id)).await
+}
+
+#[tauri::command]
+async fn clip_pin(id: u64, on: bool) -> Result<(), String> {
+    blocking(move || Ok(clipboard::pin(id, on))).await
+}
+
+#[tauri::command]
+async fn clip_delete(id: u64) -> Result<(), String> {
+    blocking(move || Ok(clipboard::delete(id))).await
+}
+
+#[tauri::command]
+async fn clip_clear(all: bool) -> Result<(), String> {
+    blocking(move || Ok(clipboard::clear(all))).await
+}
+
 // ---------- manager window / layout editing ----------
 
 /// Opens (or focuses) the desktop manager window on a page.
@@ -2908,6 +2942,11 @@ fn main() {
             netdiag_fix,
             firstnet_list,
             firstnet_action,
+            clip_list,
+            clip_copy,
+            clip_pin,
+            clip_delete,
+            clip_clear,
             grab_start,
             grab_free,
             grab_end,
@@ -2975,6 +3014,7 @@ fn main() {
             });
             ai_loop(handle.clone(), shared.clone());
             notify::start(handle.clone());
+            clipboard::start(handle.clone());
             let sh = shared.clone();
             netdiag::start(Arc::new(move || diag_info(&sh)));
             let sh = shared.clone();

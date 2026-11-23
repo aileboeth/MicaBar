@@ -498,6 +498,13 @@ function pillItem(id, target) {
       const u = un.length;
       return `<span class="pill-bell"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${BELL}"/></svg><span class="mono">${u > 99 ? "99+" : u}</span></span>`;
     }
+    case "clip": {
+      if (!sget("clip.on", true)) return "";
+      // the bounce continues across pill rebuilds (negative delay = already that far in)
+      const since = Date.now() - clipPop;
+      const pop = since < 900 ? ` pop" style="animation-delay:-${since}ms` : "";
+      return `<span class="pill-clip${pop}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${CLIP_ICON}"/></svg></span>`;
+    }
     case "exits": {
       // every measured group's exit side by side (just the main exit without a proxy client)
       // one entry per exit IP; the tag names its main group (+N more) only when the IPs differ
@@ -1478,6 +1485,114 @@ function notesPageHtml() {
   return `<div class="viz nc">${head}${body}
     <div class="m-hint">${tr("点一条打开对应的程序。通知只在内存里，重启 MicaBar 后清空；消息内容不写硬盘、不写日志。")}</div></div>`;
 }
+
+// ---------- clipboard history (page "clip") ----------
+// Text and pictures copied anywhere, newest first, pinned ones on top. A click only puts the entry
+// back on the clipboard. The list is rebuilt when the history changes, not on every snapshot.
+const CLIP_ICON = "M9 4h6v3H9zM9 5.5H6.5A1.5 1.5 0 0 0 5 7v12.5A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V7a1.5 1.5 0 0 0-1.5-1.5H15M9 12h6M9 16h4";
+const PIN_ICON = "M12 17v5M9 3h6l-1 6 3 3H7l3-3z";
+let clipItems = null;
+let clipVer = 0; // bumped on every load; the page rebuilds when it differs from what it shows
+let clipShown = -1;
+let clipShownAt = 0;
+let clipQuery = "";
+let clipPop = 0; // a new copy: the pill icon bounces
+let clipLoading = false;
+
+function loadClips() {
+  if (clipLoading) return;
+  clipLoading = true;
+  invoke("clip_list").then((v) => {
+    clipItems = v || [];
+    clipVer++;
+    if (tab === "clip") renderList(true);
+  }).catch(() => {}).finally(() => { clipLoading = false; });
+}
+
+listen("clip", (e) => {
+  if (e.payload) { clipPop = Date.now(); renderPill(); }
+  loadClips();
+});
+
+const clipSize = (it) => it.kind === "image" ? `${it.w}×${it.h}` : tr("{0} 字", it.len);
+
+function clipRowHtml(it) {
+  const app = it.appPath ? `<span class="clip-app">${iconHtml({ path: it.appPath, name: it.app })}<span>${esc(it.app.replace(/\.exe$/i, ""))}</span></span>` : "";
+  const body = it.kind === "image"
+    ? `<div class="clip-pic"><img src="${it.thumb}" alt=""></div>`
+    : `<div class="clip-text">${esc(it.preview)}${it.more ? "…" : ""}</div>`;
+  return `<div class="clip-row${it.pinned ? " pinned" : ""}" data-cid="${it.id}" title="${tr("点一下复制回剪贴板")}">
+    ${body}
+    <div class="clip-meta">${app}<span>${esc(ago(it.at))}</span><span class="mono">${esc(clipSize(it))}</span></div>
+    <span class="clip-btns">
+      <button class="clip-b${it.pinned ? " on" : ""}" data-cpin="${it.id}" title="${it.pinned ? tr("取消置顶") : tr("置顶（不会被自动删除）")}" aria-label="${it.pinned ? tr("取消置顶") : tr("置顶")}"><svg width="13" height="13" viewBox="0 0 24 24" fill="${it.pinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${PIN_ICON}"/></svg></button>
+      <button class="clip-b" data-cdel="${it.id}" title="${tr("删除")}" aria-label="${tr("删除")}">✕</button>
+    </span>
+  </div>`;
+}
+
+function clipRowsHtml() {
+  const q = clipQuery.trim().toLowerCase();
+  const list = (clipItems || []).filter((it) => !q || (it.kind === "text" && it.preview.toLowerCase().includes(q)) || it.app.toLowerCase().includes(q));
+  if (!list.length) return `<div class="nc-empty"><div class="nc-e1">${q ? tr("没有找到") : tr("还没有复制过东西")}</div></div>`;
+  const pinned = list.filter((it) => it.pinned);
+  const rest = list.filter((it) => !it.pinned);
+  return (pinned.length ? `<div class="clip-sec">${tr("已置顶")}</div>${pinned.map(clipRowHtml).join("")}${rest.length ? `<div class="clip-sec">${tr("最近")}</div>` : ""}` : "") + rest.map(clipRowHtml).join("");
+}
+
+function clipPageHtml() {
+  if (!clipItems) { loadClips(); return `<div class="empty">${tr("正在读取剪贴板历史…")}</div>`; }
+  clipShown = clipVer;
+  clipShownAt = Date.now();
+  if (!sget("clip.on", true)) return `<div class="empty">${tr("剪贴板历史已关闭（设置 → 剪贴板）")}</div>`;
+  const days = Number(sget("clip.days", 7)) || 0;
+  const keep = days ? tr("保留 {0} 天、最多 {1} 条", days, sget("clip.max", 200)) : tr("最多 {0} 条", sget("clip.max", 200));
+  const where = sget("clip.store", "disk") === "memory" ? tr("只在内存") : tr("加密保存在本机");
+  return `<div class="viz clip">
+    <div class="viz-head"><span class="viz-sel">${clipItems.length ? tr("{0} 条记录", clipItems.length) : tr("剪贴板")}</span>
+      <input class="clip-q" type="text" placeholder="${tr("搜索")}" spellcheck="false" value="${esc(clipQuery)}"><span class="sp"></span>
+      ${clipItems.some((it) => !it.pinned) ? `<button class="ghost" data-do="clip-clear">${tr("清空")}</button>` : ""}</div>
+    <div class="clip-list">${clipRowsHtml()}</div>
+    <div class="m-hint">${tr("点一条复制回剪贴板。{0}，置顶的不会被删；{1}。", keep, where)}</div></div>`;
+}
+
+// rebuild only when the history changed (or once a minute for the "x 分钟前")
+const clipStale = () => clipShown !== clipVer || Date.now() - clipShownAt > 60_000;
+
+function clipClick(e) {
+  const pin = e.target.closest("[data-cpin]");
+  if (pin) {
+    const it = clipItems?.find((x) => x.id === Number(pin.dataset.cpin));
+    if (it) invoke("clip_pin", { id: it.id, on: !it.pinned }).catch((err) => toast(String(err), true));
+    return true;
+  }
+  const del = e.target.closest("[data-cdel]");
+  if (del) {
+    const id = Number(del.dataset.cdel);
+    clipItems = (clipItems || []).filter((x) => x.id !== id);
+    clipVer++;
+    renderList(true);
+    invoke("clip_delete", { id }).catch((err) => toast(String(err), true));
+    return true;
+  }
+  const row = e.target.closest("#list [data-cid]");
+  if (row) {
+    invoke("clip_copy", { id: Number(row.dataset.cid) }).then(() => {
+      row.classList.add("copied");
+      toast(tr("已复制"));
+    }).catch((err) => toast(String(err), true));
+    return true;
+  }
+  return false;
+}
+
+// typing in the search box filters the rows only (the box keeps its focus)
+document.addEventListener("input", (e) => {
+  if (!e.target.classList?.contains("clip-q")) return;
+  clipQuery = e.target.value;
+  const box = document.querySelector("#list .clip-list");
+  if (box) box.innerHTML = clipRowsHtml();
+});
 
 // mute / unmute a program's notes; muting also marks what is already there read (no red dot)
 function toggleAppMute(key) {
@@ -2649,8 +2764,9 @@ const PAGE_DEFS = {
   music: [tr("音乐"), "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
   ai: [tr("AI 额度"), "M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5"],
   notes: [tr("通知"), "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
+  clip: [tr("剪贴板"), CLIP_ICON],
 };
-const PAGE_TABS = new Set(["sys", "music", "ai", "notes"]);
+const PAGE_TABS = new Set(["sys", "music", "ai", "notes", "clip"]);
 let netTab = "conns";
 
 function visiblePages() {
@@ -2811,6 +2927,7 @@ const PILL_ITEM_LABEL = {
   cpu: tr("CPU 占用"), mem: tr("内存占用"), clock: tr("时钟"), exit: tr("主出口 IP（只显示一个）"),
   rotate: tr("轮换区（下面勾选的内容轮流显示）"),
   notes: tr("未读通知（有未读时才显示程序图标 / 数量）"),
+  clip: tr("剪贴板图标（复制新内容时跳一下）"),
 };
 
 const HOURS = Array.from({ length: 24 }, (_, h) => [h, `${String(h).padStart(2, "0")}:00`]);
@@ -2970,6 +3087,7 @@ const SET_NAV = [
   [tr("AI 用量"), [["ai", tr("额度与圆环"), "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"]]],
   [tr("音乐"), [["music", tr("正在播放"), "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"]]],
   [tr("通知"), [["notify", tr("通知"), "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"]]],
+  [tr("剪贴板"), [["clip", tr("剪贴板历史"), CLIP_ICON]]],
   [tr("其他"), [["about", tr("关于"), "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16v-5M12 8h0"]]],
 ];
 const SET_CATS = SET_NAV.flatMap(([, items]) => items.map((x) => x[0]));
@@ -3198,6 +3316,20 @@ const SET_PAGES = {
   </div>`,
 
   notify: () => notifySettingsHtml(),
+
+  clip: () => `
+  <div class="s-sec"><div class="s-title">${tr("剪贴板历史")}</div>
+    ${sToggle("clip.on", tr("记录剪贴板历史"), tr("复制过的文字和图片收在岛上的「剪贴板」页里，点一条就复制回剪贴板"))}
+    ${sToggle("clip.images", tr("　也记录图片"), tr("截图、复制的图片存一份（PNG）"))}
+    ${sToggle("clip.skipPrivate", tr("　跳过标记为隐私的内容"), tr("Bitwarden、KeePass、1Password 等复制密码时会加这个标记，这类内容不记录"))}
+  </div>
+  <div class="s-sec"><div class="s-title">${tr("保存与清理")}</div>
+    ${sSelect("clip.store", tr("保存在哪里"), [["disk", tr("本机硬盘（加密，重启后还在）")], ["memory", tr("只在内存（关掉 MicaBar 就清空）")]], tr("硬盘上的记录用当前 Windows 账户的密钥加密，换账户或换电脑都打不开；改成只在内存时，硬盘上的记录会马上删掉"))}
+    ${sNumber("clip.days", tr("保留天数"), 0, 3650, 1, tr("天"), tr("超过这个天数的自动删除；0 = 不按时间删"))}
+    ${sNumber("clip.max", tr("最多保留条数"), 1, 5000, 10, tr("条"), tr("超出时从最旧的开始删"))}
+    <div class="s-row"><span class="s-label">${tr("清空历史")}<span class="s-note">${tr("置顶的条目永远不会被自动删除，清空时也保留")}</span></span>
+      <button class="ghost" data-do="clip-clear">${tr("清空")}</button></div>
+  </div>`,
 
   about: () => `
   <div class="s-sec"><div class="s-title">${tr("关于")}</div>
@@ -3668,6 +3800,20 @@ function renderListNow(force) {
     measurePanel();
     return;
   }
+  if (tab === "clip") {
+    // searching: only the rows change, the box keeps its focus
+    if (list.contains(document.activeElement) && document.activeElement.classList.contains("clip-q")) {
+      const box = list.querySelector(".clip-list");
+      if (box && clipShown !== clipVer) { box.innerHTML = clipRowsHtml(); clipShown = clipVer; }
+      return;
+    }
+    if (!force && !clipStale()) return;
+    const scroll = list.scrollTop;
+    list.innerHTML = `<div id="list-inner">${clipPageHtml()}</div>`;
+    list.scrollTop = scroll;
+    measurePanel();
+    return;
+  }
   if (!snap) {
     list.innerHTML = `<div class="empty">${tr("正在读取连接…")}</div>`;
     return;
@@ -3869,6 +4015,10 @@ async function runAction(el) {
       toast(await invoke("notify_hook", { tool, on }));
       loadNotifyInfo();
       return;
+    } else if (act === "clip-clear") {
+      await invoke("clip_clear", { all: false });
+      toast(tr("已清空（置顶的保留）"));
+      return;
     } else if (act === "notes-clear") {
       notes = [];
       ncOpen.clear();
@@ -4038,6 +4188,7 @@ $("panel").addEventListener("contextmenu", (e) => {
 });
 $("panel").addEventListener("click", (e) => {
   if (tab === "notes" && !e.target.closest("[data-do]") && notesClick(e)) return;
+  if (tab === "clip" && !e.target.closest("[data-do]") && clipClick(e)) return;
   const inMenu = e.target.closest("#menu");
   const go = e.target.closest("#list [data-tab]");
   if (go && !e.target.closest("[data-do]")) {
@@ -4240,6 +4391,7 @@ const NAV = [
   ["sys", tr("系统监控"), "M6 20V12M10 20V6M14 20V10M18 20V4"],
   ["ai", tr("AI 额度"), "M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"],
   ["notes", tr("通知"), "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"],
+  ["clip", tr("剪贴板"), CLIP_ICON],
   ["settings", tr("设置"), "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4L7 17M17 17l1.4 1.4M5.6 5.6L7 7"],
 ];
 

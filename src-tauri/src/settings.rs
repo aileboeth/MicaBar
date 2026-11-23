@@ -67,7 +67,8 @@ pub fn defaults() -> Value {
                 { "id": "clock", "on": false },
                 { "id": "exit", "on": false },
                 { "id": "rotate", "on": false },
-                { "id": "notes", "on": true }
+                { "id": "notes", "on": true },
+                { "id": "clip", "on": true }
             ],
             // simple | digital | serif
             "clockStyle": "simple",
@@ -162,7 +163,8 @@ pub fn defaults() -> Value {
                 { "id": "sys", "on": true },
                 { "id": "music", "on": true },
                 { "id": "ai", "on": true },
-                { "id": "notes", "on": true }
+                { "id": "notes", "on": true },
+                { "id": "clip", "on": true }
             ]
         },
         "notify": {
@@ -185,6 +187,10 @@ pub fn defaults() -> Value {
             // per app key: { "island": bool, "mute": bool }
             "apps": {}
         },
+        // clipboard history: text (+ pictures), kept on disk encrypted for this Windows user or only
+        // in memory, removed after days days (0 = never by age) / beyond max entries; pinned stay;
+        // content a password manager marks private is skipped
+        "clip": { "on": true, "images": true, "store": "disk", "days": 7, "max": 200, "skipPrivate": true },
         "meta": {
             // 2 = big pill with items side by side (0.2.4)
             "pillV": 2,
@@ -192,7 +198,9 @@ pub fn defaults() -> Value {
             "ringV": 1,
             // 1 = notifications: the page and the pill's unread count switched on once;
             // 2 = message text hidden by default ("所有的通知都不要显示内容")
-            "notifyV": 2
+            "notifyV": 2,
+            // 1 = the clipboard page and its pill icon switched on once (0.2.21)
+            "clipV": 1
         },
         "appearance": {
             // auto | glass-dark | glass-light | <preset id> | custom
@@ -276,6 +284,7 @@ fn store() -> &'static Mutex<Value> {
         let old_ring = v.pointer("/meta/ringV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
         let notify_v = v.pointer("/meta/notifyV").and_then(|x| x.as_u64()).unwrap_or(0);
         let old_notify = notify_v < 1;
+        let old_clip = v.pointer("/meta/clipV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
         fill(&mut v, &defaults());
         if notify_v < 2 && !fresh {
             // the first notification builds showed the text: now hidden unless chosen again
@@ -297,6 +306,20 @@ fn store() -> &'static Mutex<Value> {
                 }
             }
             v["meta"]["notifyV"] = json!(2);
+            if let Ok(t) = serde_json::to_string_pretty(&v) {
+                let _ = std::fs::write(path(), t);
+            }
+        }
+        if old_clip && !fresh {
+            // new list items arrive switched off; the clipboard page and pill icon start on (asked for)
+            for list in ["/panel/pages", "/pill/items"] {
+                if let Some(a) = v.pointer_mut(list).and_then(|x| x.as_array_mut()) {
+                    for i in a.iter_mut().filter(|i| i.get("id").and_then(|x| x.as_str()) == Some("clip")) {
+                        i["on"] = json!(true);
+                    }
+                }
+            }
+            v["meta"]["clipV"] = json!(1);
             if let Ok(t) = serde_json::to_string_pretty(&v) {
                 let _ = std::fs::write(path(), t);
             }
