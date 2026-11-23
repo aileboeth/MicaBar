@@ -47,7 +47,12 @@ for (const el of document.querySelectorAll("[data-do='layout-edit']")) el.textCo
 
 let S = null; // settings document from the backend
 // redraw counters for the once-a-minute "perf" log line (declared first: used during start-up)
-var JSPERF = { pill: 0, list: 0, snap: 0, snapMs: 0, glass: 0, glassMs: 0, viz: 0 };
+var JSPERF = { pill: 0, list: 0, snap: 0, snapMs: 0, glass: 0, glassMs: 0, viz: 0, raf: 0 };
+// animation frames the page asks for (a loop that never stops keeps the GPU process busy)
+{
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => { JSPERF.raf++; return raf(cb); };
+}
 const sget = (path, dflt) => path.split(".").reduce((o, k) => (o == null ? o : o[k]), S) ?? dflt;
 const itemOn = (listPath, id) => (sget(listPath, []) || []).some((i) => i.id === id && i.on);
 
@@ -5308,7 +5313,15 @@ listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded))
 // self-measurement (one log line a minute): how often the page redraws, and the time spent
 setInterval(() => {
   const p = JSPERF;
-  invoke("log_js", { msg: `perf ${MANAGER ? "manager" : "island"}: pill ${p.pill}, list ${p.list}, snapshots ${p.snap} (${p.snapMs.toFixed(0)} ms), glass ${p.glass} (${p.glassMs.toFixed(0)} ms), bars ${p.viz}, heap ${performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) + "M" : "?"}` }).catch(() => {});
+  // CSS animations / transitions running right now, by name
+  const run = {};
+  for (const a of document.getAnimations()) {
+    if (a.playState !== "running") continue;
+    const n = a.animationName || a.transitionProperty || "?";
+    run[n] = (run[n] || 0) + 1;
+  }
+  const anims = Object.entries(run).map(([k, v]) => (v > 1 ? `${k}x${v}` : k)).join(" ") || "none";
+  invoke("log_js", { msg: `perf ${MANAGER ? "manager" : "island"}: pill ${p.pill}, list ${p.list}, snapshots ${p.snap} (${p.snapMs.toFixed(0)} ms), glass ${p.glass} (${p.glassMs.toFixed(0)} ms), bars ${p.viz}, raf ${p.raf}, anims ${anims}, heap ${performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) + "M" : "?"}` }).catch(() => {});
   for (const k in p) p[k] = 0;
 }, 60_000);
 

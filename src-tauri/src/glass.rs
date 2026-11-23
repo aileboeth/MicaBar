@@ -57,22 +57,31 @@ fn crop_rect(win: &RECT, island: &crate::window_ctl::Rect, out: &RECT) -> RECT {
     }
 }
 
-/// The new frame looks the same as the last one sent (mean difference under one level per
-/// channel, sampled): a blinking caret or a ticking clock behind the blur isn't worth a frame.
-fn similar(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() || a.is_empty() {
-        return false;
+/// Mean difference per channel x100 between the new frame and the last one sent, over the part
+/// the island covers (`area`: x0, y0, x1, y1 in quarter px of the piece; the blur margin around
+/// it doesn't count), every other pixel. Under 100 (one level) the frame is skipped: a blinking
+/// caret or a ticking clock behind the blur isn't worth a frame.
+fn diff100(a: &[u8], b: &[u8], w: usize, area: (usize, usize, usize, usize)) -> u64 {
+    if a.len() != b.len() || a.is_empty() || w == 0 {
+        return u64::MAX;
     }
+    let h = a.len() / 4 / w;
+    let (x0, y0) = (area.0.min(w), area.1.min(h));
+    let (x1, y1) = (area.2.min(w).max(x0), area.3.min(h).max(y0));
     let (mut sum, mut n) = (0u64, 0u64);
-    let mut i = 0;
-    while i + 3 < a.len() {
-        for c in 0..3 {
-            sum += (a[i + c] as i32 - b[i + c] as i32).unsigned_abs() as u64;
+    for y in (y0..y1).step_by(2) {
+        for x in (x0..x1).step_by(2) {
+            let i = (y * w + x) * 4;
+            for c in 0..3 {
+                sum += (a[i + c] as i32 - b[i + c] as i32).unsigned_abs() as u64;
+            }
+            n += 3;
         }
-        n += 3;
-        i += 12; // every third pixel
     }
-    sum < n
+    if n == 0 {
+        return 0;
+    }
+    sum * 100 / n
 }
 const BLUR_RADIUS: usize = 7; // in quarter-resolution pixels, 3 box passes ≈ gaussian
 
@@ -404,8 +413,20 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
         match c.frame(crop, watch, force || !same_crop) {
             Ok(Some((w, h, mut px))) => {
                 last_region = region;
-                if same_crop && similar(&px, &last_raw) {
+                // the island inside the piece, quarter px
+                let area = (
+                    ((watch.left - crop.left).max(0) >> 2) as usize,
+                    ((watch.top - crop.top).max(0) >> 2) as usize,
+                    ((watch.right - crop.left).max(0) >> 2) as usize,
+                    ((watch.bottom - crop.top).max(0) >> 2) as usize,
+                );
+                let d = if same_crop { diff100(&px, &last_raw, w as usize, area) } else { u64::MAX };
+                if d < 100 {
+                    crate::perf::count("glass same", 1);
                     continue;
+                }
+                if d != u64::MAX {
+                    crate::perf::count("glass diff%", d);
                 }
                 last_crop = Some(crop);
                 last_raw.clear();

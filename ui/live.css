@@ -319,3 +319,11 @@ html.no-anim .lv-chip, html.no-anim .lv-enter, html.no-anim #diag-btn.hot, html.
 .pill-clip.pop { animation: clip-pop 0.9s var(--spring, ease) both; color: var(--accent); }
 @keyframes clip-pop { 0% { transform: scale(1); } 25% { transform: scale(1.35) rotate(-8deg); } 55% { transform: scale(0.92) rotate(4deg); } 100% { transform: none; } }
 html.no-anim .pill-clip.pop, html.no-anim .clip-row.copied { animation: none; }
+
+/* The collapsed pill's endless animations (Claude Code spinner, breathing dots, the leak badge) tick
+   at ~10 fps instead of 60: each frame of a moving pixel makes WebView2 compose the whole
+   transparent window again, and a 20 px ring doesn't need more. The open panel stays smooth. */
+#pill .ag-ic.run .ag-orbit { animation-timing-function: steps(11); }
+#pill .ag-ic.ask .ag-orbit, #pill .ag-ask::before { animation-timing-function: steps(7); }
+#pill .dg-ic::after { animation-timing-function: steps(16); }
+#pill .dot.busy, #pill .pill-alert { animation-timing-function: steps(5); }
