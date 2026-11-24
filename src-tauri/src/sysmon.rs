@@ -166,6 +166,7 @@ struct Gpu {
     query: *mut c_void,
     engine: *mut c_void,
     memory: *mut c_void,
+    primed: bool,
 }
 
 impl Drop for Gpu {
@@ -184,10 +185,12 @@ pub struct Monitor {
     prev_at: Option<Instant>,
     gpu: Option<Gpu>,
     gpu_tried: bool,
-    adapter: Option<(String, u64)>,
+    /// (name, dedicated_vram_bytes, lowercase_luid_tag)
+    adapter: Option<(String, u64, String)>,
     last_used: Option<Instant>,
-    /// app name -> (pid, exe) of its processes that may be ended, from the latest sample
-    kill: HashMap<String, Vec<(u32, String)>>,
+    cached_sample: Option<(Instant, Sample)>,
+    /// app display name -> (pid, exe_lower, created_filetime) of processes that may be ended
+    kill: HashMap<String, Vec<(u32, String, u64)>>,
 }
 
 // the PDH handles are only touched behind the monitor's mutex
@@ -252,12 +255,12 @@ fn cpu_name() -> String {
         .unwrap_or_default()
 }
 
-/// The hardware adapter with the most dedicated video memory: (name, bytes).
-fn main_adapter() -> Option<(String, u64)> {
+/// The hardware adapter with the most dedicated video memory: (name, bytes, luid_tag).
+fn main_adapter() -> Option<(String, u64, String)> {
     use windows::Win32::Graphics::Dxgi::*;
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
-        let mut best: Option<(String, u64)> = None;
+        let mut best: Option<(String, u64, String)> = None;
         let mut i = 0;
         while let Ok(a) = factory.EnumAdapters1(i) {
             i += 1;
@@ -268,8 +271,9 @@ fn main_adapter() -> Option<(String, u64)> {
             let end = d.Description.iter().position(|&c| c == 0).unwrap_or(d.Description.len());
             let name = String::from_utf16_lossy(&d.Description[..end]).trim().to_string();
             let mem = d.DedicatedVideoMemory as u64;
+            let luid = format!("luid_0x{:08x}_0x{:08x}", d.AdapterLuid.HighPart as u32, d.AdapterLuid.LowPart);
             if best.as_ref().map(|b| mem > b.1).unwrap_or(true) {
-                best = Some((name, mem));
+                best = Some((name, mem, luid));
             }
         }
         best
@@ -294,25 +298,37 @@ fn open_gpu() -> Option<Gpu> {
             memory = std::ptr::null_mut();
         }
         PdhCollectQueryData(q);
-        Some(Gpu { query: q, engine, memory })
+        Some(Gpu { query: q, engine, memory, primed: false })
     }
 }
 
-/// (instance name, value) of a wildcard counter.
+/// (instance name, value) of a wildcard counter, retrying on PDH_MORE_DATA.
 fn counter_items(counter: *mut c_void) -> Vec<(String, f64)> {
     let mut out = Vec::new();
     unsafe {
         let (mut size, mut count) = (0u32, 0u32);
-        let st = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &mut size, &mut count, std::ptr::null_mut());
+        let mut st = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &mut size, &mut count, std::ptr::null_mut());
         if st != PDH_MORE_DATA || size == 0 {
             return out;
         }
-        // items followed by their names, in one buffer
-        let mut buf = vec![0u64; (size as usize + 7) / 8];
-        let items = buf.as_mut_ptr() as *mut PdhItem;
-        if PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &mut size, &mut count, items) != 0 {
+        let mut buf: Vec<u64> = Vec::new();
+        for _ in 0..3 {
+            buf.resize((size as usize + 7) / 8, 0);
+            st = PdhGetFormattedCounterArrayW(
+                counter,
+                PDH_FMT_DOUBLE | PDH_FMT_NOCAP100,
+                &mut size,
+                &mut count,
+                buf.as_mut_ptr() as *mut PdhItem,
+            );
+            if st != PDH_MORE_DATA {
+                break;
+            }
+        }
+        if st != 0 {
             return out;
         }
+        let items = buf.as_ptr() as *const PdhItem;
         for i in 0..count as usize {
             let it = &*items.add(i);
             // PDH_CSTATUS_VALID_DATA = 0, PDH_CSTATUS_NEW_DATA = 1
@@ -342,11 +358,18 @@ impl Monitor {
             gpu_tried: false,
             adapter: None,
             last_used: None,
+            cached_sample: None,
             kill: HashMap::new(),
         }
     }
 
     pub fn sample(&mut self) -> Sample {
+        if let Some((at, ref cached)) = self.cached_sample {
+            if at.elapsed() < std::time::Duration::from_millis(650) {
+                self.last_used = Some(Instant::now());
+                return cached.clone();
+            }
+        }
         // unused for a while: start over (the old deltas would span the whole pause)
         if self.last_used.map(|t| t.elapsed().as_secs() > 20).unwrap_or(false) {
             self.prev_cores.clear();
@@ -354,6 +377,7 @@ impl Monitor {
             self.prev_at = None;
             self.gpu = None;
             self.gpu_tried = false;
+            self.cached_sample = None;
         }
         self.last_used = Some(Instant::now());
         let mut s = Sample::default();
@@ -392,28 +416,79 @@ impl Monitor {
         // --- GPU: the busiest engine (Task Manager's figure) and dedicated memory ---
         if !self.gpu_tried {
             self.gpu_tried = true;
-            self.gpu = open_gpu();
             if self.adapter.is_none() {
                 self.adapter = main_adapter();
             }
+            self.gpu = open_gpu();
         }
-        if let Some((name, total)) = &self.adapter {
+        let luid_filter = self.adapter.as_ref().map(|(_, _, luid)| luid.clone());
+        if let Some((name, total, _)) = &self.adapter {
             s.gpu_name = Some(name.clone());
             s.vram_total = (*total > 0).then_some(*total);
         }
-        if let Some(g) = &self.gpu {
-            if unsafe { PdhCollectQueryData(g.query) } == 0 {
-                // "pid_1234_luid_0x0_0xD1F2_phys_0_eng_3_engtype_3D": sum each engine over all processes
+        if let Some(g) = &mut self.gpu {
+            if !g.primed {
+                // open_gpu() just performed the baseline PdhCollectQueryData; don't double-collect <1ms later.
+                g.primed = true;
+                if !g.memory.is_null() {
+                    let mem_items = counter_items(g.memory);
+                    let mut used = 0.0f64;
+                    let mut matched = false;
+                    if let Some(ref luid) = luid_filter {
+                        for (name, v) in &mem_items {
+                            if name.to_ascii_lowercase().contains(luid) {
+                                matched = true;
+                                used += *v;
+                            }
+                        }
+                    }
+                    if !matched {
+                        used = mem_items.into_iter().map(|(_, v)| v).fold(0.0, f64::max);
+                    }
+                    if used > 0.0 {
+                        s.vram_used = Some(used as u64);
+                    }
+                }
+            } else if unsafe { PdhCollectQueryData(g.query) } == 0 {
+                // "pid_1234_luid_0x00000000_0x0000D1F2_phys_0_eng_3_engtype_3D": sum each engine on main_adapter
+                let eng_items = counter_items(g.engine);
                 let mut engines: HashMap<String, f64> = HashMap::new();
-                for (name, v) in counter_items(g.engine) {
-                    let key = name.find("luid_").map(|i| name[i..].to_string()).unwrap_or(name);
-                    *engines.entry(key).or_default() += v;
+                let mut matched_luid = false;
+                if let Some(ref luid) = luid_filter {
+                    for (name, v) in &eng_items {
+                        let lower = name.to_ascii_lowercase();
+                        if lower.contains(luid) {
+                            matched_luid = true;
+                            let key = lower.find("luid_").map(|i| lower[i..].to_string()).unwrap_or(lower);
+                            *engines.entry(key).or_default() += *v;
+                        }
+                    }
+                }
+                if !matched_luid {
+                    for (name, v) in eng_items {
+                        let lower = name.to_ascii_lowercase();
+                        let key = lower.find("luid_").map(|i| lower[i..].to_string()).unwrap_or(lower);
+                        *engines.entry(key).or_default() += v;
+                    }
                 }
                 if !engines.is_empty() {
                     s.gpu = Some(engines.values().cloned().fold(0.0, f64::max).clamp(0.0, 100.0));
                 }
                 if !g.memory.is_null() {
-                    let used = counter_items(g.memory).into_iter().map(|(_, v)| v).fold(0.0, f64::max);
+                    let mem_items = counter_items(g.memory);
+                    let mut used = 0.0f64;
+                    let mut matched_mem = false;
+                    if let Some(ref luid) = luid_filter {
+                        for (name, v) in &mem_items {
+                            if name.to_ascii_lowercase().contains(luid) {
+                                matched_mem = true;
+                                used += *v;
+                            }
+                        }
+                    }
+                    if !matched_mem {
+                        used = mem_items.into_iter().map(|(_, v)| v).fold(0.0, f64::max);
+                    }
                     if used > 0.0 {
                         s.vram_used = Some(used as u64);
                     }
@@ -421,21 +496,24 @@ impl Monitor {
             }
         }
 
-        // --- apps: processes grouped by their friendly name ---
+        // --- apps: processes grouped by (exe_lower, display), excluding MicaBar's own tree ---
         let tree = process_tree();
         let own = own_tree(&tree);
-        let list: Vec<(u32, String)> = tree.iter().map(|(p, _, e)| (*p, e.clone())).collect();
+        let list: Vec<(u32, String)> = tree
+            .iter()
+            .filter(|(p, _, _)| *p != 0 && !own.contains(p))
+            .map(|(p, _, e)| (*p, e.clone()))
+            .collect();
         self.procs.refresh(&list);
-        let mut kill: HashMap<String, Vec<(u32, String)>> = HashMap::new();
         let elapsed = self.prev_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         self.prev_at = Some(Instant::now());
         let ncpu = s.eff.len().max(1) as f64;
         let mut next = HashMap::with_capacity(list.len());
-        let mut groups: HashMap<String, AppUse> = HashMap::new();
+        let mut groups: HashMap<(String, String), (AppUse, Vec<(u32, String, u64)>)> = HashMap::new();
+        const CB_EX2: u32 = std::mem::size_of::<MemCounters>() as u32;
+        const CB_EX: u32 = CB_EX2 - std::mem::size_of::<usize>() as u32 - std::mem::size_of::<u64>() as u32;
+
         for (pid, _) in &list {
-            if *pid == 0 {
-                continue;
-            }
             let Some(info) = self.procs.get(*pid) else { continue };
             let (mut cpu_t, mut created, mut mem) = (None, 0u64, 0u64);
             unsafe {
@@ -447,9 +525,15 @@ impl Monitor {
                         cpu_t = Some(ft(&k) + ft(&u));
                         created = ft(&c);
                     }
-                    let mut mc = MemCounters { cb: std::mem::size_of::<MemCounters>() as u32, ..Default::default() };
-                    if K32GetProcessMemoryInfo(h, &mut mc, mc.cb) != 0 {
+                    let mut mc = MemCounters { cb: CB_EX2, ..Default::default() };
+                    if K32GetProcessMemoryInfo(h, &mut mc, CB_EX2) != 0 {
                         mem = if mc.private_ws > 0 { mc.private_ws as u64 } else { mc.ws as u64 };
+                    } else {
+                        // Windows 10 builds prior to PROCESS_MEMORY_COUNTERS_EX2 (96 B) accept EX (80 B).
+                        mc = MemCounters { cb: CB_EX, ..Default::default() };
+                        if K32GetProcessMemoryInfo(h, &mut mc, CB_EX) != 0 {
+                            mem = if mc.private > 0 { mc.private as u64 } else { mc.ws as u64 };
+                        }
                     }
                     CloseHandle(h);
                 }
@@ -466,24 +550,49 @@ impl Monitor {
             if cpu_t.is_none() && mem == 0 {
                 continue;
             }
-            let g = groups.entry(info.display.clone()).or_insert_with(|| AppUse {
-                name: info.display.clone(),
-                path: info.path.clone(),
-                icon: info.icon.clone(),
-                ..Default::default()
+            let exe_lower = info.exe.to_ascii_lowercase();
+            let gkey = (exe_lower.clone(), info.display.clone());
+            let (g, targets) = groups.entry(gkey).or_insert_with(|| {
+                (
+                    AppUse {
+                        name: info.display.clone(),
+                        path: info.path.clone(),
+                        icon: info.icon.clone(),
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                )
             });
             g.cpu += cpu;
             g.mem += mem;
             g.procs += 1;
-            if !own.contains(pid) && !protected(&info.exe) && *pid != 4 {
+            if !protected(&exe_lower) && *pid != 4 && created != 0 {
                 g.killable = true;
-                kill.entry(info.display.clone()).or_default().push((*pid, info.exe.clone()));
+                targets.push((*pid, exe_lower, created));
             }
         }
         self.prev_proc = next;
+
+        // Disambiguate display names when two different executables share the same friendly name,
+        // so `end_app(name)` never terminates an unrelated executable's processes.
+        let mut display_counts: HashMap<String, usize> = HashMap::new();
+        for (_, disp) in groups.keys() {
+            *display_counts.entry(disp.clone()).or_default() += 1;
+        }
+        let mut kill: HashMap<String, Vec<(u32, String, u64)>> = HashMap::new();
+        let mut all: Vec<AppUse> = Vec::with_capacity(groups.len());
+        for ((exe_lower, disp), (mut app, targets)) in groups {
+            if display_counts.get(&disp).copied().unwrap_or(0) > 1 {
+                app.name = format!("{disp} ({exe_lower})");
+            }
+            if !targets.is_empty() {
+                kill.insert(app.name.clone(), targets);
+            }
+            all.push(app);
+        }
         self.kill = kill;
+
         // the top apps by CPU and by memory (the page sorts by either)
-        let mut all: Vec<AppUse> = groups.into_values().collect();
         all.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal));
         let mut keep: Vec<AppUse> = all.iter().take(15).cloned().collect();
         all.sort_by(|a, b| b.mem.cmp(&a.mem));
@@ -493,34 +602,50 @@ impl Monitor {
             }
         }
         s.apps = keep;
+        self.cached_sample = Some((Instant::now(), s.clone()));
         s
     }
 }
 
-/// Ends every process of one app from the last sample (the pid must still run the same exe; never
-/// Windows core processes or MicaBar's own). Returns (ended, failed).
+/// Ends every process of one app from the last sample (verifies pid, exe, and creation timestamp;
+/// never Windows core processes or MicaBar's own). Returns (ended, failed).
 pub fn end_app(name: &str) -> (u32, u32) {
     use windows_sys::Win32::System::Threading::{TerminateProcess, PROCESS_TERMINATE};
     let targets = monitor().lock().unwrap().kill.get(name).cloned().unwrap_or_default();
     let tree = process_tree();
     let own = own_tree(&tree);
     let (mut ok, mut bad) = (0, 0);
-    for (pid, exe) in targets {
+    for (pid, exe, expected_created) in targets {
+        if pid == 0 || pid == 4 || own.contains(&pid) || protected(&exe) {
+            continue;
+        }
         let still = tree.iter().any(|(p, _, e)| *p == pid && e.eq_ignore_ascii_case(&exe));
-        if !still || own.contains(&pid) || protected(&exe) {
+        if !still {
             continue;
         }
         unsafe {
-            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-            if !h.is_null() && TerminateProcess(h, 1) != 0 {
+            let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                bad += 1;
+                continue;
+            }
+            let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut c, mut e, mut k, mut u) = (z, z, z, z);
+            if GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) == 0 || ft(&c) != expected_created {
+                // PID exited and was reused by a new process since the sample was taken.
+                CloseHandle(h);
+                continue;
+            }
+            if TerminateProcess(h, 1) != 0 {
                 ok += 1;
             } else {
                 bad += 1;
             }
-            if !h.is_null() {
-                CloseHandle(h);
-            }
+            CloseHandle(h);
         }
+    }
+    if ok > 0 {
+        monitor().lock().unwrap().cached_sample = None;
     }
     crate::log(format!("sysmon: ended {name}: {ok} ok, {bad} failed"));
     (ok, bad)

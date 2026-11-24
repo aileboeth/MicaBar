@@ -126,43 +126,73 @@ pub fn tcp_state(s: u32) -> &'static str {
     }
 }
 
-/// Calls a GetExtended*Table function, growing the buffer until it fits,
-/// and returns the rows that follow the leading `dwNumEntries` field.
+/// Calls a GetExtended*Table function using a thread-local scratch buffer (cutting kernel table
+/// walks in half once sized and avoiding 8 intermediate heap allocations per second).
+fn for_each_row<T: Copy>(
+    f: unsafe extern "system" fn(*mut c_void, *mut u32, i32, u32, i32, u32) -> u32,
+    af: u32,
+    class: i32,
+    mut visit: impl FnMut(T),
+) {
+    thread_local! {
+        static BUF: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(vec![0u64; 4096]);
+    }
+    BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        if buf.len() < 512 {
+            buf.resize(4096, 0);
+        }
+        let mut size: u32 = (buf.len() * 8) as u32;
+        let mut ok = false;
+        for _ in 0..5 {
+            let ptr = buf.as_mut_ptr() as *mut c_void;
+            let r = unsafe { f(ptr, &mut size, 0, af, class, 0) };
+            if r == 0 {
+                ok = true;
+                break;
+            }
+            if r == ERROR_INSUFFICIENT_BUFFER {
+                let new_len = (size as usize + 4096) / 8 + 1;
+                buf.resize(new_len, 0);
+                size = (buf.len() * 8) as u32;
+                continue;
+            }
+            return;
+        }
+        if !ok {
+            return;
+        }
+        unsafe {
+            let base = buf.as_ptr() as *const u8;
+            let n = *(base as *const u32) as usize;
+            let offset = std::mem::align_of::<T>().max(4);
+            let rows = base.add(offset) as *const T;
+            let max = (buf.len() * 8).saturating_sub(offset) / std::mem::size_of::<T>();
+            for i in 0..n.min(max) {
+                visit(*rows.add(i));
+            }
+        }
+        // Keep steady-state buffer reasonable if a spike temporarily grew it huge
+        if buf.len() > 65_536 {
+            buf.truncate(16_384);
+            buf.shrink_to_fit();
+        }
+    });
+}
+
 fn read_table<T: Copy>(
     f: unsafe extern "system" fn(*mut c_void, *mut u32, i32, u32, i32, u32) -> u32,
     af: u32,
     class: i32,
 ) -> Vec<T> {
-    let mut size: u32 = 0;
-    let mut buf: Vec<u64> = Vec::new(); // u64 for alignment
-    for _ in 0..5 {
-        let ptr = if buf.is_empty() { std::ptr::null_mut() } else { buf.as_mut_ptr() as *mut c_void };
-        let r = unsafe { f(ptr, &mut size, 0, af, class, 0) };
-        if r == 0 && !buf.is_empty() {
-            break;
-        }
-        if r == ERROR_INSUFFICIENT_BUFFER || (r == 0 && buf.is_empty()) {
-            buf = vec![0u64; (size as usize + 1024) / 8 + 1];
-            continue;
-        }
-        return Vec::new();
-    }
-    if buf.is_empty() {
-        return Vec::new();
-    }
-    unsafe {
-        let base = buf.as_ptr() as *const u8;
-        let n = *(base as *const u32) as usize;
-        // Rows start after the u32 count, aligned to the row's alignment (4).
-        let rows = base.add(std::mem::align_of::<T>().max(4)) as *const T;
-        let max = (buf.len() * 8 - 4) / std::mem::size_of::<T>();
-        (0..n.min(max)).map(|i| *rows.add(i)).collect()
-    }
+    let mut out = Vec::new();
+    for_each_row::<T>(f, af, class, |r| out.push(r));
+    out
 }
 
 pub fn snapshot() -> Vec<Socket> {
     let mut out = Vec::with_capacity(512);
-    for r in read_table::<TcpRow4>(GetExtendedTcpTable, AF_INET, TCP_TABLE_OWNER_PID_ALL) {
+    for_each_row::<TcpRow4>(GetExtendedTcpTable, AF_INET, TCP_TABLE_OWNER_PID_ALL, |r| {
         let listen = r.state == 2;
         out.push(Socket {
             proto: Proto::Tcp,
@@ -172,8 +202,8 @@ pub fn snapshot() -> Vec<Socket> {
             state: tcp_state(r.state),
             pid: r.pid,
         });
-    }
-    for r in read_table::<TcpRow6>(GetExtendedTcpTable, AF_INET6, TCP_TABLE_OWNER_PID_ALL) {
+    });
+    for_each_row::<TcpRow6>(GetExtendedTcpTable, AF_INET6, TCP_TABLE_OWNER_PID_ALL, |r| {
         let listen = r.state == 2;
         out.push(Socket {
             proto: Proto::Tcp,
@@ -183,8 +213,8 @@ pub fn snapshot() -> Vec<Socket> {
             state: tcp_state(r.state),
             pid: r.pid,
         });
-    }
-    for r in read_table::<UdpRow4>(GetExtendedUdpTable, AF_INET, UDP_TABLE_OWNER_PID) {
+    });
+    for_each_row::<UdpRow4>(GetExtendedUdpTable, AF_INET, UDP_TABLE_OWNER_PID, |r| {
         out.push(Socket {
             proto: Proto::Udp,
             local: v4(r.local_addr),
@@ -193,8 +223,8 @@ pub fn snapshot() -> Vec<Socket> {
             state: "BOUND",
             pid: r.pid,
         });
-    }
-    for r in read_table::<UdpRow6>(GetExtendedUdpTable, AF_INET6, UDP_TABLE_OWNER_PID) {
+    });
+    for_each_row::<UdpRow6>(GetExtendedUdpTable, AF_INET6, UDP_TABLE_OWNER_PID, |r| {
         out.push(Socket {
             proto: Proto::Udp,
             local: v6(r.local_addr),
@@ -203,6 +233,6 @@ pub fn snapshot() -> Vec<Socket> {
             state: "BOUND",
             pid: r.pid,
         });
-    }
+    });
     out
 }

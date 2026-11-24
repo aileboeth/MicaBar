@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,19 +33,6 @@ fn dir() -> PathBuf {
     d
 }
 
-/// Offset of local time from UTC in milliseconds (current, includes DST).
-fn local_offset_ms() -> i64 {
-    use windows_sys::Win32::Foundation::SYSTEMTIME;
-    use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
-    let (mut l, mut u): (SYSTEMTIME, SYSTEMTIME) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
-    unsafe {
-        GetLocalTime(&mut l);
-        GetSystemTime(&mut u);
-    }
-    let mins = |s: &SYSTEMTIME| days_from_civil(s.wYear as i64, s.wMonth as i64, s.wDay as i64) * 1440 + s.wHour as i64 * 60 + s.wMinute as i64;
-    (mins(&l) - mins(&u)) * 60_000
-}
-
 // Howard Hinnant's civil <-> days algorithms (proleptic Gregorian).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -71,9 +59,21 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// Local date `days_ago` days before today, "YYYY-MM-DD".
 pub fn local_date(days_ago: i64) -> String {
-    let local_ms = crate::now_ms() as i64 + local_offset_ms();
-    let (y, m, d) = civil_from_days(local_ms.div_euclid(86_400_000) - days_ago);
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut l: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut l) };
+    if days_ago == 0 {
+        return format!("{:04}-{:02}-{:02}", l.wYear, l.wMonth, l.wDay);
+    }
+    let z = days_from_civil(l.wYear as i64, l.wMonth as i64, l.wDay as i64) - days_ago;
+    let (y, m, d) = civil_from_days(z);
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn day_cache() -> &'static Mutex<HashMap<String, HashMap<String, AppTraffic>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, AppTraffic>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn load(date: &str) -> HashMap<String, AppTraffic> {
@@ -83,12 +83,27 @@ fn load(date: &str) -> HashMap<String, AppTraffic> {
         .unwrap_or_default()
 }
 
+/// Loads an immutable past day's traffic, caching parsed JSON in memory.
+fn load_past(date: &str) -> HashMap<String, AppTraffic> {
+    if let Some(cached) = day_cache().lock().unwrap().get(date).cloned() {
+        return cached;
+    }
+    let data = load(date);
+    let mut c = day_cache().lock().unwrap();
+    if c.len() > 64 {
+        c.clear();
+    }
+    c.insert(date.to_string(), data.clone());
+    data
+}
+
 /// Records are kept for today plus this many days before it; older day files are removed.
 pub const KEEP_DAYS: i64 = 30;
 
 /// Removes day files older than KEEP_DAYS (names are YYYY-MM-DD, so they compare as text).
 fn prune() {
     let oldest = local_date(KEEP_DAYS);
+    day_cache().lock().unwrap().retain(|k, _| k.as_str() >= oldest.as_str());
     let Ok(rd) = std::fs::read_dir(dir()) else { return };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
@@ -114,8 +129,9 @@ impl Book {
         let today = local_date(0);
         if today != self.date {
             self.flush();
-            self.date = today;
-            self.apps.clear();
+            self.date = today.clone();
+            self.apps = load(&today);
+            self.dirty = false;
             prune();
         }
         if proxy.0 + proxy.1 + direct.0 + direct.1 <= 0.0 {
@@ -138,9 +154,12 @@ impl Book {
             return;
         }
         if let Ok(t) = serde_json::to_string(&self.apps) {
-            let _ = std::fs::write(dir().join(format!("{}.json", self.date)), t);
+            let path = dir().join(format!("{}.json", self.date));
+            if crate::settings::atomic_write(&path, t.as_bytes()).is_ok() {
+                day_cache().lock().unwrap().remove(&self.date);
+                self.dirty = false;
+            }
         }
-        self.dirty = false;
     }
 
     pub fn today(&self) -> (String, HashMap<String, AppTraffic>) {
@@ -154,7 +173,7 @@ pub fn all_programs(book: &Book) -> Vec<(String, String)> {
     let (today, today_apps) = book.today();
     for ago in 0..=KEEP_DAYS {
         let date = local_date(ago);
-        let data = if date == today { today_apps.clone() } else { load(&date) };
+        let data = if date == today { today_apps.clone() } else { load_past(&date) };
         for a in data.into_values() {
             if let Some(p) = a.path {
                 seen.entry(p.to_lowercase()).or_insert((a.name, p));
@@ -197,7 +216,7 @@ pub fn report(book: &Book, n: i64, focus: Option<&str>) -> Report {
     let mut apps: HashMap<String, AppTraffic> = HashMap::new();
     for ago in (0..n).rev() {
         let date = local_date(ago);
-        let data = if date == today { today_apps.clone() } else { load(&date) };
+        let data = if date == today { today_apps.clone() } else { load_past(&date) };
         let mut d = DayTotal { date: date.clone(), ..Default::default() };
         let count = focus.map_or(true, |f| f == date);
         for (k, a) in data {

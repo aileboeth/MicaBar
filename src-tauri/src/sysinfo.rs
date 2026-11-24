@@ -1,5 +1,7 @@
 //! CPU and memory usage for the pill (read only when those items are switched on).
 
+use std::time::{Duration, Instant};
+
 use serde::Serialize;
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -21,13 +23,21 @@ fn ft(f: &FILETIME) -> u64 {
 #[derive(Default)]
 pub struct Sampler {
     prev: Option<(u64, u64)>, // (idle, total)
+    last_at: Option<Instant>,
 }
 
 impl Sampler {
     pub fn sample(&mut self, cpu: bool, mem: bool) -> SysInfo {
         let mut out = SysInfo::default();
         if cpu {
-            let (mut idle, mut kernel, mut user) = (FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 }, FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 }, FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 });
+            if self.last_at.map(|t| t.elapsed() > Duration::from_secs(5)).unwrap_or(true) {
+                self.prev = None;
+            }
+            let (mut idle, mut kernel, mut user) = (
+                FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+                FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+                FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+            );
             if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0 {
                 // kernel time includes idle time
                 let (i, t) = (ft(&idle), ft(&kernel) + ft(&user));
@@ -38,9 +48,11 @@ impl Sampler {
                     }
                 }
                 self.prev = Some((i, t));
+                self.last_at = Some(Instant::now());
             }
         } else {
             self.prev = None;
+            self.last_at = None;
         }
         if mem {
             let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };

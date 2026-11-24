@@ -9,13 +9,16 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_LBUTTON, VK_MBUTTON, VK_MENU, VK_RBUTTON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow,
-    SetWindowPos, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, WM_HOTKEY,
+    GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowLongW, GetWindowRect, IsIconic, IsWindow,
+    IsWindowVisible, IsZoomed, PeekMessageW, SetForegroundWindow, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
+    MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, WM_HOTKEY, WS_CAPTION, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 use crate::log;
@@ -67,6 +70,8 @@ pub struct WinState {
     pub tour: AtomicBool,
     /// The page asks the island to open (the tour's "start" / "continue").
     pub open_req: AtomicBool,
+    /// Display topology / DPI / power state changed: reposition immediately on next 15ms tick.
+    pub reposition_req: AtomicBool,
     pub hwnd: AtomicIsize,
 }
 
@@ -153,22 +158,26 @@ pub fn place_window(w: &WebviewWindow) {
     let (ww, wh) = (size.width as i32, size.height as i32);
     let f = m.full;
     let work = m.work;
+    let max_x = (f.right - ww).max(f.left);
+    let max_y = (f.bottom - wh).max(f.top);
     // position along the edge: start (left / top), centre, end (right / bottom)
     let anchor = crate::settings::str_at("shape.anchor", "center");
     let along_x = match anchor.as_str() {
         "start" => f.left,
         "end" => f.right - ww,
         _ => f.left + (f.right - f.left - ww) / 2,
-    };
+    }
+    .clamp(f.left, max_x);
     let along_y = match anchor.as_str() {
         "start" => work.top,
         "end" => work.bottom - wh,
         _ => f.top + (f.bottom - f.top - wh) / 2,
-    };
+    }
+    .clamp(f.top, max_y);
     let (x, y) = match crate::settings::str_at("shape.dock", "top").as_str() {
-        "bottom" => (along_x, work.bottom - wh),
+        "bottom" => (along_x, (work.bottom - wh).clamp(f.top, max_y)),
         "left" => (f.left, along_y),
-        "right" => (f.right - ww, along_y),
+        "right" => (max_x, along_y),
         _ => (along_x, f.top),
     };
     if let Ok(cur) = w.outer_position() {
@@ -207,10 +216,9 @@ pub fn span_monitor(w: &WebviewWindow) {
 
 /// Foreground window maximized on the island's monitor (taskbar still visible).
 fn foreground_is_maximized(own: isize) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::IsZoomed;
     unsafe {
         let fg = GetForegroundWindow();
-        if fg.is_null() || fg as isize == own {
+        if fg.is_null() || own == 0 || fg as isize == own {
             return false;
         }
         if IsZoomed(fg) == 0 || IsWindowVisible(fg) == 0 || cloaked(fg) {
@@ -222,31 +230,57 @@ fn foreground_is_maximized(own: isize) -> bool {
     }
 }
 
-/// True when the foreground window (not ours, not the desktop/taskbar) covers its whole monitor.
+/// True when the foreground window (on the island's own monitor, not shell/overlay/maximized)
+/// covers its whole monitor.
 fn foreground_is_fullscreen(own: isize) -> bool {
     unsafe {
         let fg = GetForegroundWindow();
-        if fg.is_null() || fg as isize == own {
-            return false;
-        }
-        let mut cls = [0u16; 64];
-        let n = GetClassNameW(fg, cls.as_mut_ptr(), 64);
-        let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-        if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
-            return false;
-        }
-        // not on screen: minimized, hidden, or cloaked by the shell. The input method's
-        // "Windows Input Experience" CoreWindow covers the whole monitor while cloaked and can hold
-        // the focus after Win+D; counting it kept the island in game mode (click-through) long
-        // after the game was gone.
-        if IsIconic(fg) != 0 || IsWindowVisible(fg) == 0 || cloaked(fg) {
-            return false;
-        }
-        let mut r: RECT = std::mem::zeroed();
-        if GetWindowRect(fg, &mut r) == 0 {
+        if fg.is_null() || own == 0 || fg as isize == own {
             return false;
         }
         let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let own_mon = MonitorFromWindow(own as HWND, MONITOR_DEFAULTTONEAREST);
+        if mon.is_null() || mon != own_mon {
+            return false;
+        }
+        let mut cls = [0u16; 256];
+        let n = GetClassNameW(fg, cls.as_mut_ptr(), cls.len() as i32);
+        let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+        if matches!(
+            cls.as_str(),
+            "Progman"
+                | "WorkerW"
+                | "Shell_TrayWnd"
+                | "Shell_SecondaryTrayWnd"
+                | "XamlExplorerHostIslandWindow"
+                | "Windows.UI.Core.CoreWindow"
+                | "MultitaskingViewFrame"
+                | "ForegroundStaging"
+                | "TaskListThumbnailWnd"
+                | "Xaml_WindowedPopupClass"
+        ) {
+            return false;
+        }
+        // not on screen: minimized, hidden, or cloaked by the shell.
+        if IsIconic(fg) != 0 || IsWindowVisible(fg) == 0 || cloaked(fg) {
+            return false;
+        }
+        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongW(fg, GWL_EXSTYLE) as u32;
+        if (ex_style & (WS_EX_TOOLWINDOW as u32)) != 0
+            || ((ex_style & (WS_EX_LAYERED as u32)) != 0 && (ex_style & (WS_EX_TRANSPARENT as u32)) != 0)
+        {
+            return false;
+        }
+        if IsZoomed(fg) != 0 && (style & (WS_CAPTION as u32)) != 0 {
+            return false;
+        }
+        let mut r: RECT = std::mem::zeroed();
+        if DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS as u32, &mut r as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32) != 0
+            && GetWindowRect(fg, &mut r) == 0
+        {
+            return false;
+        }
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
         if GetMonitorInfoW(mon, &mut mi) == 0 {
@@ -258,7 +292,6 @@ fn foreground_is_fullscreen(own: isize) -> bool {
 }
 
 fn cloaked(h: HWND) -> bool {
-    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     let mut v: u32 = 0;
     let hr = unsafe { DwmGetWindowAttribute(h, DWMWA_CLOAKED as u32, &mut v as *mut u32 as *mut _, 4) };
     hr == 0 && v != 0
@@ -273,8 +306,8 @@ fn describe_foreground() -> String {
         if fg.is_null() {
             return "none".into();
         }
-        let mut cls = [0u16; 128];
-        let n = GetClassNameW(fg, cls.as_mut_ptr(), 128);
+        let mut cls = [0u16; 256];
+        let n = GetClassNameW(fg, cls.as_mut_ptr(), cls.len() as i32);
         let cls = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
         let mut pid = 0u32;
         GetWindowThreadProcessId(fg, &mut pid);
@@ -350,6 +383,9 @@ pub fn hotkey_thread(ws: Arc<WinState>) {
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
     std::thread::spawn(move || unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        // Force Win32 message queue creation BEFORE publishing TID so early PostThreadMessageW succeeds.
+        PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, 0);
         ws.hotkey_thread.store(GetCurrentThreadId(), Ordering::SeqCst);
         let register = |ws: &WinState| {
             UnregisterHotKey(std::ptr::null_mut(), 1);
@@ -364,7 +400,6 @@ pub fn hotkey_thread(ws: Arc<WinState>) {
             ws.hotkey_ok.store(ok, Ordering::SeqCst);
         };
         register(&ws);
-        let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
                 ws.hotkey.store(true, Ordering::SeqCst);
@@ -417,7 +452,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         peek: false,
     };
     let mut n: u64 = 0;
-    let mut pos = w.outer_position().unwrap_or_default();
+    let mut fs_streak: u8 = 0;
 
     let set_expanded = |h: &mut Hover, open: bool, why: &str| {
         if ws.expanded.swap(open, Ordering::SeqCst) == open {
@@ -432,10 +467,13 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             }
         } else {
             // give focus back to the app the user was in before the panel took it
-            unsafe {
-                let fg = GetForegroundWindow() as isize;
-                if fg == own && h.prev_fg != 0 && h.prev_fg != own && IsWindow(h.prev_fg as HWND) != 0 {
-                    SetForegroundWindow(h.prev_fg as HWND);
+            // (except when closing due to an outside click, where the user chose a new window)
+            if why != "click outside" {
+                unsafe {
+                    let fg = GetForegroundWindow() as isize;
+                    if fg == own && h.prev_fg != 0 && h.prev_fg != own && IsWindow(h.prev_fg as HWND) != 0 {
+                        SetForegroundWindow(h.prev_fg as HWND);
+                    }
                 }
             }
             h.pinned = false;
@@ -446,29 +484,48 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         let _ = app.emit("island", open);
     };
 
+    let drain_buttons = |h: &mut Hover| {
+        let (l, r, m) = (key_state(VK_LBUTTON), key_state(VK_RBUTTON), key_state(VK_MBUTTON));
+        h.btn_prev = l.0 || r.0 || m.0;
+    };
+
     loop {
         std::thread::sleep(Duration::from_millis(15));
         n += 1;
         if n % 4 == 0 {
             crate::perf::tick("hover");
         }
-        // placement: every 2 s, or every 0.3 s when following the cursor across monitors
-        let follow = n % 20 == 0 && !ws.expanded.load(Ordering::SeqCst) && crate::settings::str_at("general.monitor", "primary") == "cursor";
-        if (n % 130 == 0 || follow) && !ws.grab.load(Ordering::SeqCst) {
+        let hot = crate::settings::hot();
+        // placement: every 2 s, every 0.3 s when following the cursor across monitors, or immediately on display/resume
+        let follow = n % 20 == 0 && !ws.expanded.load(Ordering::SeqCst) && hot.monitor_cursor;
+        let force_pos = ws.reposition_req.swap(false, Ordering::SeqCst);
+        if (n % 130 == 0 || follow || force_pos) && !ws.grab.load(Ordering::SeqCst) {
             place_window(&w);
-            pos = w.outer_position().unwrap_or(pos);
+            if force_pos && !ws.hidden.load(Ordering::SeqCst) {
+                raise_topmost(own);
+            }
         }
-        if n % 66 == 0 && !ws.hidden.load(Ordering::SeqCst) {
+        if n % 66 == 0
+            && !ws.hidden.load(Ordering::SeqCst)
+            && (!ws.game.load(Ordering::SeqCst) || ws.expanded.load(Ordering::SeqCst))
+        {
             raise_topmost(own);
         }
         if n % 33 == 0 {
-            let fs = foreground_is_fullscreen(own);
+            let raw_fs = foreground_is_fullscreen(own);
+            if raw_fs {
+                fs_streak = fs_streak.saturating_add(1);
+            } else {
+                fs_streak = 0;
+            }
+            // Require 2 consecutive checks (~1s) to enter game mode; exit immediately on 1 check.
+            let fs = if ws.game.load(Ordering::SeqCst) { raw_fs } else { fs_streak >= 2 };
             if ws.game.swap(fs, Ordering::SeqCst) != fs {
                 log(format!("fullscreen foreground: {fs} ({})", describe_foreground()));
                 let _ = app.emit("game", fs);
             }
-            // fullscreen behaviour: keep the pill, or hide the island completely
-            let hide = fs && crate::settings::str_at("interaction.fullscreen", "pill") == "hide";
+            // fullscreen behaviour: keep the pill, or hide the island completely (unless open)
+            let hide = fs && hot.fullscreen_hide && !ws.expanded.load(Ordering::SeqCst);
             if ws.hidden.swap(hide, Ordering::SeqCst) != hide {
                 let _ = if hide { w.hide() } else { w.show() };
             }
@@ -477,9 +534,9 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
                 let _ = app.emit("maximized", max);
             }
         }
-        let dwell = Duration::from_millis(crate::settings::num_at("interaction.hoverDelay", 500.0).clamp(0.0, 3000.0) as u64);
-        let click_mode = crate::settings::str_at("interaction.expand", "hover") == "click";
-        let passthrough = crate::settings::bool_at("interaction.passthrough", false);
+        let dwell = Duration::from_millis(hot.hover_delay_ms);
+        let click_mode = hot.click_mode;
+        let passthrough = hot.passthrough;
         if !click_mode || passthrough {
             ws.click_req.store(false, Ordering::SeqCst);
         }
@@ -497,6 +554,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
                 h.ignoring = false;
                 let _ = w.set_ignore_cursor_events(false);
             }
+            drain_buttons(&mut h);
             continue;
         }
         if ws.edit.load(Ordering::SeqCst) {
@@ -509,15 +567,17 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
                 h.ignoring = false;
                 let _ = w.set_ignore_cursor_events(false);
             }
+            drain_buttons(&mut h);
             continue;
         }
 
         let mut pt = POINT { x: 0, y: 0 };
-        if unsafe { GetCursorPos(&mut pt) } == 0 {
+        let mut wr: RECT = unsafe { std::mem::zeroed() };
+        if own == 0 || unsafe { GetCursorPos(&mut pt) } == 0 || unsafe { GetWindowRect(own as HWND, &mut wr) } == 0 {
             continue;
         }
-        let cx = (pt.x - pos.x) as f64;
-        let cy = (pt.y - pos.y) as f64;
+        let cx = (pt.x - wr.left) as f64;
+        let cy = (pt.y - wr.top) as f64;
         let expanded = ws.expanded.load(Ordering::SeqCst);
         let rect = if expanded { *ws.panel.lock().unwrap() } else { *ws.pill.lock().unwrap() };
         let inside = rect.contains(cx, cy);
@@ -534,6 +594,10 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             if expanded {
                 set_expanded(&mut h, false, "hotkey");
             } else {
+                if ws.hidden.swap(false, Ordering::SeqCst) {
+                    let _ = w.show();
+                    raise_topmost(own);
+                }
                 set_expanded(&mut h, true, "hotkey");
                 h.pinned = true;
                 h.entered = false;
@@ -544,6 +608,10 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             }
         } else if ws.open_req.swap(false, Ordering::SeqCst) {
             if !expanded {
+                if ws.hidden.swap(false, Ordering::SeqCst) {
+                    let _ = w.show();
+                    raise_topmost(own);
+                }
                 set_expanded(&mut h, true, "tour");
                 h.pinned = true;
                 h.entered = false;
@@ -616,7 +684,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             capture = true;
         }
         // see-through while the cursor rests on the collapsed pill (hover mode)
-        let peek = !expanded && !noting && inside && !alt && !click_mode && !passthrough && !game && crate::settings::bool_at("interaction.peek", true);
+        let peek = !expanded && !noting && inside && !alt && !click_mode && !passthrough && !game && hot.peek;
         if peek != h.peek {
             h.peek = peek;
             let _ = app.emit("peek", peek);

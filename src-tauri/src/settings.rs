@@ -2,10 +2,126 @@
 //! The page edits it by sending partial patches; missing keys fall back to the defaults, so new
 //! settings added in later versions appear with their default values.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde_json::{json, Value};
+
+#[derive(Clone, Copy, Debug)]
+pub struct HotSettings {
+    pub hover_delay_ms: u64,
+    pub click_mode: bool,
+    pub passthrough: bool,
+    pub peek: bool,
+    /// 0 = saver, 1 = balanced, 2 = smooth
+    pub profile: u8,
+    pub fullscreen_hide: bool,
+    pub monitor_cursor: bool,
+}
+
+static HOT: AtomicU64 = AtomicU64::new(0);
+static DISK_VER: Mutex<u64> = Mutex::new(0);
+
+struct StoreState {
+    val: Value,
+    ver: u64,
+}
+
+fn sync_hot(v: &Value) {
+    let hover_delay_ms = v
+        .pointer("/interaction/hoverDelay")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(500.0)
+        .clamp(0.0, 3000.0) as u64;
+    let click_mode = v.pointer("/interaction/expand").and_then(|x| x.as_str()) == Some("click");
+    let passthrough = v.pointer("/interaction/passthrough").and_then(|x| x.as_bool()).unwrap_or(false);
+    let peek = v.pointer("/interaction/peek").and_then(|x| x.as_bool()).unwrap_or(true);
+    let profile: u8 = match v.pointer("/general/profile").and_then(|x| x.as_str()).unwrap_or("balanced") {
+        "saver" => 0,
+        "smooth" => 2,
+        _ => 1,
+    };
+    let fullscreen_hide = v.pointer("/interaction/fullscreen").and_then(|x| x.as_str()) == Some("hide");
+    let monitor_cursor = v.pointer("/general/monitor").and_then(|x| x.as_str()) == Some("cursor");
+    let packed = (1u64 << 63)
+        | (hover_delay_ms & 0xffff_ffff)
+        | ((click_mode as u64) << 32)
+        | ((passthrough as u64) << 33)
+        | ((peek as u64) << 34)
+        | (((profile as u64) & 0b11) << 35)
+        | ((fullscreen_hide as u64) << 37)
+        | ((monitor_cursor as u64) << 38);
+    HOT.store(packed, Ordering::Release);
+}
+
+pub fn hot() -> HotSettings {
+    let mut raw = HOT.load(Ordering::Acquire);
+    if raw & (1u64 << 63) == 0 {
+        let _ = store();
+        raw = HOT.load(Ordering::Acquire);
+    }
+    HotSettings {
+        hover_delay_ms: raw & 0xffff_ffff,
+        click_mode: (raw >> 32) & 1 != 0,
+        passthrough: (raw >> 33) & 1 != 0,
+        peek: (raw >> 34) & 1 != 0,
+        profile: ((raw >> 35) & 0b11) as u8,
+        fullscreen_hide: (raw >> 37) & 1 != 0,
+        monitor_cursor: (raw >> 38) & 1 != 0,
+    }
+}
+
+/// Atomically writes `bytes` to `path` via a synced sibling `.tmp` file, retrying `rename` on
+/// transient Windows sharing / `PermissionDenied` errors and cleaning up `.tmp` on failure.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp = PathBuf::from(tmp_os);
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let transient = e.kind() == std::io::ErrorKind::PermissionDenied
+                    || matches!(e.raw_os_error(), Some(5 | 32 | 33));
+                if transient && attempt < 4 {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(15));
+                    continue;
+                }
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    }
+}
+
+fn persist_versioned(ver: u64, bytes: &[u8]) {
+    let mut written = DISK_VER.lock().unwrap();
+    if ver <= *written {
+        return;
+    }
+    if atomic_write(&path(), bytes).is_ok() {
+        *written = ver;
+    }
+}
 
 fn path() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
@@ -19,6 +135,7 @@ pub fn defaults() -> Value {
         "general": {
             "autostart": false,
             "autoUpdate": true,
+            "lang": "auto",
             // saver | balanced | smooth
             "profile": "balanced",
             // primary | cursor | <monitor name>
@@ -224,11 +341,33 @@ pub fn defaults() -> Value {
     })
 }
 
-/// Recursively fills keys missing in `v` from `d` (arrays are taken as a whole from `v`, except
-/// ordered `{id, on}` lists: ids added in a later version are appended, switched off).
+fn same_kind(a: &Value, b: &Value) -> bool {
+    matches!(
+        (a, b),
+        (Value::Null, Value::Null)
+            | (Value::Bool(_), Value::Bool(_))
+            | (Value::Number(_), Value::Number(_))
+            | (Value::String(_), Value::String(_))
+            | (Value::Array(_), Value::Array(_))
+            | (Value::Object(_), Value::Object(_))
+    )
+}
+
+/// Recursively fills keys missing or mismatched in `v` from `d` (arrays are taken as a whole from
+/// `v`, except ordered `{id, on}` lists: ids added in a later version are appended, switched off).
 fn fill(v: &mut Value, d: &Value) {
+    if !same_kind(v, d) {
+        *v = d.clone();
+        return;
+    }
     if let (Some(va), Some(da)) = (v.as_array_mut(), d.as_array()) {
-        if da.iter().all(|x| x.get("id").is_some()) {
+        if !da.is_empty() && da.iter().all(|x| x.get("id").is_some()) {
+            va.retain(|y| y.is_object() && y.get("id").and_then(|x| x.as_str()).is_some());
+            for y in va.iter_mut() {
+                if !y.get("on").map(|x| x.is_boolean()).unwrap_or(false) {
+                    y["on"] = Value::Bool(false);
+                }
+            }
             for x in da {
                 let id = x.get("id");
                 if !va.iter().any(|y| y.get("id") == id) {
@@ -243,8 +382,8 @@ fn fill(v: &mut Value, d: &Value) {
     if let (Some(vo), Some(dobj)) = (v.as_object_mut(), d.as_object()) {
         for (k, dv) in dobj {
             match vo.get_mut(k) {
-                Some(x) => fill(x, dv),
-                None => {
+                Some(x) if same_kind(x, dv) => fill(x, dv),
+                _ => {
                     vo.insert(k.clone(), dv.clone());
                 }
             }
@@ -269,8 +408,8 @@ fn merge(v: &mut Value, patch: &Value) {
     }
 }
 
-fn store() -> &'static Mutex<Value> {
-    static S: OnceLock<Mutex<Value>> = OnceLock::new();
+fn store() -> &'static Mutex<StoreState> {
+    static S: OnceLock<Mutex<StoreState>> = OnceLock::new();
     S.get_or_init(|| {
         let mut v: Value = std::fs::read_to_string(path())
             .ok()
@@ -285,16 +424,16 @@ fn store() -> &'static Mutex<Value> {
         let notify_v = v.pointer("/meta/notifyV").and_then(|x| x.as_u64()).unwrap_or(0);
         let old_notify = notify_v < 1;
         let old_clip = v.pointer("/meta/clipV").and_then(|x| x.as_u64()).unwrap_or(0) < 1;
-        fill(&mut v, &defaults());
+        let d = defaults();
+        fill(&mut v, &d);
+        let mut migrated = false;
         if notify_v < 2 && !fresh {
             // the first notification builds showed the text: now hidden unless chosen again
             if v.pointer("/notify/privacy").and_then(|x| x.as_str()) == Some("smart") {
                 v["notify"]["privacy"] = json!("source");
             }
             v["meta"]["notifyV"] = json!(2);
-            if let Ok(t) = serde_json::to_string_pretty(&v) {
-                let _ = std::fs::write(path(), t);
-            }
+            migrated = true;
         }
         if old_notify && !fresh {
             // new lists items arrive switched off; the notification page and count start on
@@ -306,9 +445,7 @@ fn store() -> &'static Mutex<Value> {
                 }
             }
             v["meta"]["notifyV"] = json!(2);
-            if let Ok(t) = serde_json::to_string_pretty(&v) {
-                let _ = std::fs::write(path(), t);
-            }
+            migrated = true;
         }
         if old_clip && !fresh {
             // new list items arrive switched off; the clipboard page and pill icon start on (asked for)
@@ -320,9 +457,7 @@ fn store() -> &'static Mutex<Value> {
                 }
             }
             v["meta"]["clipV"] = json!(1);
-            if let Ok(t) = serde_json::to_string_pretty(&v) {
-                let _ = std::fs::write(path(), t);
-            }
+            migrated = true;
         }
         if old_ring && !fresh {
             // 0.2.6: Antigravity now reports 5-hour + weekly pools; "max" was the old default
@@ -330,59 +465,74 @@ fn store() -> &'static Mutex<Value> {
                 v["ai"]["ring"]["mode"]["antigravity"] = json!("both");
             }
             v["meta"]["ringV"] = json!(1);
-            if let Ok(t) = serde_json::to_string_pretty(&v) {
-                let _ = std::fs::write(path(), t);
-            }
+            migrated = true;
         }
         if old_pill && !fresh {
             // 0.2.4: bigger pill, items side by side instead of one rotating slot
-            let d = defaults();
             let h = v.pointer("/size/pillH").and_then(|x| x.as_f64()).unwrap_or(36.0).max(44.0);
             let w = v.pointer("/size/pillMaxW").and_then(|x| x.as_f64()).unwrap_or(520.0).max(760.0);
             v["size"]["pillH"] = json!(h);
             v["size"]["pillMaxW"] = json!(w);
             v["pill"]["items"] = d["pill"]["items"].clone();
             v["meta"]["pillV"] = json!(2);
-            if let Ok(t) = serde_json::to_string_pretty(&v) {
-                let _ = std::fs::write(path(), t);
+            migrated = true;
+        }
+        sync_hot(&v);
+        if migrated {
+            if let Ok(bytes) = serde_json::to_vec_pretty(&v) {
+                let _ = atomic_write(&path(), &bytes);
             }
         }
-        Mutex::new(v)
+        Mutex::new(StoreState { val: v, ver: 0 })
     })
 }
 
 pub fn get() -> Value {
-    store().lock().unwrap().clone()
+    store().lock().unwrap().val.clone()
 }
 
 pub fn update(patch: &Value) -> Value {
-    let mut s = store().lock().unwrap();
-    merge(&mut s, patch);
-    fill(&mut s, &defaults());
-    if let Ok(t) = serde_json::to_string_pretty(&*s) {
-        let _ = std::fs::write(path(), t);
+    let (ver, out, bytes) = {
+        let mut s = store().lock().unwrap();
+        merge(&mut s.val, patch);
+        fill(&mut s.val, &defaults());
+        sync_hot(&s.val);
+        s.ver += 1;
+        let bytes = serde_json::to_vec_pretty(&s.val).ok();
+        (s.ver, s.val.clone(), bytes)
+    };
+    if let Some(b) = bytes {
+        persist_versioned(ver, &b);
     }
-    s.clone()
+    out
 }
 
 pub fn reset() -> Value {
-    let mut s = store().lock().unwrap();
-    // "restore defaults" is about the look and behaviour: the tour doesn't come back
-    let tour_done = s.pointer("/general/tourDone").cloned();
-    *s = defaults();
-    if let Some(v) = tour_done {
-        s["general"]["tourDone"] = v;
+    let (ver, out, bytes) = {
+        let mut s = store().lock().unwrap();
+        // "restore defaults" is about the look and behaviour: the tour doesn't come back
+        let tour_done = s.val.pointer("/general/tourDone").cloned();
+        s.val = defaults();
+        if let Some(v) = tour_done {
+            if v.is_boolean() {
+                s.val["general"]["tourDone"] = v;
+            }
+        }
+        sync_hot(&s.val);
+        s.ver += 1;
+        let bytes = serde_json::to_vec_pretty(&s.val).ok();
+        (s.ver, s.val.clone(), bytes)
+    };
+    if let Some(b) = bytes {
+        persist_versioned(ver, &b);
     }
-    if let Ok(t) = serde_json::to_string_pretty(&*s) {
-        let _ = std::fs::write(path(), t);
-    }
-    s.clone()
+    out
 }
 
 /// Dotted path lookup, e.g. "interaction.expand".
 pub fn str_at(path: &str, default: &str) -> String {
     let s = store().lock().unwrap();
-    let mut v = &*s;
+    let mut v = &s.val;
     for p in path.split('.') {
         match v.get(p) {
             Some(x) => v = x,
@@ -394,7 +544,7 @@ pub fn str_at(path: &str, default: &str) -> String {
 
 pub fn bool_at(path: &str, default: bool) -> bool {
     let s = store().lock().unwrap();
-    let mut v = &*s;
+    let mut v = &s.val;
     for p in path.split('.') {
         match v.get(p) {
             Some(x) => v = x,
@@ -406,7 +556,7 @@ pub fn bool_at(path: &str, default: bool) -> bool {
 
 pub fn num_at(path: &str, default: f64) -> f64 {
     let s = store().lock().unwrap();
-    let mut v = &*s;
+    let mut v = &s.val;
     for p in path.split('.') {
         match v.get(p) {
             Some(x) => v = x,
@@ -419,7 +569,7 @@ pub fn num_at(path: &str, default: f64) -> f64 {
 /// Whether an item of an ordered `{id, on}` list is switched on.
 pub fn item_on(list_path: &str, id: &str) -> bool {
     let s = store().lock().unwrap();
-    let mut v = &*s;
+    let mut v = &s.val;
     for p in list_path.split('.') {
         match v.get(p) {
             Some(x) => v = x,

@@ -17,6 +17,8 @@ use windows_sys::Win32::System::Threading::{
 
 #[derive(Clone, Debug)]
 pub struct ProcInfo {
+    /// Pre-lowercased identity (`path` if known, else `exe`), avoiding per-socket `to_lowercase()` allocations.
+    pub key: String,
     pub exe: String,
     pub path: Option<String>,
     pub display: String,
@@ -81,17 +83,28 @@ pub fn file_description(path: &str) -> Option<String> {
         if size == 0 {
             return None;
         }
-        let mut data = vec![0u8; size as usize];
+        // Allocate u32-aligned backing storage so u16 queries inside it are properly aligned.
+        let mut data = vec![0u32; (size as usize + 3) / 4];
         if GetFileVersionInfoW(wpath.as_ptr(), 0, size, data.as_mut_ptr() as *mut c_void) == 0 {
             return None;
         }
+        let read_u16_vec = |p: *const c_void, count: usize| -> Vec<u16> {
+            if (p as usize) % 2 == 0 {
+                std::slice::from_raw_parts(p as *const u16, count).to_vec()
+            } else {
+                let raw = p as *const u8;
+                (0..count)
+                    .map(|i| std::ptr::read_unaligned(raw.add(i * 2) as *const u16))
+                    .collect()
+            }
+        };
         let mut ptr: *mut c_void = std::ptr::null_mut();
         let mut len = 0u32;
         let mut langs: Vec<(u16, u16)> = Vec::new();
         let q = wide("\\VarFileInfo\\Translation");
-        if VerQueryValueW(data.as_ptr() as *const c_void, q.as_ptr(), &mut ptr, &mut len) != 0 && len >= 4 {
+        if VerQueryValueW(data.as_ptr() as *const c_void, q.as_ptr(), &mut ptr, &mut len) != 0 && len >= 4 && !ptr.is_null() {
             let n = (len / 4) as usize;
-            let pairs = std::slice::from_raw_parts(ptr as *const u16, n * 2);
+            let pairs = read_u16_vec(ptr, n * 2);
             for i in 0..n {
                 langs.push((pairs[i * 2], pairs[i * 2 + 1]));
             }
@@ -100,9 +113,9 @@ pub fn file_description(path: &str) -> Option<String> {
         langs.push((0x0409, 0x04e4));
         for (lang, cp) in langs {
             let q = wide(&format!("\\StringFileInfo\\{:04x}{:04x}\\FileDescription", lang, cp));
-            if VerQueryValueW(data.as_ptr() as *const c_void, q.as_ptr(), &mut ptr, &mut len) != 0 && len > 1 {
-                let s = std::slice::from_raw_parts(ptr as *const u16, len as usize);
-                let d = from_wide(s).trim().to_string();
+            if VerQueryValueW(data.as_ptr() as *const c_void, q.as_ptr(), &mut ptr, &mut len) != 0 && len > 1 && !ptr.is_null() {
+                let s = read_u16_vec(ptr, len as usize);
+                let d = from_wide(&s).trim().to_string();
                 if !d.is_empty() {
                     return Some(d);
                 }
@@ -162,6 +175,7 @@ fn stem(exe: &str) -> String {
 pub struct ProcCache {
     by_pid: HashMap<u32, ProcInfo>,
     desc_by_path: HashMap<String, Option<String>>,
+    owner_by_dir: HashMap<String, Option<(String, Option<String>)>>,
 }
 
 impl ProcCache {
@@ -181,21 +195,58 @@ impl ProcCache {
         self.by_pid = next;
     }
 
+    /// Lightweight refresh that retains already-cached running PIDs and only queries Win32 version
+    /// info / image paths for PIDs in `needed_pids` (e.g. processes with active sockets or traffic).
+    pub fn refresh_active(&mut self, procs: &[(u32, String)], needed_pids: &std::collections::HashSet<u32>) {
+        let mut next = HashMap::with_capacity(needed_pids.len().max(32));
+        for (pid, exe) in procs {
+            if let Some(old) = self.by_pid.remove(pid) {
+                if &old.exe == exe {
+                    next.insert(*pid, old);
+                    continue;
+                }
+            }
+            if needed_pids.contains(pid) {
+                let info = self.build(*pid, exe);
+                next.insert(*pid, info);
+            }
+        }
+        self.by_pid = next;
+    }
+
+    fn owner_cached(&mut self, path: &str) -> Option<(String, Option<String>)> {
+        let dir_key = Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| path.to_ascii_lowercase());
+        if self.owner_by_dir.len() > 4096 {
+            self.owner_by_dir.clear();
+        }
+        self.owner_by_dir
+            .entry(dir_key)
+            .or_insert_with(|| owner_app(path))
+            .clone()
+    }
+
     fn build(&mut self, pid: u32, exe: &str) -> ProcInfo {
         if pid == 0 {
-            return ProcInfo { exe: "Idle".into(), path: None, display: crate::i18n::t("系统空闲进程").into(), icon: None };
+            return ProcInfo { key: "idle".into(), exe: "Idle".into(), path: None, display: crate::i18n::t("系统空闲进程").into(), icon: None };
         }
         if pid == 4 {
-            return ProcInfo { exe: "System".into(), path: None, display: "System".into(), icon: None };
+            return ProcInfo { key: "system".into(), exe: "System".into(), path: None, display: "System".into(), icon: None };
         }
         let path = image_path(pid);
-        let desc = match &path {
-            Some(p) => self
+        if self.desc_by_path.len() > 4096 {
+            self.desc_by_path.clear();
+        }
+        let path_lower = path.as_ref().map(|p| p.to_lowercase());
+        let desc = match (&path, &path_lower) {
+            (Some(p), Some(pl)) => self
                 .desc_by_path
-                .entry(p.clone())
+                .entry(pl.clone())
                 .or_insert_with(|| file_description(p))
                 .clone(),
-            None => None,
+            _ => None,
         };
         let mut icon = None;
         let display = match desc {
@@ -204,7 +255,7 @@ impl ProcCache {
             _ => {
                 // no description: a helper inside a bigger app's folder (Antigravity's
                 // language_server.exe…) is named after that app and borrows its icon
-                match path.as_deref().and_then(owner_app) {
+                match path.as_deref().and_then(|p| self.owner_cached(p)) {
                     Some((app, main)) if !app.eq_ignore_ascii_case(&stem(exe)) => {
                         icon = main;
                         format!("{app} · {}", stem(exe))
@@ -213,7 +264,8 @@ impl ProcCache {
                 }
             }
         };
-        ProcInfo { exe: exe.to_string(), path, display, icon }
+        let key = path_lower.unwrap_or_else(|| exe.to_lowercase());
+        ProcInfo { key, exe: exe.to_string(), path, display, icon }
     }
 
     pub fn get(&self, pid: u32) -> Option<&ProcInfo> {

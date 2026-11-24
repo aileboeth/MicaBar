@@ -26,6 +26,7 @@ pub struct Known {
     pub exe: String,
     pub path: String,
     pub first: u64,
+    pub last: u64,
     /// first destination (host or IP, with country)
     pub dest: String,
     /// seen after learning (it got a note)
@@ -50,29 +51,94 @@ static BOOK: Mutex<Option<Book>> = Mutex::new(None);
 
 fn file() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("MicaBar").join("known-apps.json")
+    let dir = PathBuf::from(base).join("MicaBar");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("known-apps.json")
 }
 
 fn save(b: &Book) {
     if let Ok(s) = serde_json::to_string(b) {
-        let _ = std::fs::write(file(), s);
+        let _ = crate::settings::atomic_write(&file(), s.as_bytes());
     }
 }
 
-/// A path's identity across updates: lower case, version-like folders replaced by "*".
+fn has_version_pattern(s: &str) -> bool {
+    s.as_bytes()
+        .windows(3)
+        .any(|w| w[0].is_ascii_digit() && w[1] == b'.' && w[2].is_ascii_digit())
+}
+
+fn is_top_container(prev: Option<&str>) -> bool {
+    let Some(p) = prev else { return true };
+    p.ends_with(':')
+        || matches!(
+            p,
+            "program files" | "program files (x86)" | "programs" | "local" | "roaming" | "windowsapps"
+        )
+}
+
+fn fold_segment(seg: &str, prev: Option<&str>, is_last: bool) -> String {
+    if is_last || seg.ends_with(".exe") {
+        return seg.to_string();
+    }
+    // WindowsApps\<Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>: fold only the version field
+    // inside the package family so different Store apps never collapse into `windowsapps\*`.
+    if prev == Some("windowsapps") {
+        let mut parts: Vec<&str> = seg.split('_').collect();
+        if parts.len() >= 2 && has_version_pattern(parts[1]) {
+            parts[1] = "*";
+            return parts.join("_");
+        }
+        return seg.to_string();
+    }
+    if !has_version_pattern(seg) {
+        return seg.to_string();
+    }
+    let bytes = seg.as_bytes();
+    // Locate the start of the `<digits>.<digits>` run.
+    let mut ver_start = None;
+    for i in 0..bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j + 1 < bytes.len() && bytes[j] == b'.' && bytes[j + 1].is_ascii_digit() {
+                ver_start = Some(i);
+                break;
+            }
+        }
+    }
+    let Some(mut vi) = ver_start else { return seg.to_string() };
+    // Include an optional leading 'v' right before the version (e.g. "v2.0" or "app-v2.0").
+    if vi > 0 && bytes[vi - 1] == b'v' && (vi == 1 || matches!(bytes[vi - 2], b'-' | b'_' | b'.' | b' ')) {
+        vi -= 1;
+    }
+    let prefix = &seg[..vi];
+    let generic_prefix = matches!(prefix, "" | "app-" | "app_" | "ver-" | "version-");
+    if generic_prefix {
+        if is_top_container(prev) {
+            // Directly under drive root / Program Files with no distinct app prefix: keep as-is.
+            seg.to_string()
+        } else {
+            "*".to_string()
+        }
+    } else {
+        // Keep the app prefix ("good-1.0" -> "good-*") so Good-1.0 and Evil-2.0 never collide.
+        format!("{prefix}*")
+    }
+}
+
+/// A path's identity across updates: lower case, version-like folders folded safely.
 pub fn norm(path: &str) -> String {
     let p = path.to_lowercase().replace('/', "\\");
-    p.split('\\')
-        .map(|seg| {
-            let b = seg.as_bytes();
-            // "1.2", "app-1.2.3", "v2.0", "chrome-125.0.1": digits, a dot, digits
-            let versiony = b.windows(3).any(|w| w[0].is_ascii_digit() && w[1] == b'.' && w[2].is_ascii_digit());
-            let last = seg.ends_with(".exe");
-            if versiony && !last {
-                "*"
-            } else {
-                seg
-            }
+    let segs: Vec<&str> = p.split('\\').collect();
+    let n = segs.len();
+    segs.iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            let prev = if i > 0 { Some(segs[i - 1]) } else { None };
+            fold_segment(seg, prev, i + 1 == n)
         })
         .collect::<Vec<_>>()
         .join("\\")
@@ -84,13 +150,20 @@ pub fn init(history: Vec<(String, String)>) {
     if g.is_some() {
         return;
     }
-    let b = match std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str::<Book>(&s).ok()) {
+    let b = match std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str::<Book>(s.trim_start_matches('\u{feff}')).ok()) {
         Some(b) => b,
         None => {
             let now = now_ms();
             let mut b = Book { learn_until: now + LEARN_MS, apps: HashMap::new() };
             for (name, path) in history {
-                b.apps.entry(norm(&path)).or_insert(Known { name, path: path.clone(), exe: exe_of(&path), first: now, ..Default::default() });
+                b.apps.entry(norm(&path)).or_insert(Known {
+                    name,
+                    path: path.clone(),
+                    exe: exe_of(&path),
+                    first: now,
+                    last: now,
+                    ..Default::default()
+                });
             }
             log(format!("firstnet: new book, {} programs from the traffic history, learning 10 min", b.apps.len()));
             save(&b);
@@ -120,38 +193,90 @@ pub fn observe(seen: &[(String, String, String)]) -> Vec<Known> {
     if !crate::settings::bool_at("firstNet.on", true) {
         return Vec::new();
     }
-    let mut g = BOOK.lock().unwrap();
-    let Some(b) = g.as_mut() else { return Vec::new() };
     let now = now_ms();
-    let learning = now < b.learn_until;
     let mut fresh = Vec::new();
-    let mut changed = false;
-    for (name, path, dest) in seen {
-        if skip(path) {
-            continue;
+    let mut reblock: Vec<(String, String, String)> = Vec::new();
+    {
+        let mut g = BOOK.lock().unwrap();
+        let Some(b) = g.as_mut() else { return Vec::new() };
+        let learning = now < b.learn_until;
+        let mut changed = false;
+        for (name, path, dest) in seen {
+            if skip(path) {
+                continue;
+            }
+            let key = norm(path);
+            if let Some(k) = b.apps.get_mut(&key) {
+                if now.saturating_sub(k.last) >= 3_600_000 {
+                    changed = true;
+                }
+                k.last = now;
+                if k.blocked && !k.path.eq_ignore_ascii_case(path) {
+                    reblock.push((key, k.path.clone(), path.clone()));
+                }
+                continue;
+            }
+            let k = Known {
+                name: name.clone(),
+                exe: exe_of(path),
+                path: path.clone(),
+                first: now,
+                last: now,
+                dest: dest.clone(),
+                fresh: !learning,
+                ..Default::default()
+            };
+            log(format!("firstnet: {} {} -> {dest}", if learning { "learned" } else { "NEW" }, path));
+            if !learning {
+                fresh.push(k.clone());
+            }
+            b.apps.insert(key, k);
+            changed = true;
         }
-        let key = norm(path);
-        if b.apps.contains_key(&key) {
-            continue;
+        // keep the book small: evict oldest-seen (`last`) non-blocked entries beyond 2000
+        if b.apps.len() > 2000 {
+            let mut v: Vec<(String, u64)> = b
+                .apps
+                .iter()
+                .filter(|(_, k)| !k.blocked)
+                .map(|(n, k)| (n.clone(), k.last.max(k.first)))
+                .collect();
+            v.sort_by_key(|x| x.1);
+            let drop_n = b.apps.len().saturating_sub(2000);
+            for (n, _) in v.into_iter().take(drop_n) {
+                b.apps.remove(&n);
+                changed = true;
+            }
         }
-        let k = Known { name: name.clone(), exe: exe_of(path), path: path.clone(), first: now, dest: dest.clone(), fresh: !learning, ..Default::default() };
-        log(format!("firstnet: {} {} -> {dest}", if learning { "learned" } else { "NEW" }, path));
-        if !learning {
-            fresh.push(k.clone());
+        if changed {
+            save(b);
         }
-        b.apps.insert(key, k);
-        changed = true;
     }
-    // keep the book small: quiet entries beyond 2000 go (oldest first)
-    if b.apps.len() > 2000 {
-        let mut v: Vec<(String, u64)> = b.apps.iter().filter(|(_, k)| !k.blocked).map(|(n, k)| (n.clone(), k.first)).collect();
-        v.sort_by_key(|x| x.1);
-        for (n, _) in v.into_iter().take(b.apps.len() - 2000) {
-            b.apps.remove(&n);
+    // Re-apply firewall block outside BOOK lock when a blocked program updated its path.
+    if !reblock.is_empty() {
+        let mut applied = Vec::new();
+        for (key, old_path, new_path) in reblock {
+            match firewall_block(&new_path) {
+                Ok(new_rule) => {
+                    log(format!("firstnet: updated blocked app path {old_path} -> {new_path}"));
+                    applied.push((key, new_path, new_rule));
+                }
+                Err(e) => log(format!("firstnet: re-block {new_path} failed: {e}")),
+            }
         }
-    }
-    if changed {
-        save(b);
+        if !applied.is_empty() {
+            let mut g = BOOK.lock().unwrap();
+            if let Some(b) = g.as_mut() {
+                for (key, new_path, new_rule) in applied {
+                    if let Some(k) = b.apps.get_mut(&key) {
+                        k.exe = exe_of(&new_path);
+                        k.path = new_path;
+                        k.rule = new_rule;
+                    }
+                }
+                save(b);
+            }
+        }
     }
     fresh
 }
@@ -206,7 +331,10 @@ fn netsh(args: &[String]) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(crate::tr!("netsh 失败（{0}）", String::from_utf8_lossy(&out.stdout).trim()))
+        let stdout = crate::guard::decode_console(&out.stdout);
+        let stderr = crate::guard::decode_console(&out.stderr);
+        let msg = if stdout.trim().is_empty() { stderr } else { stdout };
+        Err(crate::tr!("netsh 失败（{0}）", msg.trim()))
     }
 }
 
@@ -232,7 +360,29 @@ pub fn firewall_block(path: &str) -> Result<String, String> {
 }
 
 pub fn firewall_unblock(name: &str, path: &str) -> Result<(), String> {
-    netsh(&["advfirewall".into(), "firewall".into(), "delete".into(), "rule".into(), format!("name={name}"), format!("program={path}")])
+    let r = netsh(&[
+        "advfirewall".into(),
+        "firewall".into(),
+        "delete".into(),
+        "rule".into(),
+        format!("name={name}"),
+        format!("program={path}"),
+    ]);
+    if r.is_ok() {
+        return Ok(());
+    }
+    let r2 = netsh(&[
+        "advfirewall".into(),
+        "firewall".into(),
+        "delete".into(),
+        "rule".into(),
+        format!("name={name}"),
+    ]);
+    if r2.is_ok() || !crate::guard::firewall_rule_exists(name) {
+        Ok(())
+    } else {
+        r
+    }
 }
 
 /// Records the block / unblock in the book.
@@ -285,5 +435,15 @@ mod tests {
         assert_eq!(norm(r"C:\Program Files\Google\Chrome\Application\chrome.exe"), r"c:\program files\google\chrome\application\chrome.exe");
         assert_eq!(norm(r"C:\x\125.0.6422.60\y.exe"), r"c:\x\*\y.exe");
         assert_eq!(norm(r"C:\x\tool-2.1.exe"), r"c:\x\tool-2.1.exe");
+        assert_ne!(norm(r"C:\Program Files\Good-1.0\helper.exe"), norm(r"C:\Program Files\Evil-2.0\helper.exe"));
+        assert_eq!(norm(r"C:\Program Files\Good-1.0\helper.exe"), norm(r"C:\Program Files\Good-1.2\helper.exe"));
+        assert_ne!(
+            norm(r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.20.11781.0_x64__8wekyb3d8bbwe\wt.exe"),
+            norm(r"C:\Program Files\WindowsApps\Other.App_1.0.0.0_x64__abcdef\wt.exe")
+        );
+        assert_eq!(
+            norm(r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.20.11781.0_x64__8wekyb3d8bbwe\wt.exe"),
+            norm(r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.21.2361.0_x64__8wekyb3d8bbwe\wt.exe")
+        );
     }
 }

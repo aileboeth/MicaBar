@@ -6,6 +6,7 @@
 // the DOM and puts it back onto the new elements after a re-render.
 
 const motionOff = () => document.documentElement.classList.contains("no-anim");
+const mEsc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // ---------- rolling counter (odometer) ----------
 // Odo.slot(key) renders the text last shown for that key; Odo.set(key, text) then rolls each digit
@@ -13,7 +14,7 @@ const motionOff = () => document.documentElement.classList.contains("no-anim");
 const Odo = (() => {
   const shown = new Map(); // key -> text on screen
   const isD = (c) => c >= "0" && c <= "9";
-  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const esc = mEsc;
   const COL = "<i>0</i><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i><i>6</i><i>7</i><i>8</i><i>9</i>";
   // digits sit in reels; everything else (".", units, "—") is plain text
   const build = (text, start) => [...text].map((c, i) => (isD(c)
@@ -29,7 +30,9 @@ const Odo = (() => {
 
   function apply(el, text) {
     const cur = el.dataset.t ?? "";
-    if (cur === text) return;
+    if (cur === text) { el._odoReady = true; return; }
+    if (!el._odoReady && cur && !motionOff()) void el.offsetWidth;
+    el._odoReady = true;
     el.dataset.t = text;
     if (shape(cur) === shape(text) && cur) {
       const reels = el.querySelectorAll(".odo-s");
@@ -66,7 +69,8 @@ const Odo = (() => {
 // ---------- cards that tilt towards the pointer, with a light spot under it ----------
 const Tilt = (() => {
   let cur = null; // { el, key, rx, ry, mx, my }
-  const all = () => [...document.querySelectorAll(".tilt")];
+  let listCache = null;
+  const all = () => listCache || (listCache = [...document.querySelectorAll(".tilt")]);
 
   function put(el, s, now) {
     if (now) el.classList.add("tilt-now");
@@ -98,7 +102,8 @@ const Tilt = (() => {
     const py = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
     // bigger cards tilt less, so the far edge never moves more than a few pixels
     const max = Math.min(Number(el.dataset.tilt) || 7, 2400 / Math.max(r.width, r.height));
-    const s = { el, key: all().indexOf(el), rx: (0.5 - py) * 2 * max, ry: (px - 0.5) * 2 * max, mx: px * 100, my: py * 100 };
+    const key = cur && cur.el === el ? cur.key : all().indexOf(el);
+    const s = { el, key, rx: (0.5 - py) * 2 * max, ry: (px - 0.5) * 2 * max, mx: px * 100, my: py * 100 };
     cur = s;
     put(el, s, false);
   }, { passive: true });
@@ -107,6 +112,7 @@ const Tilt = (() => {
 
   // after a re-render: the card under the pointer is a new element, give it the same tilt at once
   function restore() {
+    listCache = null;
     if (!cur || cur.el.isConnected) return;
     const el = all()[cur.key];
     if (!el) { cur = null; return; }
@@ -172,9 +178,10 @@ function springTo(get, setv, target, { v = 0, k = 0.0005, c = 0.04, done } = {})
 // past the top it stretches like a rubber band; let go and it settles on the anchor the throw is
 // heading for (closed / half / full), faster throws skip to the next one.
 const Sheet = (() => {
-  let host = null, el = null, scrim = null, body = null;
+  let host = null, el = null, scrim = null, body = null, prevFocus = null;
   let vis = 0, anim = null, onClose = null, drag = null, clickFn = null, fit = false;
   const RUBBER = 70;
+  const FOCUS_SEL = 'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
 
   const full = () => Math.max(160, (host?.clientHeight || 400) - 28);
   // "fit": the middle anchor is the content's own height (a short sheet shows all of it)
@@ -203,20 +210,31 @@ const Sheet = (() => {
 
   function teardown() {
     const cb = onClose;
+    const restoreEl = prevFocus;
     onClose = null;
+    prevFocus = null;
     el?.remove(); scrim?.remove();
     el = scrim = body = null;
     host = null;
     vis = 0;
     cb?.();
+    if (restoreEl?.isConnected) restoreEl.focus?.({ preventScroll: true });
+  }
+
+  function focusInside() {
+    if (!el || el.contains(document.activeElement)) return;
+    el.style.outline = "none";
+    el.focus?.({ preventScroll: true });
   }
 
   function open(h, html, { onClose: oc, onClick, fit: f = false } = {}) {
     if (el && host !== h) { anim?.stop(); teardown(); }
+    else if (el && onClose) { const prev = onClose; onClose = null; prev(); }
     onClose = oc || null;
     clickFn = onClick || null;
     fit = f;
     if (!el) {
+      prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       host = h;
       scrim = document.createElement("div");
       scrim.className = "sheet-scrim";
@@ -224,17 +242,21 @@ const Sheet = (() => {
       el = document.createElement("div");
       el.className = "sheet";
       el.setAttribute("role", "dialog");
-      el.innerHTML = `<div class="sheet-bar" data-nograb title="${tr("上下拖动；往下甩关闭")}"><i></i></div><div class="sheet-body"></div>`;
+      el.setAttribute("aria-modal", "true");
+      el.tabIndex = -1;
+      el.innerHTML = `<div class="sheet-bar" data-nograb title="${mEsc(tr("上下拖动；往下甩关闭"))}"><i></i></div><div class="sheet-body"></div>`;
       body = el.querySelector(".sheet-body");
       host.append(scrim, el);
       el.addEventListener("click", (e) => clickFn?.(e));
       el.querySelector(".sheet-bar").addEventListener("pointerdown", startDrag);
       el.addEventListener("pointerdown", (e) => { if (e.target.closest("[data-sheet-drag]") && !e.target.closest("button")) startDrag(e); });
+      el.addEventListener("lostpointercapture", endDrag);
       vis = 0;
       paint();
     }
     body.innerHTML = html;
     to(half());
+    focusInside();
   }
 
   // a click is a press and a release on the same element: no rebuild while a button is held
@@ -246,8 +268,10 @@ const Sheet = (() => {
   function update(html) {
     if (!body || drag || held) return;
     const s = body.scrollTop;
+    const hadFocus = el && el.contains(document.activeElement);
     body.innerHTML = html;
     body.scrollTop = s;
+    if (hadFocus || document.activeElement === document.body) focusInside();
     // a fitted sheet resting on its middle anchor follows its content's height
     if (fit && vis > 0 && vis < full() - 4 && Math.abs(half() - vis) > 4 && (!anim || anim.target !== 0)) to(half());
   }
@@ -259,7 +283,7 @@ const Sheet = (() => {
     anim?.stop();
     anim = null;
     drag = { y0: e.clientY, v0: vis, samples: [{ y: e.clientY, t: performance.now() }], id: e.pointerId };
-    el.setPointerCapture?.(e.pointerId);
+    try { el.setPointerCapture?.(e.pointerId); } catch { /* ignore */ }
     el.classList.add("dragging");
     e.preventDefault();
   }
@@ -277,7 +301,7 @@ const Sheet = (() => {
   });
 
   const endDrag = (e) => {
-    if (!drag || (e && e.pointerId !== drag.id)) return;
+    if (!drag || (e && e.pointerId != null && e.pointerId !== drag.id)) return;
     const s = drag.samples, a = s[0], b = s[s.length - 1];
     const v = b.t > a.t ? -(b.y - a.y) / (b.t - a.t) : 0; // px/ms, up = positive
     drag = null;
@@ -297,7 +321,22 @@ const Sheet = (() => {
   document.addEventListener("pointerup", endDrag);
   document.addEventListener("pointercancel", endDrag);
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && el) { close(); e.stopPropagation(); e.preventDefault(); }
+    if (!el) return;
+    if (e.key === "Tab") {
+      const items = [...el.querySelectorAll(FOCUS_SEL)].filter((x) => x.offsetParent !== null);
+      if (!items.length) { e.preventDefault(); el.focus({ preventScroll: true }); return; }
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !el.contains(document.activeElement))) {
+        e.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!e.shiftKey && (document.activeElement === last || !el.contains(document.activeElement))) {
+        e.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+      return;
+    }
+    const menu = document.getElementById("menu");
+    if (e.key === "Escape" && (!menu || menu.hidden)) { close(); e.stopPropagation(); e.preventDefault(); }
   }, true);
 
   return { open, update, close, isOpen: () => !!el, body: () => body, relayout: () => paint() };

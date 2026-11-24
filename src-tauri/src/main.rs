@@ -34,8 +34,8 @@ mod window_ctl;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -53,21 +53,24 @@ use proxy::ProxyState;
 
 // ---------- logging ----------
 
-fn log_path() -> std::path::PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    let dir = std::path::PathBuf::from(base).join("MicaBar");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join("micabar.log")
+fn log_path() -> &'static std::path::Path {
+    static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+        let dir = std::path::PathBuf::from(base).join("MicaBar");
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("micabar.log")
+    })
 }
 
 pub fn log(msg: impl AsRef<str>) {
     static LOCK: Mutex<()> = Mutex::new(());
     let _g = LOCK.lock();
     let p = log_path();
-    if std::fs::metadata(&p).map(|m| m.len() > 2_000_000).unwrap_or(false) {
-        let _ = std::fs::rename(&p, p.with_extension("log.old"));
+    if std::fs::metadata(p).map(|m| m.len() > 2_000_000).unwrap_or(false) {
+        let _ = std::fs::rename(p, p.with_extension("log.old"));
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
         let t = now_ms();
         let _ = writeln!(f, "[{}] {}", fmt_time(t), msg.as_ref());
     }
@@ -94,9 +97,44 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+fn local_tz_offset_secs() -> i64 {
+    use std::sync::atomic::{AtomicI64, AtomicU64};
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+    static OFF: AtomicI64 = AtomicI64::new(8 * 3600);
+    static AT: AtomicU64 = AtomicU64::new(0);
+    let now = now_ms();
+    let prev = AT.load(Ordering::Relaxed);
+    if prev != 0 && now.saturating_sub(prev) < 60_000 {
+        return OFF.load(Ordering::Relaxed);
+    }
+    fn to_secs(st: &SYSTEMTIME) -> i64 {
+        let y = st.wYear as i64;
+        let m = st.wMonth as i64;
+        let d = st.wDay as i64;
+        let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * m + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146097 + doe - 719468;
+        days * 86400 + (st.wHour as i64) * 3600 + (st.wMinute as i64) * 60 + (st.wSecond as i64)
+    }
+    let (mut utc, mut loc) = unsafe { std::mem::zeroed::<(SYSTEMTIME, SYSTEMTIME)>() };
+    unsafe {
+        GetSystemTime(&mut utc);
+        GetLocalTime(&mut loc);
+    }
+    let raw = to_secs(&loc) - to_secs(&utc);
+    // Round to nearest minute so a second rollover between the two calls cannot skew by 1s.
+    let rounded = (raw + 30).div_euclid(60) * 60;
+    OFF.store(rounded, Ordering::Relaxed);
+    AT.store(now, Ordering::Relaxed);
+    rounded
+}
+
 fn fmt_time(ms: u64) -> String {
-    // UTC+8 wall clock without a date library.
-    let s = ms / 1000 + 8 * 3600;
+    let s = ((ms / 1000) as i64 + local_tz_offset_secs()).rem_euclid(86400) as u64;
     format!("{:02}:{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60, s % 60)
 }
 
@@ -171,6 +209,8 @@ struct GroupExit {
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
     ts: u64,
+    #[serde(default)]
+    slim: bool,
     admin: bool,
     speed_ok: bool,
     speed_error: Option<String>,
@@ -259,7 +299,7 @@ struct Shared {
     geo: Geo,
     proxy: Mutex<ProxyState>,
     exit: Mutex<ExitState>,
-    last: Mutex<Option<Snapshot>>,
+    last: Mutex<Option<Arc<Snapshot>>>,
     mihomo: Mutex<MihomoLink>,
     ws: Arc<WinState>,
     glass: glass::FrameChannel,
@@ -311,11 +351,89 @@ fn rule_text(c: &MConn) -> Option<String> {
     })
 }
 
+// ---------- system / network event coordination ----------
+
+static GLOBAL_SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
+static COLLECTOR_WAKE: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+static NET_DIRTY: AtomicBool = AtomicBool::new(false);
+static SYSTEM_RESUMED: AtomicBool = AtomicBool::new(false);
+static LAST_RESUME_MS: AtomicU64 = AtomicU64::new(0);
+/// Epoch ms when a proxy client was first seen without a local port or TUN (core still starting).
+static PORTLESS_PROXY_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn collector_wake() -> &'static (Mutex<bool>, Condvar) {
+    COLLECTOR_WAKE.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+
+fn wake_collector() {
+    let (lock, cvar) = collector_wake();
+    if let Ok(mut dirty) = lock.lock() {
+        *dirty = true;
+        cvar.notify_one();
+    }
+}
+
+/// Called by the IP Helper interface/address watcher on a Win32 threadpool thread.
+pub(crate) fn on_network_change() {
+    NET_DIRTY.store(true, Ordering::SeqCst);
+    dns::invalidate_cache();
+    netdiag::notify_network_change();
+    wake_collector();
+}
+
+/// Called on `WM_POWERBROADCAST` resume or wall-clock jump after sleep / hibernate / VM pause.
+pub(crate) fn on_system_resume(why: &str) {
+    let now = now_ms();
+    let prev = LAST_RESUME_MS.swap(now, Ordering::SeqCst);
+    if prev != 0 && now.saturating_sub(prev) < 3_000 {
+        return;
+    }
+    log(format!("system resumed ({why}); refreshing network, mihomo and backdrop"));
+    NET_DIRTY.store(true, Ordering::SeqCst);
+    SYSTEM_RESUMED.store(true, Ordering::SeqCst);
+    dns::invalidate_cache();
+    glass::notify_display_or_resume();
+    netdiag::notify_resume();
+    if let Some(sh) = GLOBAL_SHARED.get() {
+        sh.ws.reposition_req.store(true, Ordering::SeqCst);
+        if let Ok(mut link) = sh.mihomo.lock() {
+            link.last_try = None;
+        }
+        sh.exit_trigger.store(true, Ordering::SeqCst);
+    }
+    wake_collector();
+}
+
+/// Called on `WM_DISPLAYCHANGE` / `WM_DPICHANGED`.
+pub(crate) fn on_display_change() {
+    glass::notify_display_or_resume();
+    if let Some(sh) = GLOBAL_SHARED.get() {
+        sh.ws.reposition_req.store(true, Ordering::SeqCst);
+    }
+}
+
+fn cmp_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ia = a.chars().flat_map(char::to_lowercase);
+    let mut ib = b.chars().flat_map(char::to_lowercase);
+    loop {
+        match (ia.next(), ib.next()) {
+            (Some(ca), Some(cb)) => match ca.cmp(&cb) {
+                std::cmp::Ordering::Equal => continue,
+                ord => return ord,
+            },
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return std::cmp::Ordering::Equal,
+        }
+    }
+}
+
 // ---------- collector ----------
 
 struct Collector {
     procs: procinfo::ProcCache,
     counters: Option<speed::Counters>,
+    speed_warming: bool,
     speed_error: Option<String>,
     prev_counters: HashMap<u32, (u64, u64)>,
     prev_counter_at: Instant,
@@ -327,8 +445,11 @@ struct Collector {
     cfg_at: Option<Instant>,
     tun: Option<String>,
     tun_at: Option<Instant>,
-    net_sig: String,
-    proxy_sig: String,
+    net_sig: Option<String>,
+    proxy_sig: Option<String>,
+    resume_fast_until: Option<Instant>,
+    prev_tick_mono: Instant,
+    prev_tick_wall_ms: u64,
     control_at: Option<Instant>,
     sampler: sysinfo::Sampler,
     traffic_at: Option<Instant>,
@@ -338,12 +459,16 @@ struct Collector {
     firstnet_at: Option<Instant>,
 }
 
-fn network_signature() -> String {
-    let Ok(ads) = ipconfig::get_adapters() else { return String::new() };
-    // physical uplinks only: TUN adapters come and go with the proxy and churn their addresses
+fn network_signature_from(ads: &[ipconfig::Adapter]) -> String {
+    // physical uplinks only: TUN and virtual adapters churn or stay up while offline
     let mut parts: Vec<String> = ads
         .iter()
-        .filter(|a| a.oper_status() == ipconfig::OperStatus::IfOperStatusUp && !a.gateways().is_empty() && !proxy::looks_like_tun(a))
+        .filter(|a| {
+            a.oper_status() == ipconfig::OperStatus::IfOperStatusUp
+                && !a.gateways().is_empty()
+                && !proxy::looks_like_tun(a)
+                && !proxy::is_virtual_nic(a)
+        })
         .map(|a| {
             let mut v4: Vec<String> = a.ip_addresses().iter().filter(|i| i.is_ipv4()).map(|i| i.to_string()).collect();
             v4.sort();
@@ -356,15 +481,12 @@ fn network_signature() -> String {
 }
 
 impl Collector {
-    fn new(counters: Result<speed::Counters, String>) -> Collector {
-        let (counters, speed_error) = match counters {
-            Ok(c) => (Some(c), None),
-            Err(e) => (None, Some(e)),
-        };
+    fn new_warming(admin: bool) -> Collector {
         Collector {
             procs: Default::default(),
-            counters,
-            speed_error,
+            counters: None,
+            speed_warming: admin,
+            speed_error: (!admin).then(|| crate::i18n::t("需要管理员权限").into()),
             prev_counters: HashMap::new(),
             prev_counter_at: Instant::now(),
             prev_mihomo: HashMap::new(),
@@ -375,8 +497,11 @@ impl Collector {
             cfg_at: None,
             tun: None,
             tun_at: None,
-            net_sig: String::new(),
-            proxy_sig: String::new(),
+            net_sig: None,
+            proxy_sig: None,
+            resume_fast_until: None,
+            prev_tick_mono: Instant::now(),
+            prev_tick_wall_ms: now_ms(),
             control_at: None,
             sampler: Default::default(),
             traffic_at: None,
@@ -387,17 +512,58 @@ impl Collector {
         }
     }
 
+    fn attach_counters(&mut self, counters: Result<speed::Counters, String>) {
+        self.speed_warming = false;
+        match counters {
+            Ok(c) => {
+                self.counters = Some(c);
+                self.speed_error = None;
+                self.prev_counter_at = Instant::now();
+            }
+            Err(e) => {
+                self.counters = None;
+                self.speed_error = Some(e);
+            }
+        }
+    }
+
     fn due(at: &Option<Instant>, every: Duration) -> bool {
         at.map(|t| t.elapsed() >= every).unwrap_or(true)
     }
 
     fn tick(&mut self, sh: &Shared) -> Snapshot {
+        // Detect wall-clock / Instant jumps (S3/S4 hibernate or VM suspend/resume where WM_POWERBROADCAST may not fire)
+        let now_wall = now_ms();
+        let mono_ms = self.prev_tick_mono.elapsed().as_millis() as u64;
+        let wall_ms = now_wall.saturating_sub(self.prev_tick_wall_ms);
+        self.prev_tick_mono = Instant::now();
+        self.prev_tick_wall_ms = now_wall;
+        if wall_ms > mono_ms.saturating_add(15_000) || mono_ms > 15_000 {
+            on_system_resume("clock jump");
+        }
+        let resumed = SYSTEM_RESUMED.swap(false, Ordering::SeqCst);
+        let net_dirty = NET_DIRTY.swap(false, Ordering::SeqCst);
+        if resumed || net_dirty {
+            self.tun_at = None;
+            self.cfg_at = None;
+            self.dns_at = None;
+            sh.mihomo.lock().unwrap().last_try = None;
+            if resumed {
+                self.resume_fast_until = Some(Instant::now() + Duration::from_secs(15));
+                sh.exit_trigger.store(true, Ordering::SeqCst);
+            }
+        }
+
         let list = procinfo::list_processes();
-        self.procs.refresh(&list);
         let sockets = conn::snapshot();
+        let (client, core_pids, core_name) = proxy::client_name(&list);
+        let mut needed_pids: HashSet<u32> = sockets.iter().filter(|s| s.pid != 0).map(|s| s.pid).collect();
+        needed_pids.extend(core_pids.iter().copied());
+        self.procs.refresh_active(&list, &needed_pids);
 
         // --- proxy detection ---
         if Self::due(&self.cfg_at, Duration::from_secs(10)) {
+            sh.geo.reload_if_needed();
             let cfg = mihomo::read_config();
             if cfg.file != self.cfg.file {
                 log(format!("core config: {:?}", cfg.file));
@@ -406,24 +572,35 @@ impl Collector {
             self.cfg_at = Some(Instant::now());
             // the proxy client's exe, so the diagnosis can start it again after it quit
             // (the image file must carry the client's own name: an updater can show up under it)
-            let found = list.iter().filter(|(pid, exe)| proxy::client_name(&[(*pid, exe.clone())]).0.is_some()).find_map(|(pid, exe)| {
+            let found = list.iter().filter(|(_, exe)| proxy::is_client_exe(exe)).find_map(|(pid, exe)| {
                 procinfo::image_path(*pid).filter(|p| p.rsplit(['\\', '/']).next().map(|f| f.eq_ignore_ascii_case(exe)).unwrap_or(false))
             });
             if let Some(path) = found {
                 netdiag::remember_client(&path);
             }
         }
-        if Self::due(&self.tun_at, Duration::from_secs(5)) {
-            self.tun = proxy::tun_adapter();
+        let tun_every = if self.resume_fast_until.map(|t| Instant::now() < t).unwrap_or(false) {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(5)
+        };
+        if Self::due(&self.tun_at, tun_every) {
+            let ads = proxy::adapters();
+            self.tun = ads
+                .iter()
+                .find(|a| a.oper_status() == ipconfig::OperStatus::IfOperStatusUp && proxy::looks_like_tun(a))
+                .map(|a| format!("{} ({})", a.friendly_name(), a.description()));
             self.tun_at = Some(Instant::now());
-            let sig = network_signature();
-            if !self.net_sig.is_empty() && sig != self.net_sig {
-                log("network changed; re-checking exit IP");
-                sh.exit_trigger.store(true, Ordering::SeqCst);
+            let sig = network_signature_from(&ads);
+            if let Some(prev) = &self.net_sig {
+                if *prev != sig {
+                    log("network changed; re-checking exit IP");
+                    sh.exit_trigger.store(true, Ordering::SeqCst);
+                    netdiag::notify_network_change();
+                }
             }
-            self.net_sig = sig;
+            self.net_sig = Some(sig);
         }
-        let (client, core_pids, core_name) = proxy::client_name(&list);
         let sys_proxy = proxy::system_proxy();
         let listening: HashSet<u16> = sockets
             .iter()
@@ -446,7 +623,7 @@ impl Collector {
             // whose config we don't read: their usual port, if the client or its core listens on it
             let owners: HashSet<u32> = list
                 .iter()
-                .filter(|(pid, exe)| core_pids.contains(pid) || proxy::client_name(&[(*pid, exe.clone())]).0.is_some())
+                .filter(|(pid, exe)| core_pids.contains(pid) || proxy::is_client_exe(exe))
                 .map(|(pid, _)| *pid)
                 .collect();
             local_port = proxy::KNOWN_PORTS.iter().copied().find(|p| {
@@ -456,34 +633,52 @@ impl Collector {
         // only mihomo-type cores have a controller worth looking for (xray / sing-box cores don't)
         let mihomo_core = list.iter().any(|(pid, exe)| core_pids.contains(pid) && proxy::is_mihomo_core(exe));
 
-        // --- mihomo controller ---
+        // --- mihomo controller (I/O strictly outside mutex; no nested sh.mihomo <-> sh.proxy lock) ---
         let mut mconns: Vec<MConn> = Vec::new();
         let mut mihomo_err = None;
-        {
+        let mut discovered_ver: Option<String> = None;
+        let (mut active_ctl, mut active_secret) = {
             let mut link = sh.mihomo.lock().unwrap();
             if !mihomo_core {
                 link.ctl = None;
-            } else if link.ctl.is_none() && Self::due(&link.last_try, Duration::from_secs(5)) {
-                link.last_try = Some(Instant::now());
+                (None, None)
+            } else {
+                (link.ctl.clone(), link.secret.clone())
+            }
+        };
+        if mihomo_core && active_ctl.is_none() {
+            let try_now = {
+                let mut link = sh.mihomo.lock().unwrap();
+                if Self::due(&link.last_try, Duration::from_secs(5)) {
+                    link.last_try = Some(Instant::now());
+                    true
+                } else {
+                    false
+                }
+            };
+            if try_now {
                 match mihomo::discover(&self.cfg) {
                     Some((c, ver)) => {
                         log(format!("mihomo controller: {} (version {ver})", c.describe()));
-                        let mut p = sh.proxy.lock().unwrap();
-                        p.core_version = non_empty(&ver);
+                        discovered_ver = non_empty(&ver);
+                        active_secret = self.cfg.secret.clone();
+                        active_ctl = Some(c.clone());
+                        let mut link = sh.mihomo.lock().unwrap();
                         link.ctl = Some(c);
-                        link.secret = self.cfg.secret.clone();
+                        link.secret = active_secret.clone();
                     }
                     None => mihomo_err = Some(crate::i18n::t("找不到 mihomo 控制接口").to_string()),
                 }
             }
-            if let Some(c) = link.ctl.clone() {
-                match mihomo::connections(&c, link.secret.as_deref()) {
-                    Ok(v) => mconns = v,
-                    Err(e) => {
-                        log(format!("mihomo /connections failed: {e}"));
-                        mihomo_err = Some(e);
-                        link.ctl = None;
-                    }
+        }
+        if let Some(c) = active_ctl.clone() {
+            match mihomo::connections(&c, active_secret.as_deref()) {
+                Ok(v) => mconns = v,
+                Err(e) => {
+                    log(format!("mihomo /connections failed: {e}"));
+                    mihomo_err = Some(e);
+                    active_ctl = None;
+                    sh.mihomo.lock().unwrap().ctl = None;
                 }
             }
         }
@@ -494,8 +689,12 @@ impl Collector {
             (None, Some(k)) => Some(k.clone()),
             (None, None) => None,
         };
+        let ctl_desc = active_ctl.as_ref().map(|c| c.describe());
         let state = {
             let mut p = sh.proxy.lock().unwrap();
+            if let Some(v) = discovered_ver {
+                p.core_version = Some(v);
+            }
             p.client = client_label;
             p.core_pids = core_pids.clone();
             p.system_proxy = sys_proxy.clone();
@@ -508,21 +707,32 @@ impl Collector {
             });
             p.local_port = local_port;
             p.detected = p.client.is_some() || core_running || p.system_proxy.is_some() || p.tun.is_some();
-            p.mihomo_ok = !mconns.is_empty() || (core_running && mihomo_err.is_none() && sh.mihomo.lock().unwrap().ctl.is_some());
+            p.mihomo_ok = !mconns.is_empty() || (core_running && mihomo_err.is_none() && active_ctl.is_some());
             p.mihomo_error = if mihomo_core { mihomo_err } else { None };
-            p.controller = sh.mihomo.lock().unwrap().ctl.as_ref().map(|c| c.describe());
+            p.controller = ctl_desc;
             if !core_running {
                 p.core_version = None;
             }
             p.clone()
         };
-        let sig = format!("{}|{:?}|{:?}|{:?}|{:?}", state.detected, state.client, state.system_proxy, state.tun, state.local_port);
-        if sig != self.proxy_sig {
-            if !self.proxy_sig.is_empty() {
+        if state.detected && state.local_port.is_none() && state.tun.is_none() {
+            let _ = PORTLESS_PROXY_SINCE_MS.compare_exchange(0, now_ms(), Ordering::SeqCst, Ordering::Relaxed);
+            // Re-read config on the next tick while the proxy client's core is still booting
+            self.cfg_at = None;
+        } else {
+            PORTLESS_PROXY_SINCE_MS.store(0, Ordering::SeqCst);
+        }
+        let sig = format!(
+            "{}|{:?}|{:?}|{:?}|{:?}|{}",
+            state.detected, state.client, state.system_proxy, state.tun, state.local_port, state.mihomo_ok
+        );
+        if self.proxy_sig.as_ref() != Some(&sig) {
+            if self.proxy_sig.is_some() {
                 log(format!("proxy state changed: {sig}"));
                 sh.exit_trigger.store(true, Ordering::SeqCst);
+                netdiag::notify_network_change();
             }
-            self.proxy_sig = sig;
+            self.proxy_sig = Some(sig);
         }
 
         self.update_control(sh, &list, &core_pids);
@@ -535,33 +745,58 @@ impl Collector {
         if Self::due(&self.dns_at, Duration::from_secs(10)) {
             let fresh = dns::read_cache();
             if self.dns.len() > 20000 {
-                self.dns.clear();
+                let active_ips: HashSet<IpAddr> = sockets.iter().filter_map(|s| s.remote.map(|(ip, _)| ip)).collect();
+                self.dns.retain(|ip, _| active_ips.contains(ip));
             }
-            self.dns.extend(fresh);
+            for (ip, host) in fresh {
+                self.dns.entry(ip).or_insert(host);
+            }
             self.dns_at = Some(Instant::now());
         }
         // live resolutions from ETW (works when the cache is empty, e.g. TUN DNS with tiny TTLs)
         let live: Vec<(IpAddr, String)> = std::mem::take(&mut *speed::dns_log().lock().unwrap());
         self.dns.extend(live);
 
-        // --- speeds ---
+        let proxy_ports: HashSet<u16> = [self.cfg.mixed_port, self.cfg.http_port, self.cfg.socks_port, local_port].into_iter().flatten().collect();
+        let proxy_ports_vec: Vec<u16> = proxy_ports.iter().copied().collect();
+        speed::set_proxy_ports(&proxy_ports_vec);
+
+        // --- speeds & exact byte deltas ---
+        let alive_pids: HashSet<u32> = list.iter().map(|(pid, _)| *pid).collect();
         let mut pid_rate: HashMap<u32, (f64, f64)> = HashMap::new();
+        let mut pid_bytes: HashMap<u32, (u64, u64)> = HashMap::new();
         if let Some(c) = &self.counters {
+            speed::prune_pids(&alive_pids, c);
             let cur = c.lock().unwrap().clone();
+            let first_round = self.prev_counters.is_empty();
             let dt = self.prev_counter_at.elapsed().as_secs_f64().max(0.2);
             for (pid, (s, r)) in &cur {
-                let (ps, pr) = self.prev_counters.get(pid).copied().unwrap_or((*s, *r));
-                pid_rate.insert(*pid, ((s.saturating_sub(ps)) as f64 / dt, (r.saturating_sub(pr)) as f64 / dt));
+                let (ps, pr) = match self.prev_counters.get(pid) {
+                    Some(prev) => *prev,
+                    None if first_round => (*s, *r),
+                    None => (0, 0),
+                };
+                let (du, dd) = (s.saturating_sub(ps), r.saturating_sub(pr));
+                pid_bytes.insert(*pid, (du, dd));
+                pid_rate.insert(*pid, (du as f64 / dt, dd as f64 / dt));
             }
             self.prev_counters = cur;
             self.prev_counter_at = Instant::now();
         }
         let mdt = self.prev_mihomo_at.elapsed().as_secs_f64().max(0.2);
+        let first_mround = self.prev_mihomo.is_empty();
         let mut conn_rate: HashMap<String, (f64, f64)> = HashMap::new();
+        let mut conn_bytes: HashMap<String, (u64, u64)> = HashMap::new();
         let mut next_prev = HashMap::with_capacity(mconns.len());
         for c in &mconns {
-            if let Some((pu, pd)) = self.prev_mihomo.get(&c.id) {
-                conn_rate.insert(c.id.clone(), (c.upload.saturating_sub(*pu) as f64 / mdt, c.download.saturating_sub(*pd) as f64 / mdt));
+            let (du, dd) = match self.prev_mihomo.get(&c.id) {
+                Some((pu, pd)) => (c.upload.saturating_sub(*pu), c.download.saturating_sub(*pd)),
+                None if !first_mround && c.upload < 10_000_000 && c.download < 10_000_000 => (c.upload, c.download),
+                None => (0, 0),
+            };
+            conn_bytes.insert(c.id.clone(), (du, dd));
+            if self.prev_mihomo.contains_key(&c.id) {
+                conn_rate.insert(c.id.clone(), (du as f64 / mdt, dd as f64 / mdt));
             }
             next_prev.insert(c.id.clone(), (c.upload, c.download));
         }
@@ -581,9 +816,9 @@ impl Collector {
         }
         let mut used: HashSet<usize> = HashSet::new();
         let mut apps: HashMap<String, AppRow> = HashMap::new();
+        let mut app_proxy_bytes: HashMap<String, (u64, u64)> = HashMap::new();
         let mut hidden_loopback = 0usize;
         let core_set: HashSet<u32> = core_pids.iter().copied().collect();
-        let proxy_ports: HashSet<u16> = [self.cfg.mixed_port, self.cfg.http_port, self.cfg.socks_port, local_port].into_iter().flatten().collect();
 
         let app_key = |path: &Option<String>, exe: &str| -> String {
             path.as_ref().map(|p| p.to_lowercase()).unwrap_or_else(|| exe.to_lowercase())
@@ -593,21 +828,29 @@ impl Collector {
             if s.pid == 0 {
                 continue;
             }
-            let info = self.procs.get(s.pid).cloned().unwrap_or(procinfo::ProcInfo {
-                exe: format!("pid {}", s.pid),
-                path: None,
-                display: crate::tr!("进程 {0}", s.pid),
-                icon: None,
-            });
-            let key = app_key(&info.path, &info.exe);
-            let app = apps.entry(key.clone()).or_insert_with(|| AppRow {
-                key: key.clone(),
-                name: info.display.clone(),
-                exe: info.exe.clone(),
-                path: info.path.clone(),
-                icon: info.icon.clone(),
-                is_proxy: core_set.contains(&s.pid) || proxy::client_name(&[(s.pid, info.exe.clone())]).0.is_some(),
-                ..Default::default()
+            let cached = self.procs.get(s.pid);
+            let key: String = match cached {
+                Some(info) => info.key.clone(),
+                None => format!("pid {}", s.pid),
+            };
+            let proc_path: Option<&str> = cached.and_then(|i| i.path.as_deref());
+            let app = apps.entry(key.clone()).or_insert_with(|| match cached {
+                Some(info) => AppRow {
+                    key: key.clone(),
+                    name: info.display.clone(),
+                    exe: info.exe.clone(),
+                    path: info.path.clone(),
+                    icon: info.icon.clone(),
+                    is_proxy: core_set.contains(&s.pid) || proxy::is_client_exe(&info.exe),
+                    ..Default::default()
+                },
+                None => AppRow {
+                    key: key.clone(),
+                    name: crate::tr!("进程 {0}", s.pid),
+                    exe: format!("pid {}", s.pid),
+                    is_proxy: core_set.contains(&s.pid),
+                    ..Default::default()
+                },
             });
             if !app.pids.contains(&s.pid) {
                 app.pids.push(s.pid);
@@ -615,14 +858,24 @@ impl Collector {
             let net = if s.proto == Proto::Tcp { "tcp" } else { "udp" };
             let matched = by_port.get(&(net, s.local_port)).and_then(|ids| {
                 ids.iter().copied().find(|i| {
+                    if used.contains(i) {
+                        return false;
+                    }
                     let m = &mconns[*i].metadata;
                     m.process_path.is_empty()
-                        || info.path.as_ref().map(|p| p.eq_ignore_ascii_case(&m.process_path)).unwrap_or(true)
+                        || proc_path.map(|p| p.eq_ignore_ascii_case(&m.process_path)).unwrap_or(true)
                 })
             });
             if let Some(i) = matched {
                 used.insert(i);
-                let row = self.row_from_mihomo(&mconns[i], s.proto, &fmt_ip(&s.local), s.local_port, s.state, &sh.geo, &conn_rate, &proxy_ports, s.remote.as_ref());
+                let row = self.row_from_mihomo(&mconns[i], s.proto, fmt_ip(&s.local), s.local_port, s.state, &sh.geo, &conn_rate, &proxy_ports, s.remote.as_ref());
+                if row.node.as_deref().map(|n| n != "DIRECT" && !n.starts_with("REJECT")).unwrap_or(false) {
+                    if let Some((bu, bd)) = conn_bytes.get(&mconns[i].id) {
+                        let e = app_proxy_bytes.entry(key).or_insert((0, 0));
+                        e.0 += *bu;
+                        e.1 += *bd;
+                    }
+                }
                 app.conns.push(row);
                 continue;
             }
@@ -640,8 +893,13 @@ impl Collector {
                         continue;
                     }
                     let g = sh.geo.lookup(rip);
-                    // public destination, mihomo running, yet the connection never reached it
-                    let bypass = !mconns.is_empty() && !app.is_proxy && !geo::is_private(&rip) && s.state == "ESTABLISHED";
+                    // public destination, proxy active, yet the connection never went through the proxy
+                    let proxy_active = !mconns.is_empty() || (core_running && state.local_port.is_some());
+                    let bypass = proxy_active
+                        && !app.is_proxy
+                        && !geo::is_private(&rip)
+                        && !is_loopback(&rip)
+                        && (s.state == "ESTABLISHED" || s.state == "SYN_SENT");
                     app.conns.push(ConnRow {
                         proto: if s.proto == Proto::Tcp { "TCP" } else { "UDP" },
                         local: fmt_ip(&s.local),
@@ -675,7 +933,14 @@ impl Collector {
             });
             let proto = if c.metadata.network.eq_ignore_ascii_case("udp") { Proto::Udp } else { Proto::Tcp };
             let lp = c.metadata.source_port.parse().unwrap_or(0);
-            let row = self.row_from_mihomo(c, proto, &c.metadata.source_ip, lp, if proto == Proto::Tcp { "ESTABLISHED" } else { "ACTIVE" }, &sh.geo, &conn_rate, &proxy_ports, None);
+            let row = self.row_from_mihomo(c, proto, c.metadata.source_ip.clone(), lp, if proto == Proto::Tcp { "ESTABLISHED" } else { "ACTIVE" }, &sh.geo, &conn_rate, &proxy_ports, None);
+            if row.node.as_deref().map(|n| n != "DIRECT" && !n.starts_with("REJECT")).unwrap_or(false) {
+                if let Some((bu, bd)) = conn_bytes.get(&c.id) {
+                    let e = app_proxy_bytes.entry(key.clone()).or_insert((0, 0));
+                    e.0 += *bu;
+                    e.1 += *bd;
+                }
+            }
             app.conns.push(row);
         }
 
@@ -713,7 +978,7 @@ impl Collector {
                 .cmp(&a.via_proxy)
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
                 .then(b.conns.len().cmp(&a.conns.len()))
-                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| cmp_ignore_case(&a.name, &b.name))
         });
         // group traffic score (decaying), for picking the busiest groups to measure
         {
@@ -742,7 +1007,7 @@ impl Collector {
                         n != "DIRECT" && !n.starts_with("REJECT") && !nodes.contains(n) && conn_rate.get(&c.id).map(|(u, d)| u + d > 2048.0).unwrap_or(false)
                     });
                 let now = now_ms();
-                if new_busy && now - LAST.load(Ordering::Relaxed) > 60_000 {
+                if new_busy && now.saturating_sub(LAST.load(Ordering::Relaxed)) > 60_000 {
                     LAST.store(now, Ordering::Relaxed);
                     sh.exit_trigger.store(true, Ordering::SeqCst);
                 }
@@ -750,7 +1015,7 @@ impl Collector {
         }
         let conn_count = out.iter().map(|a| a.conns.len()).sum();
         let listen_count = out.iter().map(|a| a.listen.len()).sum();
-        self.account_traffic(sh, &out);
+        self.account_traffic(sh, &out, &pid_bytes, &app_proxy_bytes);
         if Self::due(&self.firstnet_at, Duration::from_secs(2)) {
             self.firstnet_at = Some(Instant::now());
             first_net(&out);
@@ -761,10 +1026,11 @@ impl Collector {
 
         Snapshot {
             ts: now_ms(),
+            slim: false,
             admin: sh.admin,
-            speed_ok: self.counters.is_some(),
+            speed_ok: self.counters.is_some() || self.speed_warming,
             speed_error: self.speed_error.clone(),
-            geo_source: sh.geo.source.clone(),
+            geo_source: sh.geo.source(),
             conn_count,
             listen_count,
             hidden_loopback,
@@ -783,9 +1049,15 @@ impl Collector {
         }
     }
 
-    /// Adds this tick's bytes per app to today's traffic book: bytes on connections that left
+    /// Adds this tick's exact bytes per app to today's traffic book: bytes on connections that left
     /// through a proxy node count as "proxy", the rest of the app's traffic as "direct".
-    fn account_traffic(&mut self, sh: &Shared, apps: &[AppRow]) {
+    fn account_traffic(
+        &mut self,
+        sh: &Shared,
+        apps: &[AppRow],
+        pid_bytes: &HashMap<u32, (u64, u64)>,
+        app_proxy_bytes: &HashMap<String, (u64, u64)>,
+    ) {
         let dt = self.traffic_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0).min(5.0);
         self.traffic_at = Some(Instant::now());
         if dt <= 0.0 {
@@ -793,14 +1065,23 @@ impl Collector {
         }
         let mut book = sh.traffic.lock().unwrap();
         for a in apps.iter().filter(|a| !a.is_proxy) {
-            let via_node = |c: &&ConnRow| c.node.as_deref().map(|n| n != "DIRECT" && !n.starts_with("REJECT")).unwrap_or(false);
-            let (pu, pd) = a.conns.iter().filter(via_node).fold((0.0, 0.0), |s, c| (s.0 + c.up, s.1 + c.down));
+            if a.path.is_none() && a.key.starts_with("pid ") {
+                continue;
+            }
+            let (pu, pd) = app_proxy_bytes.get(&a.key).map(|(u, d)| (*u as f64, *d as f64)).unwrap_or_else(|| {
+                let via_node = |c: &&ConnRow| c.node.as_deref().map(|n| n != "DIRECT" && !n.starts_with("REJECT")).unwrap_or(false);
+                a.conns.iter().filter(via_node).fold((0.0, 0.0), |s, c| (s.0 + c.up * dt, s.1 + c.down * dt))
+            });
             let (du, dd) = if self.counters.is_some() {
-                ((a.up - pu).max(0.0), (a.down - pd).max(0.0))
+                let (tu, td) = a.pids.iter().filter_map(|p| pid_bytes.get(p)).fold((0u64, 0u64), |s, b| (s.0 + b.0, s.1 + b.1));
+                ((tu as f64 - pu).max(0.0), (td as f64 - pd).max(0.0))
             } else {
-                a.conns.iter().filter(|c| !via_node(c)).fold((0.0, 0.0), |s, c| (s.0 + c.up, s.1 + c.down))
+                let via_node = |c: &&ConnRow| c.node.as_deref().map(|n| n != "DIRECT" && !n.starts_with("REJECT")).unwrap_or(false);
+                a.conns.iter().filter(|c| !via_node(c)).fold((0.0, 0.0), |s, c| (s.0 + c.up * dt, s.1 + c.down * dt))
             };
-            book.add(&a.key, &a.name, a.path.as_ref(), (pu * dt, pd * dt), (du * dt, dd * dt));
+            if pu + pd + du + dd > 0.0 {
+                book.add(&a.key, &a.name, a.path.as_ref(), (pu, pd), (du, dd));
+            }
         }
         if Self::due(&self.traffic_flush, Duration::from_secs(60)) {
             book.flush();
@@ -892,7 +1173,7 @@ impl Collector {
         }
         if settings.notify && !game {
             for f in &fresh {
-                let recent = book.notified.get(&f.key).map(|t| now - t < 10 * 60_000).unwrap_or(false);
+                let recent = book.notified.get(&f.key).map(|t| now.saturating_sub(*t) < 10 * 60_000).unwrap_or(false);
                 if recent {
                     continue;
                 }
@@ -989,7 +1270,7 @@ impl Collector {
         &self,
         c: &MConn,
         proto: Proto,
-        local: &str,
+        local: String,
         local_port: u16,
         state: &'static str,
         geo: &Geo,
@@ -1015,7 +1296,7 @@ impl Collector {
         let (up, down) = rate.get(&c.id).copied().unwrap_or((0.0, 0.0));
         ConnRow {
             proto: if proto == Proto::Tcp { "TCP" } else { "UDP" },
-            local: local.to_string(),
+            local,
             local_port,
             remote: non_empty(&m.destination_ip).or_else(|| os_remote.map(|(ip, _)| fmt_ip(ip))),
             remote_port: m.destination_port.parse().ok(),
@@ -1060,6 +1341,7 @@ enum Check {
 
 async fn check_one(sh: Arc<Shared>, kind: Check) -> ExitResult {
     let mut r = ExitResult { at: now_ms(), ..Default::default() };
+    let mut keep_client = None;
     let res = match kind {
         Check::Direct => {
             let nic = proxy::physical_ipv4();
@@ -1067,7 +1349,11 @@ async fn check_one(sh: Arc<Shared>, kind: Check) -> ExitResult {
             exitip::probe_direct(nic.map(|(_, ip)| ip)).await
         }
         Check::Proxy(port) => match exitip::client(port) {
-            Ok(c) => exitip::probe(&c, false).await,
+            Ok(c) => {
+                let out = exitip::probe(&c, false).await;
+                keep_client = Some(c);
+                out
+            }
             Err(e) => Err(e),
         },
     };
@@ -1087,6 +1373,7 @@ async fn check_one(sh: Arc<Shared>, kind: Check) -> ExitResult {
         }
         Err(e) => r.error = Some(e),
     }
+    drop(keep_client);
     r
 }
 
@@ -1244,22 +1531,42 @@ async fn measure_groups(sh: Arc<Shared>) -> Vec<GroupExit> {
     out
 }
 
-async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
+/// Returns true when every expected exit (direct while physical uplink exists, proxy while proxy
+/// port/TUN is active) succeeded; false schedules a quick retry instead of waiting 5 minutes.
+async fn exit_check(app: AppHandle, sh: Arc<Shared>) -> bool {
     {
         sh.exit.lock().unwrap().checking = true;
     }
     let _ = app.emit("exit", sh.exit.lock().unwrap().clone());
     let p = sh.proxy.lock().unwrap().clone();
-    let direct = check_one(sh.clone(), Check::Direct).await;
-    let proxied = if p.detected {
-        match p.local_port {
-            Some(port) => Some(check_one(sh.clone(), Check::Proxy(Some(port))).await),
-            None if p.tun.is_some() => Some(check_one(sh.clone(), Check::Proxy(None)).await),
-            None => Some(ExitResult { error: Some(crate::i18n::t("检测到代理软件，但没找到本地代理端口").into()), at: now_ms(), ..Default::default() }),
-        }
-    } else {
-        None
+    let has_uplink = proxy::physical_ipv4().is_some();
+    let p_detected = p.detected;
+    let p_port = p.local_port;
+    let p_tun = p.tun.is_some();
+    let portless_booting = p_detected && p_port.is_none() && !p_tun && {
+        let since = PORTLESS_PROXY_SINCE_MS.load(Ordering::SeqCst);
+        since == 0 || now_ms().saturating_sub(since) < 12_000
     };
+    let sh_d = sh.clone();
+    let sh_p = sh.clone();
+    let direct_fut = check_one(sh_d, Check::Direct);
+    let proxy_fut = async move {
+        if p_detected {
+            match p_port {
+                Some(port) => Some(check_one(sh_p, Check::Proxy(Some(port))).await),
+                None if p_tun => Some(check_one(sh_p, Check::Proxy(None)).await),
+                // Avoid flashing red `出口检测失败` during the ~4s window between Clash Party GUI
+                // launch and mihomo binding `:7890`; `proxy_sig` re-triggers immediately on bind.
+                None if portless_booting => None,
+                None => Some(ExitResult { error: Some(crate::i18n::t("检测到代理软件，但没找到本地代理端口").into()), at: now_ms(), ..Default::default() }),
+            }
+        } else {
+            None
+        }
+    };
+    let dh = tauri::async_runtime::spawn(direct_fut);
+    let proxied: Option<ExitResult> = proxy_fut.await;
+    let direct: ExitResult = dh.await.unwrap_or_default();
     log_changed("exit", format!(
         "exit check: direct={:?}/{:?} via={:?} node={:?} err={:?}; proxy={:?}",
         direct.ip,
@@ -1284,22 +1591,11 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
             .await;
         }
     }
-    let groups = if p.detected { measure_groups(sh.clone()).await } else { Vec::new() };
-    // every group failing usually means the core is still starting (e.g. right after the
-    // override was installed): try once more shortly
-    {
-        static RETRIED: AtomicBool = AtomicBool::new(false);
-        let all_failed = !groups.is_empty() && groups.iter().all(|g| g.r.ip.is_none());
-        if all_failed && !RETRIED.swap(true, Ordering::SeqCst) {
-            let sh2 = sh.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(15));
-                sh2.exit_trigger.store(true, Ordering::SeqCst);
-            });
-        } else if !all_failed {
-            RETRIED.store(false, Ordering::SeqCst);
-        }
-    }
+    let groups = if p_detected { measure_groups(sh.clone()).await } else { Vec::new() };
+    let all_groups_failed = !groups.is_empty() && groups.iter().all(|g| g.r.ip.is_none());
+    let direct_ok = !has_uplink || direct.ip.is_some();
+    let proxy_expected = p_detected && (p_port.is_some() || p_tun);
+    let proxy_ok = !portless_booting && (!proxy_expected || proxied.as_ref().map(|r| r.ip.is_some()).unwrap_or(false));
     if !groups.is_empty() {
         log_changed("groups", format!(
             "group exits: {}",
@@ -1317,14 +1613,16 @@ async fn exit_check(app: AppHandle, sh: Arc<Shared>) {
         e.clone()
     };
     let _ = app.emit("exit", snap);
-    enrich_ip_org(app, sh, p.local_port).await;
+    enrich_ip_org(app, sh, p_port).await;
+    direct_ok && proxy_ok && !all_groups_failed
 }
 
 fn exit_results(e: &mut ExitState) -> impl Iterator<Item = &mut ExitResult> {
     e.direct.iter_mut().chain(e.proxy.iter_mut()).chain(e.groups.iter_mut().map(|g| &mut g.r))
 }
 
-/// Puts the cached organisation / type on every exit result (none while the switch is off).
+/// Puts the cached organisation / type on every exit result (none while the switch is off),
+/// and backfills `r.cc` when the offline MMDB lacked a country code.
 fn fill_ip_org(e: &mut ExitState) {
     let on = settings::bool_at("exit.ipOrg", true);
     for r in exit_results(e) {
@@ -1332,6 +1630,9 @@ fn fill_ip_org(e: &mut ExitState) {
             r.reg = None;
         } else if let Some(ip) = r.ip.clone() {
             if let Some(v) = iporg::cached(&ip) {
+                if r.cc.is_none() {
+                    r.cc = v.cc.clone();
+                }
                 r.reg = Some(v);
             }
         }
@@ -1343,17 +1644,26 @@ async fn enrich_ip_org(app: AppHandle, sh: Arc<Shared>, port: Option<u16>) {
     if !settings::bool_at("exit.ipOrg", true) {
         return;
     }
-    let mut missing: Vec<String> = {
+    let (mut missing, direct_ip) = {
         let mut e = sh.exit.lock().unwrap();
-        exit_results(&mut e).filter(|r| r.reg.is_none()).filter_map(|r| r.ip.clone()).collect()
+        let dir = e.direct.as_ref().and_then(|r| r.ip.clone());
+        let list: Vec<String> = exit_results(&mut e).filter(|r| r.reg.is_none()).filter_map(|r| r.ip.clone()).collect();
+        (list, dir)
     };
     missing.sort();
     missing.dedup();
     if missing.is_empty() {
         return;
     }
-    for ip in &missing {
-        iporg::lookup(ip, port).await;
+    let mut tasks = Vec::new();
+    for ip in missing {
+        let is_direct = direct_ip.as_deref() == Some(ip.as_str());
+        tasks.push(tauri::async_runtime::spawn(async move {
+            iporg::lookup_ex(&ip, port, is_direct).await;
+        }));
+    }
+    for t in tasks {
+        let _ = t.await;
     }
     let snap = {
         let mut e = sh.exit.lock().unwrap();
@@ -1468,16 +1778,14 @@ async fn control_set(
     blocking(move || {
         let (ctl, secret) = ctl_link(&sh)?;
         let home = sh.core_home.lock().unwrap().clone().ok_or(crate::i18n::t("还不知道内核目录，稍等几秒再试"))?;
-        let rule = {
-            let mut rules = sh.rules.lock().unwrap();
-            let r = control::upsert(&mut rules, &kind, process, value, &target);
-            control::persist(&home, &rules)?;
-            r
-        };
+        let mut next = sh.rules.lock().unwrap().clone();
+        let rule = control::upsert(&mut next, &kind, process, value, &target);
+        control::persist(&home, &next)?;
         control::reload_providers(&ctl, secret.as_deref())?;
+        *sh.rules.lock().unwrap() = next.clone();
         let n = control::close_matching(&ctl, secret.as_deref(), &rule);
         log(format!("control: {} {:?} {:?} -> {} (reset {n} connections)", rule.kind, rule.process, rule.value, target));
-        sh.control.lock().unwrap().rules = sh.rules.lock().unwrap().clone();
+        sh.control.lock().unwrap().rules = next;
         Ok(n)
     })
     .await
@@ -1489,18 +1797,16 @@ async fn control_remove(state: tauri::State<'_, Arc<Shared>>, id: String) -> Res
     blocking(move || {
         let (ctl, secret) = ctl_link(&sh)?;
         let home = sh.core_home.lock().unwrap().clone().ok_or(crate::i18n::t("还不知道内核目录"))?;
-        let removed = {
-            let mut rules = sh.rules.lock().unwrap();
-            let r = rules.iter().find(|r| r.id == id).cloned();
-            rules.retain(|r| r.id != id);
-            control::persist(&home, &rules)?;
-            r
-        };
+        let mut next = sh.rules.lock().unwrap().clone();
+        let removed = next.iter().find(|r| r.id == id).cloned();
+        next.retain(|r| r.id != id);
+        control::persist(&home, &next)?;
         control::reload_providers(&ctl, secret.as_deref())?;
+        *sh.rules.lock().unwrap() = next.clone();
         if let Some(r) = removed {
             control::close_matching(&ctl, secret.as_deref(), &r);
         }
-        sh.control.lock().unwrap().rules = sh.rules.lock().unwrap().clone();
+        sh.control.lock().unwrap().rules = next;
         Ok(())
     })
     .await
@@ -1555,18 +1861,25 @@ fn latency_wanted() -> bool {
 /// shown in the pill and used by the flashes) first, then the other groups' nodes. One round of
 /// samples shares one timestamp so the page can draw a line per node.
 fn probe_latency(sh: &Shared) {
+    let is_real_node = |n: &str| !n.eq_ignore_ascii_case("DIRECT") && !n.to_ascii_uppercase().starts_with("REJECT") && !n.eq_ignore_ascii_case("PASS");
     let nodes: Vec<String> = {
         let ex = sh.exit.lock().unwrap();
-        let main = ex.groups.iter().find(|g| g.is_default).and_then(|g| g.r.node.clone()).or_else(|| ex.proxy.as_ref().and_then(|e| e.node.clone()));
+        let main = ex
+            .groups
+            .iter()
+            .find(|g| g.is_default)
+            .and_then(|g| g.r.node.clone())
+            .or_else(|| ex.proxy.as_ref().and_then(|e| e.node.clone()))
+            .filter(|n| is_real_node(n));
         let mut v: Vec<String> = main.into_iter().collect();
         for g in &ex.groups {
             if let Some(n) = &g.r.node {
-                if !v.contains(n) && !n.eq_ignore_ascii_case("DIRECT") && !n.eq_ignore_ascii_case("REJECT") {
+                if !v.contains(n) && is_real_node(n) {
                     v.push(n.clone());
                 }
             }
         }
-        v.truncate(4); // the chart has four series colours
+        v.truncate(8);
         v
     };
     if nodes.is_empty() {
@@ -1605,17 +1918,26 @@ fn profile_secs(saver: u64, balanced: u64, smooth: u64) -> u64 {
 
 /// Proxy groups that have a MicaBar inbound (for the manual group picker), in config order.
 #[tauri::command]
-fn exit_group_options() -> Vec<String> {
-    mihomo::read_config()
-        .file
-        .map(|f| control::group_listeners(std::path::Path::new(&f)).into_iter().map(|(g, _)| g).collect())
-        .unwrap_or_default()
+async fn exit_group_options() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        mihomo::read_config()
+            .file
+            .map(|f| control::group_listeners(std::path::Path::new(&f)).into_iter().map(|(g, _)| g).collect())
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
-fn traffic_query(state: tauri::State<'_, Arc<Shared>>, days: i64, day: Option<String>) -> traffic::Report {
-    let book = state.traffic.lock().unwrap();
-    traffic::report(&book, days.clamp(1, traffic::KEEP_DAYS + 1), day.as_deref())
+async fn traffic_query(app: AppHandle, days: i64, day: Option<String>) -> traffic::Report {
+    let sh = app.state::<Arc<Shared>>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let book = sh.traffic.lock().unwrap();
+        traffic::report(&book, days.clamp(1, traffic::KEEP_DAYS + 1), day.as_deref())
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1646,14 +1968,17 @@ struct AppInfo {
 }
 
 #[tauri::command]
-fn app_info(app: AppHandle) -> AppInfo {
-    AppInfo {
-        version: app.package_info().version.to_string(),
+async fn app_info(app: AppHandle) -> AppInfo {
+    let version = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || AppInfo {
+        version,
         installed: system::is_installed(),
         autostart: system::autostart_enabled(),
         log_dir: log_path().parent().map(|p| p.display().to_string()).unwrap_or_default(),
         exe: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
-    }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -1739,8 +2064,8 @@ fn notify_list() -> Vec<notify::Note> {
 }
 
 #[tauri::command]
-fn notify_open(id: u64) -> Result<(), String> {
-    notify::open(id)
+async fn notify_open(id: u64) -> Result<(), String> {
+    blocking(move || notify::open(id)).await
 }
 
 /// Removes notes from the centre (all when `ids` is empty).
@@ -1763,13 +2088,17 @@ struct NotifyApp {
 }
 
 #[tauri::command]
-fn notify_apps() -> Vec<NotifyApp> {
-    notify::apps().into_iter().map(|a| NotifyApp { takeover: a.source == "toast" && notify::takeover_on(&a.key), seen: a }).collect()
+async fn notify_apps() -> Vec<NotifyApp> {
+    tauri::async_runtime::spawn_blocking(|| {
+        notify::apps().into_iter().map(|a| NotifyApp { takeover: a.source == "toast" && notify::takeover_on(&a.key), seen: a }).collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
-fn notify_takeover(key: String, on: bool) -> Result<(), String> {
-    notify::set_takeover(&key, on)
+async fn notify_takeover(key: String, on: bool) -> Result<(), String> {
+    blocking(move || notify::set_takeover(&key, on)).await
 }
 
 #[derive(Serialize)]
@@ -1781,13 +2110,15 @@ struct NotifyHooks {
 }
 
 #[tauri::command]
-fn notify_hooks() -> NotifyHooks {
-    NotifyHooks { port: notify::port(), quiet: notify::quiet_now(), hooks: notify::hooks_status() }
+async fn notify_hooks() -> NotifyHooks {
+    tauri::async_runtime::spawn_blocking(|| NotifyHooks { port: notify::port(), quiet: notify::quiet_now(), hooks: notify::hooks_status() })
+        .await
+        .unwrap_or(NotifyHooks { port: 47900, quiet: false, hooks: Vec::new() })
 }
 
 #[tauri::command]
-fn notify_hook(tool: String, on: bool) -> Result<String, String> {
-    notify::set_hook(&tool, on)
+async fn notify_hook(tool: String, on: bool) -> Result<String, String> {
+    blocking(move || notify::set_hook(&tool, on)).await
 }
 
 #[tauri::command]
@@ -1815,12 +2146,69 @@ fn settings_get() -> serde_json::Value {
     settings::get()
 }
 
+fn is_dark_theme() -> bool {
+    match settings::str_at("appearance.theme", "auto").as_str() {
+        "glass-light" | "github-light" | "solarized-light" => false,
+        "glass-dark" | "onedark" | "github-dark" | "dracula" | "nightowl" => true,
+        "custom" => {
+            let hex = settings::str_at("appearance.custom.bg", "#14141c");
+            let h = hex.trim_start_matches('#');
+            if h.len() >= 6 {
+                let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(20) as u32;
+                let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(20) as u32;
+                let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(28) as u32;
+                (54 * r + 183 * g + 19 * b) < 128 * 256
+            } else {
+                true
+            }
+        }
+        _ => {
+            use winreg::enums::HKEY_CURRENT_USER;
+            winreg::RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+                .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
+                .map(|v| v == 0)
+                .unwrap_or(true)
+        }
+    }
+}
+
+fn manager_bg_color(dark: bool) -> tauri::window::Color {
+    if settings::str_at("appearance.theme", "auto") == "custom" {
+        let hex = settings::str_at("appearance.custom.bg", "#16161c");
+        let h = hex.trim_start_matches('#');
+        if h.len() >= 6 {
+            let r = u8::from_str_radix(&h[0..2], 16).unwrap_or(22);
+            let g = u8::from_str_radix(&h[2..4], 16).unwrap_or(22);
+            let b = u8::from_str_radix(&h[4..6], 16).unwrap_or(28);
+            return tauri::window::Color(r, g, b, 255);
+        }
+    }
+    if dark {
+        tauri::window::Color(20, 20, 26, 255)
+    } else {
+        tauri::window::Color(246, 247, 250, 255)
+    }
+}
+
+fn sync_manager_titlebar(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("manager") {
+        let dark = is_dark_theme();
+        let _ = w.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
+        let _ = w.set_background_color(Some(manager_bg_color(dark)));
+        if let Ok(hwnd) = w.hwnd() {
+            system::set_dark_titlebar(hwnd.0 as isize, dark);
+        }
+    }
+}
+
 /// Side effects of a settings change that live in the backend.
 fn apply_settings_backend(app: &AppHandle, ws: &WinState) {
     window_ctl::reload_hotkey(ws);
     if let Some(w) = app.get_webview_window("main") {
         window_ctl::place_window(&w);
     }
+    sync_manager_titlebar(app);
     // language changed: new tray menu (the windows reload themselves after ui_lang)
     if i18n::set_lang(&i18n::wanted()) {
         if let (Some(tray), Ok(menu)) = (app.tray_by_id("main"), tray_menu(app)) {
@@ -1857,33 +2245,47 @@ fn tray_menu<M: Manager<tauri::Wry>>(app: &M) -> tauri::Result<Menu<tauri::Wry>>
 }
 
 #[tauri::command]
-fn settings_set(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
-    // start with Windows: create / remove the logon task first, keep the setting only if it worked
-    if let Some(on) = patch.pointer("/general/autostart").and_then(|v| v.as_bool()) {
-        system::set_autostart(on).map_err(|e| crate::tr!("设置开机自启失败：{0}", e))?;
-    }
-    let s = settings::update(&patch);
-    apply_settings_backend(&app, &state.ws);
-    if patch.get("clip").is_some() {
-        // limits / storage changed: applied off the main thread (it may move files)
-        std::thread::spawn(clipboard::apply_settings);
-    }
-    let _ = app.emit("settings", &s);
-    Ok(s)
+async fn settings_set(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
+    let sh = state.inner().clone();
+    blocking(move || {
+        // start with Windows: create / remove the logon task first, keep the setting only if it worked
+        if let Some(on) = patch.pointer("/general/autostart").and_then(|v| v.as_bool()) {
+            system::set_autostart(on).map_err(|e| crate::tr!("设置开机自启失败：{0}", e))?;
+        }
+        let s = settings::update(&patch);
+        apply_settings_backend(&app, &sh.ws);
+        if patch.pointer("/notify/port").is_some() {
+            std::thread::spawn(notify::sync_hook_endpoints);
+        }
+        if patch.get("clip").is_some() {
+            // limits / storage changed: applied off the main thread (it may move files)
+            std::thread::spawn(clipboard::apply_settings);
+        }
+        let _ = app.emit("settings", &s);
+        Ok(s)
+    })
+    .await
 }
 
 #[tauri::command]
-fn settings_reset(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) -> serde_json::Value {
-    let s = settings::reset();
-    apply_settings_backend(&app, &state.ws);
-    let _ = app.emit("settings", &s);
-    s
+async fn settings_reset(app: AppHandle) -> serde_json::Value {
+    let sh = app.state::<Arc<Shared>>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = system::set_autostart(false);
+        let s = settings::reset();
+        clipboard::apply_settings();
+        apply_settings_backend(&app, &sh.ws);
+        let _ = app.emit("settings", &s);
+        s
+    })
+    .await
+    .unwrap_or_else(|_| settings::get())
 }
 
 /// Glass off: drop the frame channel, which pauses desktop duplication entirely.
 #[tauri::command]
 fn glass_off(state: tauri::State<'_, Arc<Shared>>) {
-    *state.glass.lock().unwrap() = None;
+    glass::set_channel(&state.glass, None);
 }
 
 /// UI scale (percent) as WebView zoom; the page then refits the window to the new pixel ratio.
@@ -1896,28 +2298,32 @@ fn set_zoom(app: AppHandle, scale: f64) {
 
 /// Installed font family names (from the registry font tables), for the font picker.
 #[tauri::command]
-fn fonts_list() -> Vec<String> {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-    let mut names: std::collections::BTreeSet<String> = Default::default();
-    for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
-        let Ok(k) = winreg::RegKey::predef(root).open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts") else { continue };
-        for (name, _) in k.enum_values().flatten() {
-            // "Microsoft YaHei & Microsoft YaHei UI (TrueType)" -> both families, styles dropped
-            let base = name.split(" (").next().unwrap_or(&name).to_string();
-            for part in base.split('&') {
-                let mut fam = part.trim().to_string();
-                for style in [" Bold Italic", " Bold", " Italic", " Light", " Semibold", " SemiBold", " Black", " Regular", " Oblique", " Semilight", " SemiLight", " Medium", " Thin"] {
-                    if let Some(f) = fam.strip_suffix(style) {
-                        fam = f.to_string();
+async fn fonts_list() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        let mut names: std::collections::BTreeSet<String> = Default::default();
+        for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+            let Ok(k) = winreg::RegKey::predef(root).open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts") else { continue };
+            for (name, _) in k.enum_values().flatten() {
+                // "Microsoft YaHei & Microsoft YaHei UI (TrueType)" -> both families, styles dropped
+                let base = name.split(" (").next().unwrap_or(&name).to_string();
+                for part in base.split('&') {
+                    let mut fam = part.trim().to_string();
+                    for style in [" Bold Italic", " Bold", " Italic", " Light", " Semibold", " SemiBold", " Black", " Regular", " Oblique", " Semilight", " SemiLight", " Medium", " Thin"] {
+                        if let Some(f) = fam.strip_suffix(style) {
+                            fam = f.to_string();
+                        }
                     }
-                }
-                if !fam.is_empty() && fam.chars().count() < 48 {
-                    names.insert(fam);
+                    if !fam.is_empty() && fam.chars().count() < 48 {
+                        names.insert(fam);
+                    }
                 }
             }
         }
-    }
-    names.into_iter().collect()
+        names.into_iter().collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1986,7 +2392,8 @@ async fn guard_add(state: tauri::State<'_, Arc<Shared>>, text: String) -> Result
             e.kind = "exclude".into();
             e
         } else if let Some(v) = t.strip_prefix("keyword:").or_else(|| t.strip_prefix("关键词:")).or_else(|| t.strip_prefix("关键词：")) {
-            guard::Entry { kind: "keyword".into(), value: v.trim().to_lowercase() }
+            let kw = guard::clean_keyword(v).ok_or(crate::i18n::t("没认出来：填域名、IP/CIDR、keyword:关键词，或 !域名 表示排除"))?;
+            guard::Entry { kind: "keyword".into(), value: kw }
         } else {
             guard::parse_list(t).into_iter().next().ok_or(crate::i18n::t("没认出来：填域名、IP/CIDR、keyword:关键词，或 !域名 表示排除"))?
         };
@@ -2035,10 +2442,10 @@ async fn update_gfw(sh: Arc<Shared>) -> Result<usize, String> {
 #[tauri::command]
 async fn guard_update_gfw(state: tauri::State<'_, Arc<Shared>>) -> Result<usize, String> {
     let sh = state.inner().clone();
-    let n = update_gfw(sh.clone()).await;
+    let n = update_gfw(sh.clone()).await?;
     let sh2 = sh.clone();
     blocking(move || apply_guard(&sh2)).await?;
-    n
+    Ok(n)
 }
 
 #[tauri::command]
@@ -2048,23 +2455,18 @@ async fn guard_import(state: tauri::State<'_, Arc<Shared>>, url: String) -> Resu
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(crate::i18n::t("填一个 http(s) 链接").into());
     }
-    let r = guard::fetch_text(&[url.clone()], proxy_port(&sh)).await;
-    let n = {
-        let mut s = sh.guard.lock().unwrap();
-        s.imports.retain(|i| i.url != url);
-        match &r {
-            Ok(t) => {
-                let n = guard::save_import(&url, t);
-                s.imports.push(guard::Import { url: url.clone(), enabled: true, count: n, updated: now_ms(), error: None });
-                n
-            }
-            Err(e) => return Err(crate::tr!("下载失败：{0}", e)),
-        }
-    };
+    let t = guard::fetch_text(&[url.clone()], proxy_port(&sh))
+        .await
+        .map_err(|e| crate::tr!("下载失败：{0}", e))?;
+    let n = guard::save_import(&url, &t);
     if n == 0 {
-        sh.guard.lock().unwrap().imports.retain(|i| i.url != url);
         guard::remove_import_file(&url);
         return Err(crate::i18n::t("这个链接里没认出任何域名 / IP 规则").into());
+    }
+    {
+        let mut s = sh.guard.lock().unwrap();
+        s.imports.retain(|i| i.url != url);
+        s.imports.push(guard::Import { url: url.clone(), enabled: true, count: n, updated: now_ms(), error: None });
     }
     let sh2 = sh.clone();
     blocking(move || apply_guard(&sh2)).await?;
@@ -2094,6 +2496,9 @@ async fn guard_import_set(state: tauri::State<'_, Arc<Shared>>, url: String, ena
 async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: String) -> Result<String, String> {
     let sh = state.inner().clone();
     blocking(move || {
+        if !sh.admin {
+            return Err(crate::i18n::t("改防火墙需要以管理员身份运行 MicaBar").into());
+        }
         if sh.proxy.lock().unwrap().tun.is_some() {
             return Err(crate::i18n::t("TUN 模式下程序的流量也走虚拟网卡，用防火墙禁止会让它完全断网，所以不提供").into());
         }
@@ -2105,9 +2510,10 @@ async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: St
             guard::save_settings(&s);
         }
         let n = guard::reset_connections(&pids_of(&sh, &path));
+        log(format!("guard: firewall block {path} (reset {n} connections)"));
         Ok(match firstnet::firewall_warning() {
             Some(w) => crate::tr!("已添加禁止 {0} 直连的规则，{1}", exe, w),
-            None => crate::tr!("已禁止 {0} 直连{1}", exe, if n > 0 { format!("，断开了 {n} 条连接") } else { String::new() }),
+            None => crate::tr!("已禁止 {0} 直连{1}", exe, String::new()),
         })
     })
     .await
@@ -2117,6 +2523,9 @@ async fn guard_block(state: tauri::State<'_, Arc<Shared>>, path: String, exe: St
 async fn guard_unblock(state: tauri::State<'_, Arc<Shared>>, path: String) -> Result<(), String> {
     let sh = state.inner().clone();
     blocking(move || {
+        if !sh.admin {
+            return Err(crate::i18n::t("改防火墙需要以管理员身份运行 MicaBar").into());
+        }
         let b = sh.guard.lock().unwrap().blocked.iter().find(|b| b.path.eq_ignore_ascii_case(&path)).cloned();
         if let Some(b) = b {
             guard::unblock(&b.rule, &b.path)?;
@@ -2153,13 +2562,13 @@ fn alert_clear(state: tauri::State<'_, Arc<Shared>>) {
 // ---------- live AI sessions ----------
 
 #[tauri::command]
-fn agents_get() -> Vec<agents::Session> {
-    agents::list()
+async fn agents_get() -> Vec<agents::Session> {
+    tauri::async_runtime::spawn_blocking(agents::list).await.unwrap_or_default()
 }
 
 #[tauri::command]
-fn agents_focus(id: String) -> Result<(), String> {
-    agents::focus(&id)
+async fn agents_focus(id: String) -> Result<(), String> {
+    blocking(move || agents::focus(&id)).await
 }
 
 // ---------- network diagnosis ----------
@@ -2361,20 +2770,18 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
                 }
                 let rule = firstnet::firewall_block(&path)?;
                 // a program on the system proxy reaches the internet through the core: a REJECT
-                // rule there (exit control on) stops that part too
+                // rule there (exit control on) stops that part too (using full PROCESS-PATH)
                 let core_rule = if sh.control.lock().unwrap().status == "active" {
                     (|| -> Result<String, String> {
                         let (ctl, secret) = ctl_link(&sh)?;
                         let home = sh.core_home.lock().unwrap().clone().ok_or(crate::i18n::t("还不知道内核目录"))?;
-                        let r = {
-                            let mut rules = sh.rules.lock().unwrap();
-                            let r = control::upsert(&mut rules, "process", Some(exe.clone()), None, "reject");
-                            control::persist(&home, &rules)?;
-                            r
-                        };
+                        let mut next = sh.rules.lock().unwrap().clone();
+                        let r = control::upsert(&mut next, "process", Some(path.clone()), None, "reject");
+                        control::persist(&home, &next)?;
                         control::reload_providers(&ctl, secret.as_deref())?;
+                        *sh.rules.lock().unwrap() = next.clone();
                         control::close_matching(&ctl, secret.as_deref(), &r);
-                        sh.control.lock().unwrap().rules = sh.rules.lock().unwrap().clone();
+                        sh.control.lock().unwrap().rules = next;
                         Ok(r.id)
                     })()
                     .unwrap_or_else(|e| {
@@ -2400,24 +2807,31 @@ async fn firstnet_action(state: tauri::State<'_, Arc<Shared>>, path: String, act
                 msg
             }
             "unblock" => {
+                if !sh.admin {
+                    return Err(crate::i18n::t("改防火墙需要以管理员身份运行 MicaBar").into());
+                }
                 let k = firstnet::get(&path).ok_or(crate::i18n::t("没有这个程序的记录"))?;
                 if !k.rule.is_empty() {
-                    firstnet::firewall_unblock(&k.rule, &path)?;
+                    firstnet::firewall_unblock(&k.rule, &k.path)?;
                 }
                 if !k.core_rule.is_empty() {
-                    if let (Ok((ctl, secret)), Some(home)) = (ctl_link(&sh), sh.core_home.lock().unwrap().clone()) {
-                        let removed = {
-                            let mut rules = sh.rules.lock().unwrap();
-                            let r = rules.iter().find(|r| r.id == k.core_rule).cloned();
-                            rules.retain(|r| r.id != k.core_rule);
+                    let removed = {
+                        let mut rules = sh.rules.lock().unwrap();
+                        let r = rules.iter().find(|r| r.id == k.core_rule).cloned();
+                        rules.retain(|r| r.id != k.core_rule);
+                        if let Some(home) = sh.core_home.lock().unwrap().clone() {
                             let _ = control::persist(&home, &rules);
-                            r
-                        };
+                        } else {
+                            let _ = control::save_rules(&rules);
+                        }
+                        r
+                    };
+                    sh.control.lock().unwrap().rules = sh.rules.lock().unwrap().clone();
+                    if let Ok((ctl, secret)) = ctl_link(&sh) {
                         let _ = control::reload_providers(&ctl, secret.as_deref());
                         if let Some(r) = removed {
                             control::close_matching(&ctl, secret.as_deref(), &r);
                         }
-                        sh.control.lock().unwrap().rules = sh.rules.lock().unwrap().clone();
                     }
                 }
                 firstnet::set_blocked(&path, false, "", "");
@@ -2448,7 +2862,7 @@ fn ai_every_ms() -> u64 {
     (settings::num_at("ai.interval", 10.0).clamp(1.0, 120.0) * 60_000.0) as u64
 }
 
-/// Asks only the tools that are due (each has its own clock); the others keep their last numbers.
+/// Asks only the tools that are due (each has its own clock) concurrently; the others keep their last numbers.
 async fn ai_round(app: &AppHandle, sh: &Arc<Shared>, manual: bool) {
     let proxy = ai_proxy(sh);
     {
@@ -2465,26 +2879,42 @@ async fn ai_round(app: &AppHandle, sh: &Arc<Shared>, manual: bool) {
     }
     let prev = sh.ai.lock().unwrap().clone();
     let every = ai_every_ms();
-    let mut out = Vec::new();
+    enum Slot {
+        Cached(Option<ai::Quota>),
+        Pending(&'static str, Option<ai::Quota>, tauri::async_runtime::JoinHandle<ai::Quota>),
+    }
+    let mut slots = Vec::with_capacity(ai::TOOLS.len());
     let mut asked = false;
     for (tool, _) in ai::TOOLS {
         if !settings::bool_at(&format!("ai.{tool}"), true) {
             continue;
         }
-        // the last result, also when the tool (or the AI section) was switched off for a while
         let p = prev.iter().find(|p| p.tool == tool).cloned().or_else(|| ai::known_quota(tool));
         if !ai::due(tool, every, manual) {
-            out.extend(p);
+            slots.push(Slot::Cached(p));
             continue;
         }
         asked = true;
-        let q = ai::query(tool, proxy, p.as_ref()).await;
-        // log failures once, not on every retry
-        let same = p.as_ref().map(|p| p.status == q.status && p.message == q.message).unwrap_or(false);
-        if q.status != "ok" && !same {
-            log(format!("ai {tool}: {} {}", q.status, q.message.clone().unwrap_or_default()));
+        let p_clone = p.clone();
+        let h = tauri::async_runtime::spawn(async move { ai::query(tool, proxy, p_clone.as_ref()).await });
+        slots.push(Slot::Pending(tool, p, h));
+    }
+    let mut out = Vec::with_capacity(slots.len());
+    for slot in slots {
+        match slot {
+            Slot::Cached(p) => out.extend(p),
+            Slot::Pending(tool, p, h) => {
+                if let Ok(q) = h.await {
+                    let same = p.as_ref().map(|p| p.status == q.status && p.message == q.message).unwrap_or(false);
+                    if q.status != "ok" && !same {
+                        log(format!("ai {tool}: {} {}", q.status, q.message.clone().unwrap_or_default()));
+                    }
+                    out.push(q);
+                } else {
+                    out.extend(p);
+                }
+            }
         }
-        out.push(q);
     }
     let changed = asked || out.len() != prev.len();
     *sh.ai.lock().unwrap() = out.clone();
@@ -2499,7 +2929,8 @@ async fn ai_round(app: &AppHandle, sh: &Arc<Shared>, manual: bool) {
 fn ai_loop(app: AppHandle, sh: Arc<Shared>) {
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            let ready = sh.last.lock().unwrap().is_some();
+            tokio::time::sleep(if ready { Duration::from_secs(2) } else { Duration::from_millis(200) }).await;
             if !settings::bool_at("ai.on", true) {
                 if !sh.ai.lock().unwrap().is_empty() {
                     sh.ai.lock().unwrap().clear();
@@ -2509,7 +2940,7 @@ fn ai_loop(app: AppHandle, sh: Arc<Shared>) {
             }
             // wait for the first snapshot: until then the proxy client isn't detected yet and the
             // services (blocked here without it) would be asked directly
-            if sh.last.lock().unwrap().is_none() {
+            if !ready {
                 continue;
             }
             let manual = sh.ai_trigger.swap(false, Ordering::SeqCst);
@@ -2523,22 +2954,28 @@ fn ai_get(state: tauri::State<'_, Arc<Shared>>) -> Vec<ai::Quota> {
     state.ai.lock().unwrap().clone()
 }
 
+static AUDIO_WANT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn set_audio_viz_for(app: &AppHandle, label: &str, on: bool) {
+    let any = {
+        let mut w = AUDIO_WANT.lock().unwrap();
+        w.retain(|l| l != label && app.get_webview_window(l).is_some());
+        if on && app.get_webview_window(label).is_some() {
+            w.push(label.to_string());
+        }
+        !w.is_empty()
+    };
+    let app2 = app.clone();
+    audio::set_wanted(any, move |b| {
+        let _ = app2.emit("viz", b);
+    });
+}
+
 /// Music bars on or off (a page shows them while a song plays); bands arrive as "viz" events.
 #[tauri::command]
 fn audio_viz(app: AppHandle, window: tauri::Window, on: bool) {
     // the island and the desktop window each say whether they show bars; on while either does
-    static WANT: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    let any = {
-        let mut w = WANT.lock().unwrap();
-        w.retain(|l| l != window.label());
-        if on {
-            w.push(window.label().to_string());
-        }
-        !w.is_empty()
-    };
-    audio::set_wanted(any, move |b| {
-        let _ = app.emit("viz", b);
-    });
+    set_audio_viz_for(&app, window.label(), on);
 }
 
 /// Ends all processes of one app listed on the system monitor page: (ended, failed).
@@ -2569,6 +3006,9 @@ async fn sysmon_sample() -> sysmon::Sample {
 /// "Claude 10:06" so the page can say so.
 #[tauri::command]
 fn ai_refresh(state: tauri::State<'_, Arc<Shared>>) -> Vec<String> {
+    if !settings::bool_at("ai.on", true) {
+        return Vec::new();
+    }
     state.ai_trigger.store(true, Ordering::SeqCst);
     log("ai: manual refresh");
     let every = ai_every_ms();
@@ -2586,13 +3026,7 @@ fn media_get(state: tauri::State<'_, Arc<Shared>>) -> Option<media::NowPlaying> 
 
 #[tauri::command]
 async fn media_control(action: String) -> Result<(), String> {
-    blocking(move || {
-        unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-        }
-        media::control(&action)
-    })
-    .await
+    blocking(move || media::control(&action)).await
 }
 
 // ---------- clipboard history ----------
@@ -2600,8 +3034,8 @@ async fn media_control(action: String) -> Result<(), String> {
 // main thread
 
 #[tauri::command]
-async fn clip_list() -> Result<Vec<clipboard::View>, String> {
-    blocking(|| Ok(clipboard::list())).await
+async fn clip_list(query: Option<String>) -> Result<Vec<clipboard::View>, String> {
+    blocking(move || Ok(clipboard::list_filtered(query.as_deref()))).await
 }
 
 #[tauri::command]
@@ -2631,6 +3065,7 @@ fn open_manager_window(app: &AppHandle, page: &str) {
     if let Some(w) = app.get_webview_window("manager") {
         // timed: opening it lagged once while a game was running (2026-11-22)
         let t = std::time::Instant::now();
+        sync_manager_titlebar(app);
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
@@ -2641,47 +3076,65 @@ fn open_manager_window(app: &AppHandle, page: &str) {
     let s = settings::get();
     let g = s.pointer("/manager").cloned().unwrap_or_default();
     let num = |k: &str, d: f64| g.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+    let dark = is_dark_theme();
     let url = tauri::WebviewUrl::App(format!("manager.html#{page}").into());
-    let mut b = tauri::WebviewWindowBuilder::new(app, "manager", url)
+    let b = tauri::WebviewWindowBuilder::new(app, "manager", url)
         .title("MicaBar")
         .inner_size(num("w", 1120.0).max(820.0), num("h", 740.0).max(560.0))
         .min_inner_size(820.0, 560.0)
         .resizable(true)
+        .theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }))
+        .background_color(manager_bg_color(dark))
         // same WebView2 environment as the island window (must match), and keep painting while
         // Chromium thinks the window is covered (the island window overlaps it)
         .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion")
         .decorations(true)
         // created hidden and shown below: showing an existing window also makes its webview visible,
         // otherwise the page only repaints after mouse input
-        .visible(false);
-    if let (Some(x), Some(y)) = (g.get("x").and_then(|v| v.as_f64()), g.get("y").and_then(|v| v.as_f64())) {
-        // only when that spot is still on a monitor
-        let on_screen = window_ctl::monitor_list().iter().any(|m| x >= m.x as f64 - 50.0 && y >= m.y as f64 - 10.0 && x < (m.x + m.w) as f64 - 100.0 && y < (m.y + m.h) as f64 - 100.0);
-        if on_screen {
-            b = b.position(x, y);
-        }
-    } else {
-        b = b.center();
-    }
+        .visible(false)
+        .center();
+    let saved_px = g.get("px").and_then(|v| v.as_i64()).zip(g.get("py").and_then(|v| v.as_i64())).and_then(|(px, py)| {
+        let (px, py) = (px as i32, py as i32);
+        let on_screen = window_ctl::monitor_list()
+            .iter()
+            .any(|m| px >= m.x - 50 && py >= m.y - 10 && px < m.x + m.w - 100 && py < m.y + m.h - 100);
+        on_screen.then_some((px, py))
+    });
     match b.build() {
         Ok(w) => {
+            if let Some((px, py)) = saved_px {
+                let _ = w.set_position(tauri::PhysicalPosition::new(px, py));
+            }
+            if let Ok(hwnd) = w.hwnd() {
+                system::set_dark_titlebar(hwnd.0 as isize, dark);
+            }
             if let Some(icon) = app.default_window_icon() {
                 let _ = w.set_icon(icon.clone());
             }
             let _ = w.show();
+            if let Ok(hwnd) = w.hwnd() {
+                // Re-apply after show() so Win10 DWM refreshes the visible non-client frame too
+                system::set_dark_titlebar(hwnd.0 as isize, dark);
+            }
             let _ = w.set_focus();
             let w2 = w.clone();
-            w.on_window_event(move |ev| {
-                // remember size and position (logical px) for the next time
-                if let tauri::WindowEvent::CloseRequested { .. } = ev {
+            let app_ev = app.clone();
+            w.on_window_event(move |ev| match ev {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    set_audio_viz_for(&app_ev, "manager", false);
                     let sf = w2.scale_factor().unwrap_or(1.0);
                     if let (Ok(p), Ok(sz), Ok(false)) = (w2.outer_position(), w2.inner_size(), w2.is_minimized()) {
                         settings::update(&serde_json::json!({ "manager": {
+                            "px": p.x, "py": p.y,
                             "x": p.x as f64 / sf, "y": p.y as f64 / sf,
                             "w": sz.width as f64 / sf, "h": sz.height as f64 / sf
                         } }));
                     }
                 }
+                tauri::WindowEvent::Destroyed => {
+                    set_audio_viz_for(&app_ev, "manager", false);
+                }
+                _ => {}
             });
             log(format!("manager window opened ({page})"));
         }
@@ -2792,7 +3245,7 @@ fn collapse_island(state: tauri::State<'_, Arc<Shared>>) {
 /// The page hands over a channel; blurred backdrop frames are pushed into it as raw bytes.
 #[tauri::command]
 fn start_glass(state: tauri::State<'_, Arc<Shared>>, on_frame: Channel<InvokeResponseBody>) {
-    *state.glass.lock().unwrap() = Some(on_frame);
+    glass::set_channel(&state.glass, Some(on_frame));
 }
 
 #[tauri::command]
@@ -2801,7 +3254,7 @@ fn refresh_exit(state: tauri::State<'_, Arc<Shared>>) {
 }
 
 #[tauri::command]
-fn get_snapshot(state: tauri::State<'_, Arc<Shared>>) -> Option<Snapshot> {
+fn get_snapshot(state: tauri::State<'_, Arc<Shared>>) -> Option<Arc<Snapshot>> {
     state.last.lock().unwrap().clone()
 }
 
@@ -2828,13 +3281,73 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Builds the collapsed-pill snapshot without deep-cloning `conns`, `listen`, `pids`, `alerts`, or `rules`.
+fn slim_snapshot(full: &Snapshot) -> Snapshot {
+    Snapshot {
+        ts: full.ts,
+        slim: true,
+        admin: full.admin,
+        speed_ok: full.speed_ok,
+        speed_error: full.speed_error.clone(),
+        geo_source: full.geo_source.clone(),
+        conn_count: full.conn_count,
+        listen_count: full.listen_count,
+        hidden_loopback: full.hidden_loopback,
+        up: full.up,
+        down: full.down,
+        apps: full
+            .apps
+            .iter()
+            .map(|a| AppRow {
+                key: a.key.clone(),
+                name: a.name.clone(),
+                exe: a.exe.clone(),
+                path: a.path.clone(),
+                icon: a.icon.clone(),
+                pids: Vec::new(),
+                up: a.up,
+                down: a.down,
+                is_proxy: a.is_proxy,
+                via_proxy: a.via_proxy,
+                conns: Vec::new(),
+                listen: Vec::new(),
+            })
+            .collect(),
+        proxy: full.proxy.clone(),
+        exit: full.exit.clone(),
+        control: control::ControlState {
+            status: full.control.status.clone(),
+            message: full.control.message.clone(),
+            client: full.control.client.clone(),
+            rules: Vec::new(),
+            node: full.control.node.clone(),
+        },
+        guard: GuardView {
+            settings: full.guard.settings.clone(),
+            sources: full.guard.sources.clone(),
+            total: full.guard.total,
+            alerts: Vec::new(),
+            unacked: full.guard.unacked,
+            tun: full.guard.tun,
+        },
+        sys: full.sys.clone(),
+        latency: full.latency.clone(),
+        hotkey_ok: full.hotkey_ok,
+        maximized: full.maximized,
+        animations: full.animations,
+    }
+}
+
 fn single_instance() -> bool {
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name = procinfo::wide("Global\\MicaBar-single-instance");
+    let name = procinfo::wide("Local\\MicaBar-single-instance");
     unsafe {
         let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        !(h.is_null() || GetLastError() == ERROR_ALREADY_EXISTS)
+        if h.is_null() {
+            return true;
+        }
+        GetLastError() != ERROR_ALREADY_EXISTS
     }
 }
 
@@ -2853,6 +3366,18 @@ fn migrate_old_data() {
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let th = std::thread::current();
+        let name = th.name().unwrap_or("unnamed");
+        let loc = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".into());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("panic");
+        log(format!("PANIC on thread {name} at {loc}: {msg}"));
+    }));
     if !single_instance() {
         return;
     }
@@ -2860,10 +3385,35 @@ fn main() {
     i18n::set_lang(&i18n::wanted());
     let admin = is_admin();
     log(format!("---- MicaBar {} start, admin={admin}", env!("CARGO_PKG_VERSION")));
-    let geo = Geo::load();
+    // Start ETW session setup in parallel with disk/DB warm-up & Tauri window creation
+    let etw_init = Mutex::new(admin.then(|| std::thread::spawn(speed::start)));
+    let (geo, guard_settings, matcher, rules, traffic_book, ai_cached) = std::thread::scope(|s| {
+        let g = s.spawn(Geo::load);
+        let m = s.spawn(|| {
+            let gs = guard::load_settings();
+            let mb = guard::Matcher::build(&gs);
+            (gs, mb)
+        });
+        let r = s.spawn(control::load_rules);
+        let tb = s.spawn(traffic::Book::new);
+        let ac = s.spawn(ai::load_cache);
+        guard::register_toast_identity(include_bytes!("../icons/128x128.png"));
+        let geo = g.join().unwrap_or_else(|_| Geo::load());
+        let (gs, mb) = m.join().unwrap_or_else(|_| {
+            let gs = guard::load_settings();
+            let mb = guard::Matcher::build(&gs);
+            (gs, mb)
+        });
+        (
+            geo,
+            gs,
+            mb,
+            r.join().unwrap_or_default(),
+            tb.join().unwrap_or_default(),
+            ac.join().unwrap_or_default(),
+        )
+    });
     log(format!("geo db: {:?}", geo.source));
-    let guard_settings = guard::load_settings();
-    guard::register_toast_identity(include_bytes!("../icons/128x128.png"));
     let shared = Arc::new(Shared {
         geo,
         proxy: Mutex::new(ProxyState::default()),
@@ -2873,22 +3423,23 @@ fn main() {
         ws: Arc::new(WinState::default()),
         glass: Arc::new(Mutex::new(None)),
         control: Mutex::new(control::ControlState { status: "unavailable".into(), ..Default::default() }),
-        rules: Mutex::new(control::load_rules()),
+        rules: Mutex::new(rules),
         core_home: Mutex::new(None),
         node_pending: AtomicBool::new(false),
-        matcher: std::sync::RwLock::new(guard::Matcher::build(&guard_settings)),
+        matcher: std::sync::RwLock::new(matcher),
         guard: Mutex::new(guard_settings),
         alerts: Mutex::new(AlertBook::default()),
         latency: Mutex::new(Latency::default()),
         latency_history: Mutex::new(std::collections::VecDeque::new()),
-        traffic: Mutex::new(traffic::Book::new()),
+        traffic: Mutex::new(traffic_book),
         group_score: Mutex::new(HashMap::new()),
-        ai: Mutex::new(ai::load_cache()),
+        ai: Mutex::new(ai_cached),
         ai_trigger: AtomicBool::new(false),
         media: Arc::new(Mutex::new(None)),
         exit_trigger: AtomicBool::new(false),
         admin,
     });
+    let _ = GLOBAL_SHARED.set(shared.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -3016,6 +3567,7 @@ fn main() {
                         _ => "auto",
                     };
                     let s = settings::update(&serde_json::json!({ "appearance": { "theme": t } }));
+                    sync_manager_titlebar(app);
                     let _ = app.emit("settings", &s);
                 }
                 _ => {}
@@ -3063,81 +3615,184 @@ fn main() {
             }
 
             // collector thread
+            proxy::start_ip_watcher(on_network_change);
+            let etw_handle = etw_init.lock().unwrap().take();
             let sh = shared.clone();
             let h = handle.clone();
             std::thread::spawn(move || {
-                let counters = if sh.admin { speed::start() } else { Err(crate::i18n::t("需要管理员权限").into()) };
-                match &counters {
-                    Ok(_) => log("ETW kernel network session started"),
-                    Err(e) => log(format!("ETW unavailable: {e}")),
+                let mut etw_pending = etw_handle;
+                let mut col = Collector::new_warming(sh.admin);
+                fn attach_ready_etw(
+                    etw_pending: &mut Option<std::thread::JoinHandle<Result<speed::Counters, String>>>,
+                    col: &mut Collector,
+                    wait: bool,
+                ) {
+                    let ready = etw_pending.as_ref().map(|jh| wait || jh.is_finished()).unwrap_or(false);
+                    if ready {
+                        if let Some(jh) = etw_pending.take() {
+                            let res = jh.join().unwrap_or_else(|_| Err("ETW thread panicked".into()));
+                            match &res {
+                                Ok(_) => log("ETW kernel network session started"),
+                                Err(e) => log(format!("ETW unavailable: {e}")),
+                            }
+                            col.attach_counters(res);
+                        }
+                    }
                 }
-                let mut col = Collector::new(counters);
+                // Attach immediately if ETW already finished during Tauri setup; otherwise publish
+                // the very first snapshot right away and attach ETW right after tick 1!
+                attach_ready_etw(&mut etw_pending, &mut col, false);
                 sh.exit_trigger.store(true, Ordering::SeqCst);
+                let (wake_lock, wake_cvar) = collector_wake();
                 loop {
                     let t = Instant::now();
                     crate::perf::tick("collector");
-                    let snap = col.tick(&sh);
-                    let _ = h.emit("snapshot", &snap);
-                    crate::perf::count("snapshots", 1);
+                    attach_ready_etw(&mut etw_pending, &mut col, false);
+                    let snap = Arc::new(col.tick(&sh));
+                    let mgr_visible = h
+                        .get_webview_window("manager")
+                        .map(|w| !w.is_minimized().unwrap_or(false))
+                        .unwrap_or(false);
+                    let need_full = sh.ws.expanded.load(Ordering::SeqCst) || mgr_visible;
+                    if need_full {
+                        let _ = h.emit("snapshot", &*snap);
+                    } else {
+                        let slim = slim_snapshot(&snap);
+                        let _ = h.emit("snapshot", &slim);
+                    }
                     *sh.last.lock().unwrap() = Some(snap);
+                    crate::perf::count("snapshots", 1);
+                    if etw_pending.is_some() {
+                        attach_ready_etw(&mut etw_pending, &mut col, true);
+                    }
                     let spent = t.elapsed();
-                    let period = if settings::str_at("general.profile", "balanced") == "saver" { 2000 } else { 1000 };
-                    std::thread::sleep(Duration::from_millis(period).saturating_sub(spent));
+                    let period = Duration::from_millis(if settings::hot().profile == 0 { 2000 } else { 1000 });
+                    let wait = period.saturating_sub(spent);
+                    if !wait.is_zero() {
+                        let mut dirty = wake_lock.lock().unwrap();
+                        if !*dirty {
+                            let (g, _) = wake_cvar.wait_timeout(dirty, wait).unwrap();
+                            dirty = g;
+                        }
+                        if *dirty {
+                            *dirty = false;
+                            drop(dirty);
+                            // Coalesce bursty adapter/IP callbacks over 120ms so DHCP settles into one tick
+                            std::thread::sleep(Duration::from_millis(120));
+                        }
+                    }
                 }
             });
 
-            // exit IP scheduler
+            // exit IP & background maintenance scheduler (fast boot, coalesced runtime triggers, smart retry)
             let sh = shared.clone();
             let h = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let mut last = Instant::now() - Duration::from_secs(3600);
                 let started = Instant::now();
+                let mut last: Option<Instant> = None;
+                let mut retry_at: Option<Instant> = None;
+                let mut fail_streak: u32 = 0;
                 let mut gfw_try: Option<Instant> = None;
                 let mut lat_at: Option<Instant> = None;
                 let mut update_at: Option<Instant> = None;
+                let update_busy = Arc::new(AtomicBool::new(false));
+                let lat_busy = Arc::new(AtomicBool::new(false));
+                let gfw_busy = Arc::new(AtomicBool::new(false));
+                let exit_busy = Arc::new(AtomicBool::new(false));
+                let exit_result_flag = Arc::new(Mutex::new(None::<bool>));
                 loop {
-                    tokio_sleep(Duration::from_millis(500)).await;
-                    // updates: first check a minute after start, then daily
-                    let update_due = update_at.map(|t| t.elapsed() > Duration::from_secs(24 * 3600)).unwrap_or(started.elapsed() > Duration::from_secs(60));
-                    if settings::bool_at("general.autoUpdate", true) && update_due {
-                        update_at = Some(Instant::now());
-                        match check_update(&h).await {
-                            Ok(u) => {
-                                log(format!("auto update check: available={} {:?}", u.available, u.version));
-                                if u.available {
-                                    let _ = h.emit("update", &u);
-                                }
-                            }
-                            Err(e) => log(format!("auto update check failed: {e}")),
+                    tokio_sleep(Duration::from_millis(200)).await;
+                    if let Some(all_ok) = exit_result_flag.lock().unwrap().take() {
+                        if all_ok {
+                            fail_streak = 0;
+                            retry_at = None;
+                        } else {
+                            fail_streak = fail_streak.saturating_add(1);
+                            let secs = match fail_streak {
+                                1 => 5,
+                                2 => 12,
+                                3 => 25,
+                                _ => 60,
+                            };
+                            retry_at = Some(Instant::now() + Duration::from_secs(secs));
                         }
                     }
+                    let update_due = update_at.map(|t| t.elapsed() > Duration::from_secs(24 * 3600)).unwrap_or(started.elapsed() > Duration::from_secs(60));
+                    if settings::bool_at("general.autoUpdate", true) && update_due && !update_busy.swap(true, Ordering::SeqCst) {
+                        update_at = Some(Instant::now());
+                        let h2 = h.clone();
+                        let ub = update_busy.clone();
+                        tauri::async_runtime::spawn(async move {
+                            match check_update(&h2).await {
+                                Ok(u) => {
+                                    log(format!("auto update check: available={} {:?}", u.available, u.version));
+                                    if u.available {
+                                        let _ = h2.emit("update", &u);
+                                    }
+                                }
+                                Err(e) => log(format!("auto update check failed: {e}")),
+                            }
+                            ub.store(false, Ordering::SeqCst);
+                        });
+                    }
                     let every = Duration::from_secs(profile_secs(60, 30, 15));
-                    if latency_wanted() && lat_at.map(|t| t.elapsed() >= every).unwrap_or(started.elapsed() > Duration::from_secs(8)) {
+                    let exit_ready = sh.exit.lock().unwrap().last_check > 0;
+                    if latency_wanted()
+                        && lat_at.map(|t| t.elapsed() >= every).unwrap_or(exit_ready || started.elapsed() > Duration::from_secs(8))
+                        && !lat_busy.swap(true, Ordering::SeqCst)
+                    {
                         lat_at = Some(Instant::now());
                         let sh2 = sh.clone();
-                        let _ = tauri::async_runtime::spawn_blocking(move || probe_latency(&sh2)).await;
+                        let lb = lat_busy.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = tauri::async_runtime::spawn_blocking(move || probe_latency(&sh2)).await;
+                            lb.store(false, Ordering::SeqCst);
+                        });
                     }
-                    // gfw list: fetch once the proxy is known, then daily
                     let (on, updated) = {
                         let s = sh.guard.lock().unwrap();
                         (s.gfw, s.gfw_updated)
                     };
                     let stale = now_ms().saturating_sub(updated) > 24 * 3600_000;
                     let may_try = gfw_try.map(|t| t.elapsed() > Duration::from_secs(1800)).unwrap_or(true);
-                    if on && stale && may_try && started.elapsed() > Duration::from_secs(15) {
+                    if on && stale && may_try && started.elapsed() > Duration::from_secs(15) && !gfw_busy.swap(true, Ordering::SeqCst) {
                         gfw_try = Some(Instant::now());
-                        if update_gfw(sh.clone()).await.is_ok() {
-                            let sh2 = sh.clone();
-                            let _ = blocking(move || apply_guard(&sh2)).await;
-                        }
+                        let sh2 = sh.clone();
+                        let gb = gfw_busy.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if update_gfw(sh2.clone()).await.is_ok() {
+                                let _ = blocking(move || apply_guard(&sh2)).await;
+                            }
+                            gb.store(false, Ordering::SeqCst);
+                        });
                     }
-                    let due = last.elapsed() >= Duration::from_secs(300);
-                    if sh.exit_trigger.swap(false, Ordering::SeqCst) || due {
-                        // let the proxy state settle (e.g. right after switching nodes)
-                        tokio_sleep(Duration::from_millis(1500)).await;
-                        sh.exit_trigger.store(false, Ordering::SeqCst);
-                        exit_check(h.clone(), sh.clone()).await;
-                        last = Instant::now();
+                    // Wait for the very first collector snapshot (~20ms) so proxy/TUN state is populated before probing
+                    if sh.last.lock().unwrap().is_none() {
+                        continue;
+                    }
+                    if !exit_busy.load(Ordering::SeqCst) {
+                        let initial = last.is_none();
+                        let periodic = last.map(|t| t.elapsed() >= Duration::from_secs(300)).unwrap_or(true);
+                        let retry_due = retry_at.map(|t| Instant::now() >= t).unwrap_or(false);
+                        let triggered = sh.exit_trigger.swap(false, Ordering::SeqCst);
+                        if (triggered || periodic || retry_due) && !exit_busy.swap(true, Ordering::SeqCst) {
+                            last = Some(Instant::now());
+                            retry_at = None;
+                            let h2 = h.clone();
+                            let sh2 = sh.clone();
+                            let eb = exit_busy.clone();
+                            let rf = exit_result_flag.clone();
+                            tauri::async_runtime::spawn(async move {
+                                // Zero extra wait on cold start; 350ms coalesce on runtime network/proxy switches
+                                if !initial && triggered {
+                                    tokio_sleep(Duration::from_millis(350)).await;
+                                    sh2.exit_trigger.store(false, Ordering::SeqCst);
+                                }
+                                let ok = exit_check(h2, sh2).await;
+                                *rf.lock().unwrap() = Some(ok);
+                                eb.store(false, Ordering::SeqCst);
+                            });
+                        }
                     }
                 }
             });
@@ -3151,22 +3806,36 @@ fn main() {
             std::thread::spawn(move || window_ctl::hover_loop(h, ws));
             window_ctl::hotkey_thread(shared.ws.clone());
 
-            // watchdog: the tray, window changes and sync commands all run on the main thread; a
-            // stall there makes clicks "do nothing for a while" (seen once mid-game), so log it
+            // watchdog: monotonic Instant (immune to sleep/NTP jumps) + in-flight guard (no queue flood)
             let h = handle.clone();
             std::thread::spawn(move || {
-                let beat = Arc::new(std::sync::atomic::AtomicU64::new(now_ms()));
+                let origin = Instant::now();
+                let mono_ms = || origin.elapsed().as_millis() as u64;
+                let beat = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let inflight = Arc::new(AtomicBool::new(false));
                 let mut since: Option<u64> = None;
                 loop {
-                    std::thread::sleep(Duration::from_millis(500));
-                    let b = beat.clone();
-                    let _ = h.run_on_main_thread(move || b.store(now_ms(), Ordering::SeqCst));
+                    std::thread::sleep(Duration::from_millis(1000));
+                    if !inflight.swap(true, Ordering::SeqCst) {
+                        let b = beat.clone();
+                        let inf = inflight.clone();
+                        let o = origin;
+                        if h.run_on_main_thread(move || {
+                            b.store(o.elapsed().as_millis() as u64, Ordering::SeqCst);
+                            inf.store(false, Ordering::SeqCst);
+                        })
+                        .is_err()
+                        {
+                            inflight.store(false, Ordering::SeqCst);
+                        }
+                    }
+                    let now = mono_ms();
                     let last = beat.load(Ordering::SeqCst);
-                    let gap = now_ms().saturating_sub(last);
-                    if gap > 1500 && since.is_none() {
+                    let gap = now.saturating_sub(last);
+                    if inflight.load(Ordering::SeqCst) && gap > 2000 && since.is_none() {
                         since = Some(last);
                         log(format!("main thread: no response for {gap} ms"));
-                    } else if gap <= 1500 {
+                    } else if !inflight.load(Ordering::SeqCst) {
                         if let Some(s) = since.take() {
                             log(format!("main thread: responsive again after ~{} ms", last.saturating_sub(s)));
                         }

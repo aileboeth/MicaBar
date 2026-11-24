@@ -6,10 +6,11 @@
 //!  - stop bypass leaks: a Windows Firewall rule that blocks a program's direct traffic to public
 //!    addresses (loopback is never filtered, so the program can still use the local proxy port).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -133,7 +134,7 @@ pub fn load_settings() -> Settings {
 
 pub fn save_settings(s: &Settings) {
     if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(dir().join("guard.json"), t);
+        let _ = crate::settings::atomic_write(&dir().join("guard.json"), t.as_bytes());
     }
 }
 
@@ -148,10 +149,76 @@ fn import_file(url: &str) -> PathBuf {
 // ---------- parsing ----------
 
 fn clean_domain(s: &str) -> Option<String> {
-    let d = s.trim().trim_matches(|c| c == '\'' || c == '"').trim_start_matches("+.").trim_start_matches("*.").trim_start_matches('.');
+    let d = s
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .trim_start_matches("+.")
+        .trim_start_matches("*.")
+        .trim_start_matches('.');
     let d = d.trim_end_matches('.').to_lowercase();
     let ok = !d.is_empty() && d.contains('.') && d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
     ok.then_some(d)
+}
+
+/// Sanitizes a domain keyword, rejecting empty strings and YAML / Mihomo delimiter characters.
+pub fn clean_keyword(s: &str) -> Option<String> {
+    let base = s.split('@').next().unwrap_or("");
+    let cleaned: String = base
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n' | '\0' | ',' | '(' | ')' | '\'' | '"') && !c.is_control() && !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// Strips `- `, outer quotes, and inline `# ...` comments outside quotes.
+fn strip_line_comment_and_quotes(raw: &str) -> String {
+    let mut l = raw.trim();
+    if l.is_empty() || l.starts_with('#') || l.starts_with("//") || l.starts_with('!') {
+        return String::new();
+    }
+    if let Some(rest) = l.strip_prefix("- ") {
+        l = rest.trim();
+    } else if l == "-" {
+        return String::new();
+    }
+    let mut out = String::with_capacity(l.len());
+    let mut quote: Option<char> = None;
+    let mut chars = l.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    if q == '\'' && chars.peek() == Some(&'\'') {
+                        out.push('\'');
+                        chars.next();
+                    } else {
+                        quote = None;
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                } else if c == '#' {
+                    break;
+                } else {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+fn has_cn_attr(s: &str) -> bool {
+    s.split('@')
+        .skip(1)
+        .any(|attr| attr.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').next() == Some("cn"))
 }
 
 /// Parses plain domain lists, v2fly (domain:/full:/keyword:), Clash classical lines
@@ -160,15 +227,14 @@ fn clean_domain(s: &str) -> Option<String> {
 pub fn parse_list(text: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     for raw in text.lines() {
-        let mut l = raw.trim();
-        if l.is_empty() || l.starts_with('#') || l.starts_with("//") || l.starts_with('!') || l == "payload:" {
+        let l = strip_line_comment_and_quotes(raw);
+        if l.is_empty() || l.eq_ignore_ascii_case("payload:") {
             continue;
         }
-        if let Some(r) = l.strip_prefix("- ") {
-            l = r.trim().trim_matches(|c| c == '\'' || c == '"');
-        }
-        let l = l.split('#').next().unwrap_or("").trim();
         let lower = l.to_lowercase();
+        if has_cn_attr(&lower) {
+            continue;
+        }
         let entry = |kind: &str, v: &str| Entry { kind: kind.into(), value: v.to_string() };
         if let Some((k, rest)) = lower.split_once(',') {
             let v = rest.split(',').next().unwrap_or("").trim();
@@ -179,8 +245,8 @@ pub fn parse_list(text: &str) -> Vec<Entry> {
                     }
                 }
                 "domain-keyword" => {
-                    if !v.is_empty() {
-                        out.push(entry("keyword", v));
+                    if let Some(kw) = clean_keyword(v) {
+                        out.push(entry("keyword", &kw));
                     }
                 }
                 "ip-cidr" | "ip-cidr6" => {
@@ -193,7 +259,7 @@ pub fn parse_list(text: &str) -> Vec<Entry> {
             continue;
         }
         if let Some((k, v)) = lower.split_once(':') {
-            match k {
+            match k.trim() {
                 "domain" | "full" => {
                     if let Some(d) = clean_domain(v.split('@').next().unwrap_or("")) {
                         out.push(entry("suffix", &d));
@@ -201,16 +267,19 @@ pub fn parse_list(text: &str) -> Vec<Entry> {
                     continue;
                 }
                 "keyword" => {
-                    out.push(entry("keyword", v.trim()));
+                    if let Some(kw) = clean_keyword(v) {
+                        out.push(entry("keyword", &kw));
+                    }
                     continue;
                 }
                 "regexp" | "include" => continue,
                 _ => {}
             }
         }
-        if parse_cidr(&lower).is_some() {
-            out.push(entry("cidr", &lower));
-        } else if let Some(d) = clean_domain(&lower) {
+        let bare = lower.split('@').next().unwrap_or("").trim();
+        if parse_cidr(bare).is_some() {
+            out.push(entry("cidr", bare));
+        } else if let Some(d) = clean_domain(bare) {
             out.push(entry("suffix", &d));
         }
     }
@@ -258,20 +327,32 @@ impl Matcher {
     pub fn build(s: &Settings) -> Matcher {
         let mut m = Matcher::default();
         let add = |m: &mut Matcher, list: Vec<Entry>, name: String| {
-            let n = list.len();
+            let mut n = 0usize;
             for e in list {
                 match e.kind.as_str() {
                     "suffix" => {
-                        m.suffixes.insert(e.value);
+                        if let Some(d) = clean_domain(&e.value) {
+                            m.suffixes.insert(d);
+                            n += 1;
+                        }
                     }
-                    "keyword" => m.keywords.push(e.value),
+                    "keyword" => {
+                        if let Some(kw) = clean_keyword(&e.value) {
+                            m.keywords.push(kw);
+                            n += 1;
+                        }
+                    }
                     "cidr" => {
                         if let Some(c) = parse_cidr(&e.value) {
                             m.cidrs.push(c);
+                            n += 1;
                         }
                     }
                     "exclude" => {
-                        m.excludes.insert(e.value);
+                        if let Some(d) = clean_domain(&e.value) {
+                            m.excludes.insert(d);
+                            n += 1;
+                        }
                     }
                     _ => {}
                 }
@@ -326,12 +407,16 @@ impl Matcher {
                         None => break,
                     }
                 }
-                if let Some(k) = self.keywords.iter().find(|k| host.contains(k.as_str())) {
+                if let Some(k) = self.keywords.iter().find(|k| !k.is_empty() && host.contains(k.as_str())) {
                     return Some(crate::tr!("关键词 {0}", k));
                 }
             }
         }
         if let Some(ip) = ip {
+            let ip = match ip {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+                v4 => v4,
+            };
             if let Some(c) = self.cidrs.iter().find(|c| in_cidr(&ip, c)) {
                 return Some(format!("{}/{}", c.0, c.1));
             }
@@ -352,32 +437,103 @@ impl Matcher {
             if items.is_empty() || !enabled {
                 format!("{head}payload: []\n")
             } else {
-                format!("{head}payload:\n{}", items.iter().map(|i| format!("  - '{}'\n", i.replace('\'', "''"))).collect::<String>())
+                format!(
+                    "{head}payload:\n{}",
+                    items
+                        .iter()
+                        .filter(|i| !i.contains('\r') && !i.contains('\n'))
+                        .map(|i| format!("  - '{}'\n", i.replace('\'', "''")))
+                        .collect::<String>()
+                )
             }
         };
-        // excluded domains must not be forced either: drop exact excludes from the domain set
-        let mut doms: Vec<String> = self.suffixes.iter().filter(|s| !self.excluded(s)).map(|s| format!("+.{s}")).collect();
+        // Drop suffixes that are themselves excluded OR have an excluded subdomain under them
+        // (since a `+.parent.com` rule in guard-domain would also force `sub.parent.com`).
+        let has_excluded_child = |s: &str| {
+            let dot_s = format!(".{s}");
+            self.excludes.iter().any(|ex| ex.ends_with(&dot_s))
+        };
+        let mut doms: Vec<String> = self
+            .suffixes
+            .iter()
+            .filter_map(|s| clean_domain(s))
+            .filter(|s| !self.excluded(s) && !has_excluded_child(s))
+            .map(|s| format!("+.{s}"))
+            .collect();
         doms.sort();
-        let ips: Vec<String> = self.cidrs.iter().map(|(ip, l)| format!("{ip}/{l}")).collect();
-        let kws: Vec<String> = self.keywords.iter().map(|k| format!("DOMAIN-KEYWORD,{k}")).collect();
-        std::fs::write(d.join("guard-domain.yaml"), list(doms)).map_err(|e| e.to_string())?;
-        std::fs::write(d.join("guard-ip.yaml"), list(ips)).map_err(|e| e.to_string())?;
-        std::fs::write(d.join("guard-kw.yaml"), list(kws)).map_err(|e| e.to_string())?;
+        doms.dedup();
+        let mut ips: Vec<String> = self.cidrs.iter().map(|(ip, l)| format!("{ip}/{l}")).collect();
+        ips.sort();
+        ips.dedup();
+        let mut kws: Vec<String> = self
+            .keywords
+            .iter()
+            .filter_map(|k| clean_keyword(k))
+            .filter(|k| !self.excludes.iter().any(|ex| ex.contains(k.as_str())))
+            .map(|k| format!("DOMAIN-KEYWORD,{k}"))
+            .collect();
+        kws.sort();
+        kws.dedup();
+        crate::settings::atomic_write(&d.join("guard-domain.yaml"), list(doms).as_bytes()).map_err(|e| e.to_string())?;
+        crate::settings::atomic_write(&d.join("guard-ip.yaml"), list(ips).as_bytes()).map_err(|e| e.to_string())?;
+        crate::settings::atomic_write(&d.join("guard-kw.yaml"), list(kws).as_bytes()).map_err(|e| e.to_string())?;
         Ok(())
     }
 }
 
 // ---------- downloads ----------
 
+const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+fn download_client(proxy_port: Option<u16>) -> Result<reqwest::Client, String> {
+    static CLIENTS: OnceLock<Mutex<HashMap<Option<u16>, reqwest::Client>>> = OnceLock::new();
+    let map = CLIENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = map.lock() {
+        if let Some(c) = g.get(&proxy_port) {
+            return Ok(c.clone());
+        }
+    }
+    let b = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(25))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .user_agent("curl/8.9.1")
+        .pool_idle_timeout(std::time::Duration::from_secs(25));
+    let b = match proxy_port {
+        Some(p) => b.proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{p}")).map_err(|e| e.to_string())?),
+        None => b.no_proxy(),
+    };
+    let c = b.build().map_err(|e| e.to_string())?;
+    if let Ok(mut g) = map.lock() {
+        g.insert(proxy_port, c.clone());
+    }
+    Ok(c)
+}
+
+async fn read_body_capped(mut resp: reqwest::Response) -> Result<String, String> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_DOWNLOAD_BYTES as u64 {
+            return Err("response exceeds 16 MB limit".into());
+        }
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if buf.len().saturating_add(chunk.len()) > MAX_DOWNLOAD_BYTES {
+            return Err("response exceeds 16 MB limit".into());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 pub async fn fetch_text(urls: &[String], proxy_port: Option<u16>) -> Result<String, String> {
     let mut errs = Vec::new();
     for port in [proxy_port, None] {
-        let Ok(c) = crate::exitip::client(port) else { continue };
+        let Ok(c) = download_client(port) else { continue };
         for u in urls {
-            match c.get(u).timeout(std::time::Duration::from_secs(25)).send().await {
-                Ok(r) if r.status().is_success() => match r.text().await {
+            match c.get(u).send().await {
+                Ok(r) if r.status().is_success() => match read_body_capped(r).await {
                     Ok(t) => return Ok(t),
-                    Err(e) => errs.push(e.to_string()),
+                    Err(e) => errs.push(e),
                 },
                 Ok(r) => errs.push(format!("HTTP {}", r.status())),
                 Err(e) => errs.push(e.to_string().chars().take(80).collect()),
@@ -391,12 +547,12 @@ pub async fn fetch_text(urls: &[String], proxy_port: Option<u16>) -> Result<Stri
 }
 
 pub fn save_gfw(text: &str) -> usize {
-    let _ = std::fs::write(dir().join("gfw.txt"), text);
+    let _ = crate::settings::atomic_write(&dir().join("gfw.txt"), text.as_bytes());
     parse_list(text).len()
 }
 
 pub fn save_import(url: &str, text: &str) -> usize {
-    let _ = std::fs::write(import_file(url), text);
+    let _ = crate::settings::atomic_write(&import_file(url), text.as_bytes());
     parse_list(text).len()
 }
 
@@ -406,15 +562,53 @@ pub fn remove_import_file(url: &str) {
 
 // ---------- firewall ----------
 
-/// Public address space (everything except loopback / private / link-local / CGNAT / multicast).
+/// Public address space (everything except loopback / private / link-local / CGNAT / Mihomo fake-ip 198.18.0.0/15 / multicast).
 const PUBLIC_V4: &str = "1.0.0.0-9.255.255.255,11.0.0.0-100.63.255.255,100.128.0.0-126.255.255.255,\
-128.0.0.0-169.253.255.255,169.255.0.0-172.15.255.255,172.32.0.0-192.167.255.255,192.169.0.0-223.255.255.255";
+128.0.0.0-169.253.255.255,169.255.0.0-172.15.255.255,172.32.0.0-192.167.255.255,\
+192.169.0.0-198.17.255.255,198.20.0.0-223.255.255.255";
 const PUBLIC_V6: &str = "2000::-3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
+
+pub(crate) fn decode_console(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MultiByteToWideChar(cp: u32, flags: u32, src: *const u8, src_len: i32, dst: *mut u16, dst_len: i32) -> i32;
+    }
+    const CP_OEMCP: u32 = 1;
+    unsafe {
+        let len = bytes.len().min(i32::MAX as usize) as i32;
+        let needed = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0);
+        if needed <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; needed as usize];
+        let written = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), needed);
+        if written <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        String::from_utf16_lossy(&wide[..written as usize])
+    }
+}
+
+pub(crate) fn firewall_rule_exists(name: &str) -> bool {
+    std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", &format!("name={name}")])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
 fn netsh(args: &[String]) -> Result<String, String> {
     let out = std::process::Command::new("netsh").args(args).creation_flags(CREATE_NO_WINDOW).output().map_err(|e| e.to_string())?;
-    // netsh prints in the console code page (936 on zh-CN); keep it lossy, only used for logs
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let stdout = decode_console(&out.stdout);
+    let stderr = decode_console(&out.stderr);
+    let text = if stdout.trim().is_empty() { stderr } else { stdout };
     if out.status.success() {
         Ok(text)
     } else {
@@ -448,18 +642,32 @@ pub fn block(path: &str, exe: &str) -> Result<String, String> {
 }
 
 pub fn unblock(name: &str, path: &str) -> Result<(), String> {
-    netsh(&[
+    let r = netsh(&[
         "advfirewall".into(),
         "firewall".into(),
         "delete".into(),
         "rule".into(),
         format!("name={name}"),
         format!("program={path}"),
-    ])
-    .map(|_| ())
+    ]);
+    if r.is_ok() {
+        return Ok(());
+    }
+    let r2 = netsh(&[
+        "advfirewall".into(),
+        "firewall".into(),
+        "delete".into(),
+        "rule".into(),
+        format!("name={name}"),
+    ]);
+    if r2.is_ok() || !firewall_rule_exists(name) {
+        Ok(())
+    } else {
+        r.map(|_| ())
+    }
 }
 
-/// Drops the program's established IPv4 connections to public addresses (they would otherwise
+/// Drops the program's active/connecting IPv4 connections to public addresses (they would otherwise
 /// keep flowing; the firewall only stops new ones).
 pub fn reset_connections(pid_set: &HashSet<u32>) -> usize {
     #[repr(C)]
@@ -476,7 +684,8 @@ pub fn reset_connections(pid_set: &HashSet<u32>) -> usize {
     }
     let mut n = 0;
     for s in crate::conn::snapshot_raw_v4() {
-        if !pid_set.contains(&s.pid) || s.state != 5 {
+        // SYN_SENT (3) and ESTABLISHED (5)
+        if !pid_set.contains(&s.pid) || !matches!(s.state, 3 | 5) {
             continue;
         }
         let rip = IpAddr::V4(std::net::Ipv4Addr::from(s.remote_addr.to_ne_bytes()));
@@ -497,13 +706,30 @@ pub fn reset_connections(pid_set: &HashSet<u32>) -> usize {
 pub const APP_ID: &str = "com.aile.micabar";
 
 /// Registers an AppUserModelID so an unpackaged exe can show toasts under its own name.
+/// Skips disk sync and registry writes when already up-to-date to keep cold start fast.
 pub fn register_toast_identity(icon_png: &[u8]) {
     use winreg::enums::HKEY_CURRENT_USER;
     let icon = dir().join("toast-icon.png");
-    let _ = std::fs::write(&icon, icon_png);
-    if let Ok((k, _)) = winreg::RegKey::predef(HKEY_CURRENT_USER).create_subkey(format!(r"Software\Classes\AppUserModelId\{APP_ID}")) {
-        let _ = k.set_value("DisplayName", &"MicaBar");
-        let _ = k.set_value("IconUri", &icon.display().to_string());
+    let same_icon = std::fs::read(&icon).map(|b| b.as_slice() == icon_png).unwrap_or(false);
+    if !same_icon {
+        let _ = crate::settings::atomic_write(&icon, icon_png);
+    }
+    let want_uri = icon.display().to_string();
+    let subkey = format!(r"Software\Classes\AppUserModelId\{APP_ID}");
+    let hk = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let already_ok = hk
+        .open_subkey(&subkey)
+        .ok()
+        .map(|k| {
+            k.get_value::<String, _>("DisplayName").ok().as_deref() == Some("MicaBar")
+                && k.get_value::<String, _>("IconUri").ok().as_deref() == Some(want_uri.as_str())
+        })
+        .unwrap_or(false);
+    if !already_ok {
+        if let Ok((k, _)) = hk.create_subkey(&subkey) {
+            let _ = k.set_value("DisplayName", &"MicaBar");
+            let _ = k.set_value("IconUri", &want_uri);
+        }
     }
 }
 

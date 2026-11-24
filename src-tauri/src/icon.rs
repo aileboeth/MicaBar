@@ -1,7 +1,9 @@
-//! Extracts an executable's icon and returns it as a PNG data URL.
+//! Extracts an executable's icon on a dedicated STA thread and returns it as a PNG data URL.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use windows_sys::Win32::Graphics::Gdi::{
@@ -13,30 +15,112 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICO
 
 use crate::procinfo::wide;
 
-static CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(Default::default);
+const MAX_CACHE: usize = 512;
+const FAIL_TTL: Duration = Duration::from_secs(300);
 
-/// Shell icon APIs want COM initialised on the calling thread and are not happy being hit from
-/// many pool threads at once, so extraction is serialised. Failures are not cached (the page
-/// retries later).
-static EXTRACT: Mutex<()> = Mutex::new(());
+enum Entry {
+    Ok(String),
+    Failed(Instant),
+}
+
+#[derive(Default)]
+struct IconCache {
+    map: HashMap<String, Entry>,
+    order: VecDeque<String>,
+    logged: HashSet<String>,
+}
+
+impl IconCache {
+    fn get(&mut self, key: &str, now: Instant) -> Option<Option<String>> {
+        match self.map.get(key) {
+            Some(Entry::Ok(url)) => Some(Some(url.clone())),
+            Some(Entry::Failed(until)) if now < *until => Some(None),
+            Some(Entry::Failed(_)) => {
+                self.map.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn insert(&mut self, key: String, val: Entry, now: Instant) {
+        if self.map.contains_key(&key) {
+            self.map.insert(key, val);
+            return;
+        }
+        if self.map.len() >= MAX_CACHE {
+            // Evict expired failures first
+            self.map.retain(|_, v| !matches!(v, Entry::Failed(t) if now >= *t));
+            self.order.retain(|k| self.map.contains_key(k));
+        }
+        while self.map.len() >= MAX_CACHE {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            } else {
+                self.map.clear();
+                break;
+            }
+        }
+        self.order.push_back(key.clone());
+        self.map.insert(key, val);
+    }
+}
+
+fn cache() -> &'static Mutex<IconCache> {
+    static C: OnceLock<Mutex<IconCache>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(IconCache::default()))
+}
+
+type Req = (String, SyncSender<Option<String>>);
+
+fn sta_worker() -> &'static SyncSender<Req> {
+    static TX: OnceLock<SyncSender<Req>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = sync_channel::<Req>(64);
+        let _ = std::thread::Builder::new().name("icon-sta".into()).spawn(move || unsafe {
+            use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+            let _ = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+            while let Ok((path, reply)) = rx.recv() {
+                let _ = reply.send(extract(&path));
+            }
+        });
+        tx
+    })
+}
 
 pub fn icon_data_url(path: &str) -> Option<String> {
-    if let Some(v) = CACHE.lock().unwrap().get(path) {
-        return v.clone();
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    let v = {
-        let _g = EXTRACT.lock().unwrap();
-        unsafe {
-            use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            // S_FALSE / RPC_E_CHANGED_MODE are fine: COM is usable either way
-            CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+    let key = trimmed.to_lowercase();
+    let now = Instant::now();
+    if let Some(cached) = cache().lock().unwrap().get(&key, now) {
+        return cached;
+    }
+    let (reply_tx, reply_rx) = sync_channel(1);
+    if sta_worker().send((trimmed.to_string(), reply_tx)).is_err() {
+        return None;
+    }
+    let v = reply_rx.recv().ok().flatten();
+    let now = Instant::now();
+    let mut c = cache().lock().unwrap();
+    match &v {
+        Some(url) => {
+            c.logged.remove(&key);
+            c.insert(key, Entry::Ok(url.clone()), now);
         }
-        extract(path)
-    };
-    if v.is_some() {
-        CACHE.lock().unwrap().insert(path.to_string(), v.clone());
-    } else {
-        crate::log(format!("icon extraction failed: {path}"));
+        None => {
+            if c.logged.len() >= 2048 {
+                c.logged.clear();
+            }
+            let first_fail = c.logged.insert(key.clone());
+            c.insert(key, Entry::Failed(now + FAIL_TTL), now);
+            drop(c);
+            if first_fail {
+                crate::log(format!("icon extraction failed: {trimmed}"));
+            }
+        }
     }
     v
 }
@@ -114,6 +198,10 @@ unsafe fn hicon_to_png(icon: HICON) -> Option<Vec<u8>> {
         return None;
     }
     let hdc = CreateCompatibleDC(std::ptr::null_mut());
+    if hdc.is_null() {
+        cleanup();
+        return None;
+    }
     let bits = bitmap_bits(hdc, color, w, h);
     let mut rgba = match bits {
         Some(b) => b,
@@ -133,11 +221,19 @@ unsafe fn hicon_to_png(icon: HICON) -> Option<Vec<u8>> {
     }
     if !any_alpha {
         // Old-style icon without alpha: use the AND mask (0 = opaque).
-        if let Some(m) = bitmap_bits(hdc, mask, w, h) {
-            for (px, mp) in rgba.chunks_exact_mut(4).zip(m.chunks_exact(4)) {
-                px[3] = if mp[0] == 0 { 255 } else { 0 };
+        let masked = if !mask.is_null() {
+            if let Some(m) = bitmap_bits(hdc, mask, w, h) {
+                for (px, mp) in rgba.chunks_exact_mut(4).zip(m.chunks_exact(4)) {
+                    px[3] = if mp[0] == 0 { 255 } else { 0 };
+                }
+                true
+            } else {
+                false
             }
         } else {
+            false
+        };
+        if !masked {
             for px in rgba.chunks_exact_mut(4) {
                 px[3] = 255;
             }

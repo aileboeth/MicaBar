@@ -33,10 +33,59 @@ fn state() -> &'static RwLock<State> {
     S.get_or_init(|| RwLock::new(State { lang: "zh-CN".into(), dict: HashMap::new() }))
 }
 
+/// Strips `//...` and `/*...*/` JS comments while preserving string literals (`"..."` / `'...'`).
+fn strip_js_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                let quote = c;
+                out.push(quote);
+                while let Some(sc) = chars.next() {
+                    out.push(sc);
+                    if sc == '\\' {
+                        if let Some(esc) = chars.next() {
+                            out.push(esc);
+                        }
+                    } else if sc == quote {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                chars.next();
+                while let Some(lc) = chars.next() {
+                    if lc == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                while let Some(bc) = chars.next() {
+                    if bc == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        out.push(' ');
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// The file is `I18N.add("en", { ... });`: the JSON object between the outer braces.
-fn parse(src: &str) -> HashMap<String, String> {
-    let (Some(a), Some(b)) = (src.find('{'), src.rfind('}')) else { return HashMap::new() };
-    serde_json::from_str(&src[a..=b]).unwrap_or_else(|e| {
+fn parse_js_dict(src: &str) -> HashMap<String, String> {
+    let cleaned = strip_js_comments(src);
+    let (Some(a), Some(b)) = (cleaned.find('{'), cleaned.rfind('}')) else { return HashMap::new() };
+    if a > b {
+        return HashMap::new();
+    }
+    serde_json::from_str(&cleaned[a..=b]).unwrap_or_else(|e| {
         crate::log(format!("i18n: bad dictionary: {e}"));
         HashMap::new()
     })
@@ -74,7 +123,7 @@ pub fn set_lang(code: &str) -> bool {
     if state().read().unwrap().lang == code {
         return false;
     }
-    let dict = source(code).map(parse).unwrap_or_default();
+    let dict = source(code).map(parse_js_dict).unwrap_or_default();
     crate::log(format!("i18n: {code} ({} entries)", dict.len()));
     let mut s = state().write().unwrap();
     s.lang = code.to_string();

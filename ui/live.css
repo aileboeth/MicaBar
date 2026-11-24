@@ -14,7 +14,7 @@
 [data-ag], [data-dg] { cursor: pointer; }
 
 /* the tool's mark inside a ring: turning while it works, breathing amber while it waits */
-.ag-ic { position: relative; display: grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: 50%; background: var(--ov2); --ag-c: #60a5fa; }
+.ag-ic { position: relative; display: grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: 50%; background: var(--ov2); --ag-c: var(--blue); }
 .ag-ic .brand-ic { width: 13px; height: 13px; border-radius: 3px; }
 .ag-ic.ask { --ag-c: var(--amber); }
 .ag-orbit { position: absolute; inset: -2px; border-radius: 50%; pointer-events: none; }
@@ -41,7 +41,7 @@
 .dg-pill.bad .dg-ic { background: var(--red); }
 .dg-pill.bad .dg-ic::after { box-shadow: 0 0 0 2px var(--red); }
 .dg-pill.warn { background: color-mix(in srgb, var(--amber) 15%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 38%, transparent); color: var(--amber); }
-.dg-pill.warn .dg-ic { background: var(--amber); }
+.dg-pill.warn .dg-ic { background: var(--amber); color: var(--badge-ink); }
 .dg-pill.warn .dg-ic::after { box-shadow: 0 0 0 2px var(--amber); }
 .dg-ic svg { width: 12px; height: 12px; }
 .dg-txt { font-weight: 650; }
@@ -128,16 +128,17 @@
   display: grid; place-items: center; color: #fff; box-shadow: 0 0 0 2px var(--menu-bg);
   animation: dg-pop 0.45s var(--ease-bounce, cubic-bezier(0.22, 1.4, 0.36, 1)) both;
 }
-.dg-node.ok .dg-badge { background: var(--green); }
-.dg-node.warn .dg-badge { background: var(--amber); }
+.dg-node.ok .dg-badge { background: var(--green); color: var(--badge-ink); }
+.dg-node.warn .dg-badge { background: var(--amber); color: var(--badge-ink); }
 .dg-node.fail .dg-badge { background: var(--red); }
 @keyframes dg-pop { from { transform: scale(0); } }
 .dg-lab { font-size: 12px; font-weight: 600; color: var(--text); margin-top: 2px; }
 .dg-det {
   font-size: 10.5px; line-height: 1.35; color: var(--dimmer); max-width: 100%; padding: 0 2px;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: break-word;
 }
 .dg-det i { display: block; font-style: normal; color: var(--dim); }
+.dg-det .flag.sm { width: 12px; height: 9px; margin-right: 2px; vertical-align: -1px; }
 .dg-node.fail .dg-det { color: var(--red); }
 .dg-node.warn .dg-det { color: var(--amber); }
 
@@ -156,7 +157,7 @@
 }
 .dg-verdict > div { min-width: 0; flex: 1; }
 .dg-verdict b { display: block; font-size: 15px; line-height: 1.35; }
-.dg-verdict span { display: block; font-size: 12px; line-height: 1.6; color: var(--dim); margin-top: 3px; }
+.dg-verdict > div > span { display: block; font-size: 12px; line-height: 1.6; color: var(--dim); margin-top: 3px; }
 .dg-verdict .dg-since { display: inline-block; margin: 4px 0 0; padding: 1px 8px; border-radius: 999px; font-size: 11px; background: var(--ov2); color: var(--dim); }
 .dg-big { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; flex: none; color: var(--blue); background: color-mix(in srgb, var(--blue) 15%, transparent); }
 .dg-verdict.ok { background: color-mix(in srgb, var(--green) 9%, var(--card)); }
@@ -164,10 +165,11 @@
 .dg-verdict.bad { background: color-mix(in srgb, var(--red) 9%, var(--card)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 28%, transparent); }
 .dg-verdict.bad .dg-big { color: #fff; background: var(--red); }
 .dg-verdict.warn { background: color-mix(in srgb, var(--amber) 9%, var(--card)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 28%, transparent); }
-.dg-verdict.warn .dg-big { color: #fff; background: var(--amber); }
+.dg-verdict.warn .dg-big { color: var(--badge-ink); background: var(--amber); }
 .dg-verdict.run .dg-big path { stroke-dasharray: 48; animation: dg-beat 1.2s ease-in-out infinite; }
 @keyframes dg-beat { from { stroke-dashoffset: 96; } to { stroke-dashoffset: 0; } }
-.dg-fixes { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; animation: rise 0.5s var(--ease-fluid, ease) 0.08s both; }
+.dg-fixes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; animation: rise 0.5s var(--ease-fluid, ease) 0.08s both; }
+.dg-fixes .dg-retry { margin-left: auto; }
 .dg-fixes button { padding: 7px 14px; border-radius: 10px; font-size: 12.5px; }
 .dg-fixes button:disabled, .dg-foot button:disabled { opacity: 0.5; cursor: default; }
 .dg-foot { margin-top: 12px; }
@@ -210,10 +212,10 @@
    rise each time made the line flash and jump */
 .n-done.fresh { animation: rise 0.4s var(--ease-fluid, ease) both; }
 .n-done.block { color: var(--red); }
-.n-done.warn { color: var(--amber); font-weight: 500; line-height: 1.5; }
+.n-done.warn { color: var(--amber); font-weight: 500; line-height: 1.5; display: flex; align-items: center; gap: 4px; }
 .n-ico .n-fn {
   position: absolute; right: -4px; bottom: -4px; width: 18px; height: 18px; border-radius: 50%;
-  display: grid; place-items: center; color: #fff; background: var(--blue); box-shadow: 0 0 0 2px var(--menu-bg);
+  display: grid; place-items: center; color: var(--on-accent); background: var(--blue); box-shadow: 0 0 0 2px var(--menu-bg);
 }
 
 /* ---------- leak guard page: programs that went online ---------- */
@@ -289,11 +291,16 @@ html.no-anim .lv-chip, html.no-anim .lv-enter, html.no-anim #diag-btn.hot, html.
 #island.vertical .ring-item { flex-direction: column; gap: 1px; }
 #island.vertical .ring-item .mono { font-size: 10px; line-height: 1.1; }
 #island.vertical .ring-item .rg-sub { display: none; }
-#island.vertical #pill .pill-speed { display: grid; grid-template-columns: auto auto; column-gap: 1px; font-size: 10px; line-height: 1.2; }
+#island.vertical #pill .pill-speed { display: flex; flex-direction: column; align-items: center; gap: 1px; font-size: 10px; line-height: 1.2; }
+#island.vertical #pill .sv { min-width: 0; text-align: left; }
 
 /* ---------- clipboard history ---------- */
-.clip .viz-head .clip-q { flex: 0 1 180px; min-width: 90px; height: 26px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--ov1); color: var(--text); font: inherit; font-size: 12px; outline: none; }
+.clip .viz-head .clip-q-wrap { position: relative; flex: 0 1 190px; min-width: 96px; display: inline-flex; align-items: center; }
+.clip .viz-head .clip-q { width: 100%; height: 26px; padding: 0 24px 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--ov1); color: var(--text); font: inherit; font-size: 12px; outline: none; }
 .clip .viz-head .clip-q:focus { border-color: var(--accent); }
+.clip .viz-head .clip-q-x { position: absolute; right: 4px; width: 18px; height: 18px; border: none; border-radius: 50%; padding: 0; display: grid; place-items: center; background: transparent; color: var(--dimmer); font-size: 10px; cursor: pointer; }
+.clip .viz-head .clip-q-x:hover { background: var(--ov3); color: var(--text); }
+.clip .viz-head .clip-q-x[hidden] { display: none; }
 .clip-sec { margin: 10px 4px 6px; font-size: 11.5px; color: var(--dim); }
 .clip-list > .clip-sec:first-child { margin-top: 2px; }
 .clip-row { position: relative; padding: 9px 12px 8px; margin-bottom: 6px; border-radius: 14px; background: var(--card); cursor: pointer; transition: background 0.15s ease; font-family: var(--font-ui); }
@@ -309,8 +316,8 @@ html.no-anim .lv-chip, html.no-anim .lv-enter, html.no-anim #diag-btn.hot, html.
 .clip-app > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
 .clip-app .app-icon { width: 14px !important; height: 14px !important; border-radius: 3px; }
 .clip-btns { position: absolute; top: 7px; right: 8px; display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s ease; }
-.clip-row:hover .clip-btns, .clip-row.pinned .clip-btns, .clip-btns:focus-within { opacity: 1; }
-.clip-row.pinned:not(:hover) .clip-b:not(.on) { visibility: hidden; }
+.clip-row:hover .clip-btns, .clip-row:focus-within .clip-btns, .clip-row.pinned .clip-btns, .clip-btns:focus-within { opacity: 1; }
+.clip-row.pinned:not(:hover):not(:focus-within) .clip-b:not(.on) { opacity: 0; pointer-events: none; }
 .clip-b { width: 22px; height: 22px; border-radius: 50%; border: none; padding: 0; display: grid; place-items: center; background: var(--ov3); color: var(--dim); font-size: 10px; cursor: pointer; }
 .clip-b:hover { color: var(--text); }
 .clip-b.on { color: var(--accent); }
@@ -318,7 +325,12 @@ html.no-anim .lv-chip, html.no-anim .lv-enter, html.no-anim #diag-btn.hot, html.
 .pill-clip { display: inline-flex; align-items: center; color: var(--dim); }
 .pill-clip.pop { animation: clip-pop 0.9s var(--spring, ease) both; color: var(--accent); }
 @keyframes clip-pop { 0% { transform: scale(1); } 25% { transform: scale(1.35) rotate(-8deg); } 55% { transform: scale(0.92) rotate(4deg); } 100% { transform: none; } }
-html.no-anim .pill-clip.pop, html.no-anim .clip-row.copied { animation: none; }
+html.no-anim .pill-clip.pop, html.no-anim .clip-row.copied, html.no-anim .copyable.copied { animation: none; }
+.copyable { cursor: pointer; border-radius: 5px; transition: color 0.15s ease, background-color 0.15s ease; }
+.copyable:hover { color: var(--accent); }
+.copyable.copied { animation: ip-copied 0.55s ease; color: var(--green); }
+@keyframes ip-copied { 0% { background: color-mix(in srgb, var(--green) 20%, transparent); } 100% { background: transparent; } }
+:is(.fn-when, .ex-when, .clip-meta, .dg-since) { font-variant-numeric: tabular-nums; }
 
 /* The collapsed pill's endless animations (Claude Code spinner, breathing dots, the leak badge) tick
    at ~10 fps instead of 60: each frame of a moving pixel makes WebView2 compose the whole

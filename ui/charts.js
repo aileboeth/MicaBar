@@ -72,14 +72,18 @@ const Charts = (() => {
     const sc = niceScale(max * 1.05, 4, !!opts.binary);
     const X = (i) => pad.l + (n <= 1 ? pw : (i / (n - 1)) * pw);
     const Y = (v) => pad.t + ph - (v / sc.max) * ph;
-    chartData.set(id, { xs, series, X, Y, pad, W, H, n, fmtX: opts.fmtX, fmtY: opts.fmtY, markers: opts.markers || [], scrub: !!opts.scrub });
-
     // a new sample at the right end, same window length: the plot was one step further right a
     // moment ago, so it scrolls into place instead of jumping
     const prev = lastEnd.get(id);
     lastEnd.set(id, { t: xs[n - 1], n });
     const slide = opts.slide && !reduced() && prev && n > 2 && prev.n === n && prev.t !== xs[n - 1];
     const step = n > 1 ? pw / (n - 1) : 0;
+    const rawDt = prev && typeof xs[n - 1] === "number" && typeof prev.t === "number" ? xs[n - 1] - prev.t : 1000;
+    const slideDur = opts.slideMs || (rawDt > 1500 ? 2000 : 1000);
+    chartData.set(id, {
+      xs, series, X, Y, pad, W, H, n, fmtX: opts.fmtX, fmtY: opts.fmtY, markers: opts.markers || [],
+      scrub: !!opts.scrub, step, slideStart: slide ? performance.now() : 0, slideDur,
+    });
 
     let grid = "";
     for (let v = 0; v <= sc.max + 1e-9; v += sc.step) {
@@ -151,7 +155,7 @@ const Charts = (() => {
     }
     const clip = `cc-${String(id).replace(/[^\w-]/g, "")}`;
     defs += `<clipPath id="${clip}"><rect x="${pad.l - 6}" y="0" width="${pw + 12}" height="${H}"/></clipPath>`;
-    const plot = `<g clip-path="url(#${clip})"><g class="c-plot${slide ? " sliding" : ""}" style="--dx:${step.toFixed(2)}px">${areas}${paths}${ends}</g></g>`;
+    const plot = `<g clip-path="url(#${clip})"><g class="c-plot${slide ? " sliding" : ""}" style="--dx:${step.toFixed(2)}px;--slide-dur:${slideDur}ms">${areas}${paths}${ends}</g></g>`;
     const hoverG = opts.scrub
       ? `<g class="c-hover scrub" style="display:none"><line class="c-cross" y1="${pad.t}" y2="${pad.t + ph}"/>${series.map((s) => `<circle class="c-halo ${s.cls}" r="9"/><circle class="c-hdot ${s.cls}" r="4.5"/>`).join("")}</g>`
       : `<g class="c-hover" style="display:none"><line class="c-cross" y1="${pad.t}" y2="${pad.t + ph}"/>${series.map((s) => `<circle class="c-hdot ${s.cls}" r="4"/>`).join("")}</g>`;
@@ -167,6 +171,12 @@ const Charts = (() => {
     return Math.max(0, Math.min(d.n - 1, Math.round(t * (d.n - 1))));
   };
 
+  function slideOffset(d) {
+    if (!d.slideStart || reduced()) return 0;
+    const rem = 1 - Math.min(1, (performance.now() - d.slideStart) / (d.slideDur || 1000));
+    return rem > 0 ? d.step * rem : 0;
+  }
+
   // scrub charts: draw the crosshair at x (between samples while it glides), dots riding the lines
   function drawScrub(el, d, x, i) {
     const g = el.querySelector(".c-hover");
@@ -177,7 +187,8 @@ const Charts = (() => {
     cross.setAttribute("x1", x.toFixed(1));
     cross.setAttribute("x2", x.toFixed(1));
     const pw = d.W - d.pad.l - d.pad.r;
-    const fi = Math.max(0, Math.min(d.n - 1, ((x - d.pad.l) / pw) * (d.n - 1)));
+    const shift = slideOffset(d);
+    const fi = Math.max(0, Math.min(d.n - 1, ((x - shift - d.pad.l) / pw) * (d.n - 1)));
     const a = Math.floor(fi), b = Math.min(d.n - 1, a + 1), k = fi - a;
     const dots = g.querySelectorAll(".c-hdot"), halos = g.querySelectorAll(".c-halo");
     d.series.forEach((s, j) => {
@@ -224,8 +235,10 @@ const Charts = (() => {
       }
       const el = chartEl(id), dd = chartData.get(id);
       if (!el || !dd || !hover.has(id)) { g.raf = 0; return; }
-      if (Math.abs(g.x - g.tx) < 0.3 && Math.abs(g.v) < 0.01) { g.x = g.tx; g.v = 0; drawScrub(el, dd, g.x, g.i); g.raf = 0; return; }
+      const settled = Math.abs(g.x - g.tx) < 0.3 && Math.abs(g.v) < 0.01;
+      if (settled) { g.x = g.tx; g.v = 0; }
       drawScrub(el, dd, g.x, g.i);
+      if (settled && slideOffset(dd) <= 0.2) { g.raf = 0; return; }
       g.raf = requestAnimationFrame(step);
     };
     g.raf = requestAnimationFrame(step);
@@ -240,7 +253,7 @@ const Charts = (() => {
     const g = el.querySelector(".c-hover");
     const tip = el.querySelector(".c-tip");
     if (!g || !tip) return;
-    const x = d.X(i);
+    const x = Math.max(d.pad.l, Math.min(d.W - d.pad.r, d.X(i) + slideOffset(d)));
     g.style.display = "";
     const cross = g.querySelector(".c-cross");
     cross.setAttribute("x1", x);
@@ -262,7 +275,8 @@ const Charts = (() => {
     if (mk) rows += `<div class="tip-row tip-crit">✕ ${esc(mk.label)}</div>`;
     tip.innerHTML = `<div class="tip-head">${esc(d.fmtX ? d.fmtX(d.xs[i]) : i)}</div>${rows}`;
     tip.style.display = "";
-    const left = x + 12 + tip.offsetWidth > d.W ? x - 12 - tip.offsetWidth : x + 12;
+    const rawLeft = x + 12 + tip.offsetWidth > d.W ? x - 12 - tip.offsetWidth : x + 12;
+    const left = Math.max(4, Math.min(d.W - tip.offsetWidth - 4, rawLeft));
     tip.style.left = left + "px";
     tip.style.top = d.pad.t + "px";
   }
@@ -277,6 +291,21 @@ const Charts = (() => {
     if (gl) { cancelAnimationFrame(gl.raf); glide.delete(id); scrubCb.get(id)?.(null); }
   }
 
+  function clearOne(id) {
+    const el = chartEl(id);
+    if (el) hideHover(el);
+    else {
+      const gl = glide.get(id);
+      if (gl) { cancelAnimationFrame(gl.raf); glide.delete(id); scrubCb.get(id)?.(null); }
+    }
+    hover.delete(id);
+  }
+
+  function clearHover() {
+    for (const id of [...hover.keys()]) clearOne(id);
+    for (const id of [...glide.keys()]) clearOne(id);
+  }
+
   // Event delegation on a container; hover survives the container being re-rendered.
   function attach(container) {
     container.addEventListener("mousemove", (e) => {
@@ -288,8 +317,7 @@ const Charts = (() => {
       showHover(el, mx);
     });
     container.addEventListener("mouseleave", () => {
-      for (const id of hover.keys()) { const el = chartEl(id); if (el) hideHover(el); }
-      hover.clear();
+      clearHover();
     });
     container.addEventListener("mouseout", (e) => {
       const el = e.target.closest(".chart");
@@ -302,9 +330,10 @@ const Charts = (() => {
 
   // Call after a re-render to restore an active hover.
   function restore(container) {
-    for (const [id, mx] of hover) {
+    for (const [id, mx] of [...hover]) {
       const el = container.querySelector(`.chart[data-chart="${CSS.escape(id)}"]`);
       if (el) showHover(el, mx, true);
+      else clearOne(id);
     }
   }
 
@@ -341,7 +370,7 @@ const Charts = (() => {
       const cx = pad.l + band * i + band / 2;
       const x = cx - bw / 2;
       const dim = opts.selected != null && opts.selected !== c ? " dim" : "";
-      const hit = !opts.pick ? "" : `<rect class="c-hit" x="${pad.l + band * i}" y="${pad.t}" width="${band}" height="${ph}" data-${opts.pick}="${esc(c)}"><title>${tr("{0} · 合计 {1}{2}", esc(opts.fmtCat(c)), esc(opts.fmtY(totals[i])), stacks.map((st) => ` · ${esc(st.name)} ${esc(opts.fmtY(st.values[i] || 0))}`).join(""))}</title></rect>`;
+      const hit = !opts.pick ? "" : `<rect class="c-hit" x="${pad.l + band * i}" y="${pad.t}" width="${band}" height="${ph}" data-${opts.pick}="${esc(c)}"><title>${esc(tr("{0} · 合计 {1}{2}", opts.fmtCat(c), opts.fmtY(totals[i]), stacks.map((st) => ` · ${st.name} ${opts.fmtY(st.values[i] || 0)}`).join("")))}</title></rect>`;
       let base = 0;
       const segs = stacks.map((st) => ({ st, v: st.values[i] || 0 })).filter((s) => s.v > 0);
       segs.forEach((s, k) => {
@@ -390,5 +419,5 @@ const Charts = (() => {
     return `<svg class="spark ${cls}" width="${w}" height="${h}">${fill}<path d="${d}"/></svg>`;
   }
 
-  return { line, columns, segbar, spark, attach, restore, onScrub, scrubIndex };
+  return { line, columns, segbar, spark, attach, restore, clearHover, onScrub, scrubIndex };
 })();

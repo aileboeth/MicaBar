@@ -52,11 +52,39 @@ fn run_path(src: &Source) -> &'static str {
     }
 }
 
+fn known_folder(rfid: &windows_sys::core::GUID) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
+    unsafe {
+        let mut raw: *mut u16 = std::ptr::null_mut();
+        let hr = SHGetKnownFolderPath(rfid, 0, std::ptr::null_mut(), &mut raw);
+        if hr != 0 || raw.is_null() {
+            if !raw.is_null() {
+                CoTaskMemFree(raw as *const _);
+            }
+            return None;
+        }
+        let mut len = 0usize;
+        while *raw.add(len) != 0 {
+            len += 1;
+        }
+        let os = std::ffi::OsString::from_wide(std::slice::from_raw_parts(raw, len));
+        CoTaskMemFree(raw as *const _);
+        (!os.is_empty()).then(|| PathBuf::from(os))
+    }
+}
+
 fn folders() -> [(&'static str, HKEY, &'static str, Option<PathBuf>); 2] {
+    use windows_sys::Win32::UI::Shell::{FOLDERID_CommonStartup, FOLDERID_Startup};
     let env = |v: &str| std::env::var(v).ok().map(PathBuf::from);
+    let user = known_folder(&FOLDERID_Startup)
+        .or_else(|| env("APPDATA").map(|p| p.join(r"Microsoft\Windows\Start Menu\Programs\Startup")));
+    let common = known_folder(&FOLDERID_CommonStartup)
+        .or_else(|| env("ProgramData").map(|p| p.join(r"Microsoft\Windows\Start Menu\Programs\StartUp")));
     [
-        ("ufolder", HKEY_CURRENT_USER, "当前用户 · 启动文件夹", env("APPDATA").map(|p| p.join(r"Microsoft\Windows\Start Menu\Programs\Startup"))),
-        ("cfolder", HKEY_LOCAL_MACHINE, "所有用户 · 启动文件夹", env("ProgramData").map(|p| p.join(r"Microsoft\Windows\Start Menu\Programs\StartUp"))),
+        ("ufolder", HKEY_CURRENT_USER, "当前用户 · 启动文件夹", user),
+        ("cfolder", HKEY_LOCAL_MACHINE, "所有用户 · 启动文件夹", common),
     ]
 }
 
@@ -69,19 +97,24 @@ fn approved(root: HKEY, sub: &str, name: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// "%ProgramFiles%\x" -> the real folder.
+/// "%ProgramFiles%\x" -> the real folder. Unpaired or unknown `%` advances past only the first `%`
+/// so a subsequent `%VAR%` still expands cleanly.
 fn expand(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(a) = rest.find('%') {
         let Some(b) = rest[a + 1..].find('%') else { break };
         let var = &rest[a + 1..a + 1 + b];
-        out.push_str(&rest[..a]);
-        match std::env::var(var) {
-            Ok(v) if !var.is_empty() => out.push_str(&v),
-            _ => out.push_str(&rest[a..a + b + 2]),
+        if !var.is_empty() && !var.contains([' ', '\t', '\\', '/', '"']) {
+            if let Ok(v) = std::env::var(var) {
+                out.push_str(&rest[..a]);
+                out.push_str(&v);
+                rest = &rest[a + b + 2..];
+                continue;
+            }
         }
-        rest = &rest[a + b + 2..];
+        out.push_str(&rest[..a + 1]);
+        rest = &rest[a + 1..];
     }
     out.push_str(rest);
     out
@@ -90,16 +123,34 @@ fn expand(s: &str) -> String {
 /// The program a command line starts: "\"C:\\a b\\x.exe\" --min" or "C:\\a b\\x.exe --min".
 fn program(cmd: &str) -> Option<String> {
     let c = expand(cmd.trim());
+    if c.is_empty() {
+        return None;
+    }
     if let Some(r) = c.strip_prefix('"') {
         return r.split('"').next().map(str::to_string).filter(|s| !s.is_empty());
     }
     let lower = c.to_ascii_lowercase();
+    let bytes = c.as_bytes();
+    let mut best_end: Option<usize> = None;
     for ext in [".exe", ".bat", ".cmd", ".lnk", ".com"] {
-        if let Some(i) = lower.find(ext) {
-            return Some(c[..i + ext.len()].to_string());
+        let mut from = 0usize;
+        while let Some(rel) = lower[from..].find(ext) {
+            let i = from + rel;
+            let end = i + ext.len();
+            let boundary = end == bytes.len() || matches!(bytes[end], b' ' | b'\t' | b'\r' | b'\n' | b'"');
+            if boundary && !lower[..end].contains("://") {
+                if best_end.map(|b| end < b).unwrap_or(true) {
+                    best_end = Some(end);
+                }
+                break;
+            }
+            from = i + 1;
         }
     }
-    c.split_whitespace().next().map(str::to_string)
+    if let Some(end) = best_end {
+        return Some(c[..end].to_string());
+    }
+    c.split_whitespace().next().map(str::to_string).filter(|s| !s.is_empty())
 }
 
 fn describe(name: &str, path: Option<&str>) -> Option<String> {
@@ -157,20 +208,44 @@ pub fn list() -> Vec<Item> {
     out
 }
 
+fn entry_exists(key: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if let Some(src) = SOURCES.iter().find(|s| s.key == key) {
+        return RegKey::predef(src.root)
+            .open_subkey_with_flags(run_path(src), KEY_READ)
+            .and_then(|k| k.get_value::<String, _>(name))
+            .is_ok();
+    }
+    if matches!(key, "ufolder" | "cfolder") {
+        if name.eq_ignore_ascii_case("desktop.ini") || name.contains(['\\', '/']) {
+            return false;
+        }
+        return folders()
+            .into_iter()
+            .find(|(k, _, _, _)| *k == key)
+            .and_then(|(_, _, _, dir)| dir)
+            .map(|dir| dir.join(name).is_file())
+            .unwrap_or(false);
+    }
+    false
+}
+
 /// On / off through StartupApproved (12 bytes: flag, 3 zero bytes, FILETIME of turning it off).
 pub fn set(id: &str, on: bool) -> Result<(), String> {
-    let (key, name) = id.split_once('|').ok_or(crate::i18n::t("无效的启动项"))?;
+    let (key, name) = id.split_once('|').ok_or_else(|| crate::i18n::t("无效的启动项"))?;
     let (root, sub) = match key {
         "hkcu" => (HKEY_CURRENT_USER, "Run"),
         "hklm" => (HKEY_LOCAL_MACHINE, "Run"),
         "hklm32" => (HKEY_LOCAL_MACHINE, "Run32"),
         "ufolder" => (HKEY_CURRENT_USER, "StartupFolder"),
         "cfolder" => (HKEY_LOCAL_MACHINE, "StartupFolder"),
-        _ => return Err(crate::i18n::t("无效的启动项").into()),
+        _ => return Err(crate::i18n::t("无效的启动项")),
     };
     // only entries that exist (the page can't make up new names)
-    if !list().iter().any(|i| i.id == id) {
-        return Err(crate::i18n::t("这个启动项已经不在了").into());
+    if !entry_exists(key, name) {
+        return Err(crate::i18n::t("这个启动项已经不在了"));
     }
     let mut bytes = vec![if on { 2u8 } else { 3u8 }, 0, 0, 0];
     let ft: u64 = if on {

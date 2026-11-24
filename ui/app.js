@@ -16,7 +16,29 @@ const island = $("island");
 const pill = $("pill");
 
 let snap = null;
+const lastFullApps = new Map(); // app.key -> { conns, listen, pids } from last non-slim snapshot
 let exitState = null;
+
+function hydrateSnap(s) {
+  if (!s) return s;
+  if (!s.slim) {
+    lastFullApps.clear();
+    for (const a of s.apps || []) {
+      lastFullApps.set(a.key, { conns: a.conns || [], listen: a.listen || [], pids: a.pids || [] });
+    }
+    return s;
+  }
+  if (!lastFullApps.size) return s;
+  for (const a of s.apps || []) {
+    const prev = lastFullApps.get(a.key);
+    if (prev) {
+      if (!a.conns?.length) a.conns = prev.conns;
+      if (!a.listen?.length) a.listen = prev.listen;
+      if (!a.pids?.length) a.pids = prev.pids;
+    }
+  }
+  return s;
+}
 let expanded = false;
 let tab = "conns";
 let query = "";
@@ -37,9 +59,11 @@ if (MANAGER) {
 let regionNames = null;
 try { regionNames = new Intl.DisplayNames([I18N.lang], { type: "region" }); } catch { /* ignore */ }
 // static text in index.html / manager.html
-for (const el of document.querySelectorAll("[title], [placeholder]")) {
+for (const el of document.querySelectorAll("[title], [placeholder], [aria-label]")) {
   if (el.title) el.title = tr(el.title);
   if (el.placeholder) el.placeholder = tr(el.placeholder);
+  const al = el.getAttribute("aria-label");
+  if (al) el.setAttribute("aria-label", tr(al));
 }
 for (const el of document.querySelectorAll("[data-do='layout-edit']")) el.textContent = tr(el.textContent.trim());
 
@@ -80,24 +104,32 @@ const PRESETS = {
   nightowl: { name: "Night Owl", base: "dark", bg: "#011627", text: "#d6deeb", dim: "#a1aab8", dimmer: "#637777", blue: "#82aaff", green: "#addb67", amber: "#ecc48d", red: "#ef5350", violet: "#c792ea" },
   "solarized-light": { name: tr("Solarized 浅色"), base: "light", bg: "#fdf6e3", text: "#073642", dim: "#586e75", dimmer: "#93a1a1", blue: "#268bd2", green: "#859900", amber: "#b58900", red: "#dc322f", violet: "#6c71c4" },
 };
-const THEME_VARS = ["--tint-rgb", "--solid-rgb", "--text", "--dim", "--dimmer", "--glass-dim", "--glass-dimmer", "--blue", "--green", "--amber", "--red", "--violet", "--menu-bg", "--toast-bg", "--font-ui", "--bg-a"];
+const THEME_VARS = ["--tint-rgb", "--solid-rgb", "--text", "--dim", "--dimmer", "--glass-dim", "--glass-dimmer", "--blue", "--accent", "--green", "--amber", "--red", "--violet", "--menu-bg", "--toast-bg", "--font-ui", "--bg-a", "--on-accent", "--viz-ring"];
 
+const safeColor = (h, dflt) => (/^#[0-9a-f]{3,8}$/i.test(String(h || "").trim()) ? String(h).trim() : dflt);
 const hexRgb = (h) => {
-  const m = String(h || "").replace("#", "").match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  const s = String(h || "").replace("#", "").trim();
+  const full = s.length === 3 ? s[0] + s[0] + s[1] + s[1] + s[2] + s[2] : s.slice(0, 6);
+  const m = full.match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
   return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [22, 22, 28];
 };
+const relLum = ([r, g, b]) => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 const mixHex = (a, b, t) => {
   const [x, y] = [hexRgb(a), hexRgb(b)];
   return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, "0")).join("");
 };
 
 let glassOpacity = 50; // appearance.opacity, used by adaptTint
+let smoothTintA = null;
+let lastTintA = -1;
 
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
 function applyTheme() {
   const pref = sget("appearance.theme", "auto");
   const root = document.documentElement.style;
   THEME_VARS.forEach((v) => root.removeProperty(v));
+  smoothTintA = null;
+  lastTintA = -1;
   let base, t = null;
   if (pref === "glass-light") base = "light";
   else if (pref === "glass-dark") base = "dark";
@@ -105,18 +137,25 @@ function applyTheme() {
   else if (pref === "custom") {
     const c = sget("appearance.custom", {}) || {};
     base = c.base === "light" ? "light" : "dark";
-    t = { bg: c.bg || "#16161c", text: c.text || "#f2f2f5", blue: c.accent || "#60a5fa", violet: c.accent || "#60a5fa" };
+    const bg = safeColor(c.bg, base === "light" ? "#f6f6f9" : "#16161c");
+    const text = safeColor(c.text, base === "light" ? "#15151a" : "#f2f2f5");
+    const accent = safeColor(c.accent, base === "light" ? "#2563eb" : "#60a5fa");
+    t = { bg, text, blue: accent, violet: accent };
     t.dim = mixHex(t.text, t.bg, 0.3);
-    t.dimmer = mixHex(t.text, t.bg, 0.5);
+    t.dimmer = mixHex(t.text, t.bg, 0.45);
   } else base = lightQuery.matches ? "light" : "dark";
   document.documentElement.dataset.theme = base;
   if (t) {
     const rgb = hexRgb(t.bg).join(", ");
     root.setProperty("--tint-rgb", rgb);
     root.setProperty("--solid-rgb", rgb);
+    root.setProperty("--viz-ring", t.bg);
     root.setProperty("--menu-bg", `rgba(${rgb}, 0.98)`);
     root.setProperty("--toast-bg", `rgba(${rgb}, 0.97)`);
     for (const k of ["text", "dim", "dimmer", "blue", "green", "amber", "red", "violet"]) if (t[k]) root.setProperty("--" + k, t[k]);
+    const ac = t.blue || (base === "light" ? "#2563eb" : "#60a5fa");
+    root.setProperty("--accent", ac);
+    root.setProperty("--on-accent", relLum(hexRgb(ac)) > 0.54 ? "#08111f" : "#ffffff");
     if (t.dim) root.setProperty("--glass-dim", t.dim);
     if (t.dimmer) root.setProperty("--glass-dimmer", t.dimmer);
   }
@@ -126,7 +165,7 @@ function applyTheme() {
   // solid background (glass off): 50 -> 0.97, 100 -> opaque, 20 -> 0.7
   root.setProperty("--bg-a", String(Math.min(1, 0.52 + (0.9 * glassOpacity) / 100)));
   const font = sget("appearance.font", "");
-  if (font) root.setProperty("--font-ui", `"${font.replace(/"/g, "")}", "Segoe UI", "Microsoft YaHei UI", sans-serif`);
+  if (font) root.setProperty("--font-ui", `"${font.replace(/["\\\r\n]/g, "")}", "Segoe UI", "Microsoft YaHei UI", sans-serif`);
 }
 lightQuery.addEventListener("change", applyTheme);
 applyTheme();
@@ -136,6 +175,8 @@ applyTheme();
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+const safeCssUrl = (u) => esc(String(u ?? "").replace(/['"()\\\r\n]/g, ""));
+const WARN_SVG = '<svg class="ic-warn" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>';
 
 function flagImg(cc, cls = "") {
   if (!cc || !/^[A-Za-z]{2}$/.test(cc)) return "";
@@ -166,7 +207,7 @@ function fmtRate(b) {
 
 function speedHtml(up, down) {
   if ((!up || up < 1) && (!down || down < 1)) return `<span class="z">—</span>`;
-  return `<span class="u">↑</span>${fmtRate(up)} <span class="d">↓</span>${fmtRate(down)}`;
+  return `<span class="spd-pair"><span class="u">↑</span>${fmtRate(up)}</span> <span class="spd-pair"><span class="d">↓</span>${fmtRate(down)}</span>`;
 }
 
 function ago(ms) {
@@ -191,19 +232,26 @@ function routeClass(node) {
 function iconHtml(app) {
   const p = app.icon || app.path; // helpers borrow their app's icon
   if (p && icons.has(p) && icons.get(p) && icons.get(p) !== "pending") {
-    return `<img class="app-icon" src="${icons.get(p)}" alt="">`;
+    return `<img class="app-icon" src="${esc(icons.get(p))}" alt="">`;
   }
   if (p && !icons.has(p)) {
+    if (icons.size >= 400) {
+      const oldest = icons.keys().next().value;
+      if (oldest !== undefined) icons.delete(oldest);
+    }
     icons.set(p, "pending");
     invoke("get_icon", { path: p }).then((url) => {
       icons.set(p, url || null);
-      if (!url) setTimeout(() => icons.delete(p), 30_000); // retry later
+      if (!url) setTimeout(() => { if (icons.get(p) === null) icons.delete(p); }, 30_000); // retry later
       if (url) {
         document.querySelectorAll(`[data-icon="${CSS.escape(p)}"]`).forEach((el) => {
-          el.outerHTML = `<img class="app-icon" src="${url}" alt="">`;
+          el.outerHTML = `<img class="app-icon" src="${esc(url)}" alt="">`;
         });
       }
-    }).catch(() => icons.set(p, null));
+    }).catch(() => {
+      icons.set(p, null);
+      setTimeout(() => { if (icons.get(p) === null) icons.delete(p); }, 30_000);
+    });
   }
   const letter = (app.name || app.exe || "?").trim().charAt(0).toUpperCase();
   return `<div class="app-icon letter" data-icon="${esc(p || "")}">${esc(letter)}</div>`;
@@ -224,6 +272,7 @@ function pillWidth() {
 // carries the Windows "text size" accessibility factor). While editing the layout the window
 // grows to the largest allowed panel so the handles can be dragged that far.
 let fitted = "";
+let watchedDpr = 0;
 function fitWindow() {
   if (MANAGER) return;
   const dpr = window.devicePixelRatio || 1;
@@ -238,7 +287,10 @@ function fitWindow() {
   if (key === fitted) return;
   fitted = key;
   invoke("fit_window", { w: Math.round(w * dpr), h: Math.round(h * dpr) }).catch(() => {});
-  matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", () => { fitted = ""; fitWindow(); }, { once: true });
+  if (watchedDpr !== dpr) {
+    watchedDpr = dpr;
+    matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", () => { watchedDpr = 0; fitted = ""; fitWindow(); }, { once: true });
+  }
 }
 
 let panelHNow = 540;
@@ -249,7 +301,10 @@ function measurePanel() {
   let h;
   // a bottom sheet rises from the panel's bottom edge: the island stands at full height meanwhile
   if (editing || (expanded && Sheet.isOpen())) h = panelH();
-  else {
+  else if (snap?.slim && ((tab === "conns" && snap.connCount > 0) || (tab === "listen" && snap.listenCount > 0)) && !lastFullApps.size) {
+    // cold slim snapshot awaiting get_snapshot: hold panel height steady so hydration never jumps
+    h = panelH();
+  } else {
     const list = $("list");
     const foot = $("foot");
     const inner = $("list-inner");
@@ -264,7 +319,12 @@ function measurePanel() {
 }
 
 // chart width follows the panel (island) or the content column (manager window)
-const chartW = () => Math.max(420, Math.floor((MANAGER ? $("list").clientWidth - 40 : panelW() - 34)));
+const chartW = () => {
+  const lw = $("list")?.clientWidth || 0;
+  if (MANAGER) return Math.max(320, Math.min(1160, lw || (window.innerWidth - 276)) - 28);
+  const pw = lw > 100 ? lw - 18 : Math.min(window.innerWidth - 8, panelW()) - 34;
+  return Math.max(320, Math.floor(pw));
+};
 
 let maximized = false; // a maximized window is in front (setting: shrink to a line)
 // The first time per run that a maximized window turns the pill into the line, the pill says so
@@ -318,7 +378,8 @@ function islandRect(open) {
     [w, h] = vertical ? [6, 140] : [140, 6];
   } else if (vertical) {
     w = sz("pillH") + 4;
-    h = Math.max(60, Math.min(H - 16, pill.scrollHeight));
+    const fixedV = sz("pillW");
+    h = fixedV > 0 ? Math.max(60, Math.min(H - 16, fixedV)) : Math.max(60, Math.min(H - 16, pill.scrollHeight));
   } else {
     w = pillWidth();
     h = sz("pillH");
@@ -351,6 +412,7 @@ function islandRect(open) {
 }
 
 // Both rectangles go to the backend, which runs the hover state machine (dwell, buttons, leave).
+let lastHitKey = "";
 function reportRect() {
   if (MANAGER) return;
   const dpr = window.devicePixelRatio || 1;
@@ -366,13 +428,20 @@ function reportRect() {
   else if (p.dock === "left") { p.w += p.x; p.x = 0; }
   else p.w = W - p.x;
   // the thin line gets a bigger hover zone than it looks
-  invoke("set_hit_rects", { pill: phys(c, c.style === "line" ? 10 : 4), panel: phys(p, 4) }).catch(() => {});
+  const pillR = phys(c, c.style === "line" ? 10 : 4);
+  const panelR = phys(p, 4);
+  const key = [...pillR, ...panelR].map((v) => Math.round(v)).join(",");
+  if (key === lastHitKey) return;
+  lastHitKey = key;
+  invoke("set_hit_rects", { pill: pillR, panel: panelR }).catch(() => {});
 }
 
+let lastIslandRect = null;
 function applySize() {
   if (MANAGER) return;
   document.documentElement.style.setProperty("--pill-h", sz("pillH") + "px");
   const r = islandRect(expanded);
+  lastIslandRect = r;
   const fixedW = !r.vertical && sz("pillW") > 0;
   pill.style.width = fixedW ? r.w + "px" : "";
   pill.style.justifyContent = fixedW ? "center" : "";
@@ -402,14 +471,20 @@ function expand() {
     if (visiblePages().includes("notes")) tab = "notes";
   }
   expanded = true;
+  if (snap?.slim) invoke("get_snapshot").then((s) => { if (s) onSnapshot({ payload: s }); }).catch(() => {});
   island.classList.remove("peek");
   island.classList.add("expanded");
   island.classList.remove("collapsed");
+  island.scrollTop = 0;
+  island.scrollLeft = 0;
   $("panel").scrollTop = 0;
   if (tab === "sys") renderList(true); // fresh numbers instead of the ones from the last time
   renderPanel();
   applySize();
+  ensureTabVisible();
+  if (curPage() === "net") foldChips();
   ensureSysPoll();
+  ensureMuTimer();
   updateViz();
   Cascade.play($("list"));
   if (tour.on) {
@@ -433,10 +508,14 @@ function collapse() {
   confirmDisable = false;
   island.classList.remove("expanded");
   island.classList.add("collapsed");
+  island.scrollTop = 0;
+  island.scrollLeft = 0;
   $("search").blur();
   Sheet.close();
+  Charts.clearHover();
   if (tour.on) renderTour();
   applySize();
+  ensureMuTimer();
   updateViz();
 }
 
@@ -457,10 +536,15 @@ function shortRate(b) {
   return "999G";
 }
 
-function clockText() {
+function clockParts() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}${sget("pill.clockSeconds", false) ? ":" + p(d.getSeconds()) : ""}`;
+  return { hm: `${p(d.getHours())}:${p(d.getMinutes())}`, sec: sget("pill.clockSeconds", false) ? `:${p(d.getSeconds())}` : "" };
+}
+
+function clockText() {
+  const c = clockParts();
+  return c.hm + c.sec;
 }
 
 // One pill item; "" when it has nothing to show.
@@ -471,26 +555,32 @@ function pillItem(id, target) {
     case "exit":
       return `${target?.cc ? flagImg(target.cc) : ""}<span class="mono ip-text">${esc(target?.ip || (target?.error ? tr("出口检测失败") : tr("检测中…")))}</span>`;
     case "conns":
-      return `<span class="mono pn pn3">${snap ? snap.connCount : 0}</span><span class="pill-unit">${trc("pill", "连接")}</span>`;
-    case "speed":
-      return `<span class="mono pill-speed"><span class="u">↑</span><span class="sv">${shortRate(snap?.up)}</span> <span class="d">↓</span><span class="sv">${shortRate(snap?.down)}</span></span>`;
+      return `<span class="mono pn pn3" data-pn="conns">${snap ? snap.connCount : 0}</span><span class="pill-unit">${trc("pill", "连接")}</span>`;
+    case "speed": {
+      const u0 = !snap?.up || snap.up < 1, d0 = !snap?.down || snap.down < 1;
+      return `<span class="mono pill-speed"><span class="ps-pair"><span class="u">↑</span><span class="sv${u0 ? " zero" : ""}" data-sv="up">${shortRate(snap?.up)}</span></span><span class="ps-pair"><span class="d">↓</span><span class="sv${d0 ? " zero" : ""}" data-sv="down">${shortRate(snap?.down)}</span></span></span>`;
+    }
     case "latency": {
       const L = snap?.latency;
       if (!L?.at) return "";
-      if (L.ms == null) return `<span class="lat bad">${tr("节点{0}", esc(L.error || tr("无响应")))}</span>`;
+      if (L.ms == null) return `<span class="lat bad"><span class="lat-err-h">${esc(tr("节点{0}", L.error || tr("无响应")))}</span><span class="lat-err-v">✕</span></span>`;
       const c = L.ms < 200 ? "good" : L.ms < 500 ? "mid" : "bad";
-      return `<span class="lat ${c} mono pn pn6">${Math.min(L.ms, 9999)}ms</span>`;
+      return `<span class="lat ${c} mono pn pn6"><span data-pn="lat">${Math.min(L.ms, 9999)}</span><i class="lat-u">ms</i></span>`;
     }
     case "leaks": {
       const n = snap?.guard?.unacked || 0;
-      return n ? `<span class="pill-alert">${tr("⚠ 泄漏 {0}", n)}</span>` : "";
+      if (!n) return "";
+      const txt = esc(tr("⚠ 泄漏 {0}", n).replace(/^⚠\s*/, ""));
+      return `<span class="pill-alert"><span class="pa-full">${WARN_SVG}<span>${txt}</span></span><span class="pa-vert">${WARN_SVG}<span>${n}</span></span></span>`;
     }
     case "cpu":
-      return snap?.sys?.cpu != null ? `<span class="pill-unit">CPU</span><span class="mono pn pn4">${Math.round(snap.sys.cpu)}%</span>` : "";
+      return snap?.sys?.cpu != null ? `<span class="pill-unit">CPU</span><span class="v-tag" aria-hidden="true">C</span><span class="mono pn pn4" data-pn="cpu">${Math.round(snap.sys.cpu)}%</span>` : "";
     case "mem":
-      return snap?.sys?.memTotal ? `<span class="pill-unit">${tr("内存")}</span><span class="mono pn pn4">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
-    case "clock":
-      return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}">${clockText()}</span>`;
+      return snap?.sys?.memTotal ? `<span class="pill-unit">${tr("内存")}</span><span class="v-tag" aria-hidden="true">M</span><span class="mono pn pn4" data-pn="mem">${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%</span>` : "";
+    case "clock": {
+      const c = clockParts();
+      return `<span class="clock clock-${esc(sget("pill.clockStyle", "simple"))}"><span class="ck-hm">${c.hm}</span>${c.sec ? `<span class="ck-sec">${c.sec}</span>` : ""}</span>`;
+    }
     case "notes": {
       if (!sget("notify.on", true)) return "";
       const un = notes.filter((n) => !n.read && !n.silent);
@@ -499,8 +589,8 @@ function pillItem(id, target) {
         // one small icon per app with unread notes (newest first, overlapping, at most 3)
         const apps = [];
         for (const n of un) if (!apps.some((a) => a.key === n.key)) apps.push(n);
-        return `<span class="pill-nicons" title="${apps.map((a) => esc(a.app)).join(tr("、"))}">${apps.slice(0, 3).map((n) =>
-          `<span class="pni${n.id === notePop ? " pop" : ""}">${noteMini(n, false)}</span>`).join("")}${apps.length > 3 ? `<span class="pni-more mono">+${apps.length - 3}</span>` : ""}</span>`;
+        return `<span class="pill-nicons" title="${esc(apps.map((a) => a.app).join(tr("、")))}">${apps.slice(0, 3).map((n) =>
+          `<span class="pni${n.id === notePop ? " pop" : ""}">${noteMini(n, false)}</span>`).join("")}${apps.length > 3 ? `<span class="pni-more mono">+${apps.length - 3}</span>` : ""}${un.length > 1 ? `<span class="pni-vcount mono">${un.length > 99 ? "99+" : un.length}</span>` : ""}</span>`;
       }
       const u = un.length;
       return `<span class="pill-bell"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${BELL}"/></svg><span class="mono">${u > 99 ? "99+" : u}</span></span>`;
@@ -528,7 +618,7 @@ function pillItem(id, target) {
     }
     case "media": {
       if (!sget("media.on", true) || !media?.title || !media.playing) return "";
-      const cover = media.cover && sget("media.cover", true) ? `<img class="rot-cover" src="${media.cover}" alt="">` : `<span class="rot-note">♪</span>`;
+      const cover = media.cover && sget("media.cover", true) ? `<img class="rot-cover" src="${esc(media.cover)}" alt="">` : `<span class="rot-note">♪</span>`;
       // default: just the cover and bars moving with the music; or the title as before
       if (sget("media.pillStyle", "viz") === "viz") return `${cover}${vizBars(PILL_BANDS.length)}`;
       return `${cover}<span class="rot-text">${esc(media.title)}${media.artist ? `<span class="rot-sub"> · ${esc(media.artist)}</span>` : ""}</span>`;
@@ -685,7 +775,7 @@ function rotCards(target) {
       }
     } else if (it.id === "media") {
       if (media?.title && media.playing) {
-        const cover = media.cover && sget("media.cover", true) ? `<img class="rot-cover" src="${media.cover}" alt="">` : `<span class="rot-note">♪</span>`;
+        const cover = media.cover && sget("media.cover", true) ? `<img class="rot-cover" src="${esc(media.cover)}" alt="">` : `<span class="rot-note">♪</span>`;
         cards.push({ key: "m:" + media.title, html: `${cover}<span class="rot-text">${esc(media.title)}${media.artist ? `<span class="rot-sub"> · ${esc(media.artist)}</span>` : ""}</span>` });
       }
     } else if (it.id === "ai") {
@@ -767,6 +857,15 @@ const livePhase = () => {
   const t = Date.now();
   return `--ph9:-${t % 900}ms;--ph11:-${t % 1100}ms;--ph14:-${t % 1400}ms;--ph16:-${t % 1600}ms;--ph18:-${t % 1800}ms`;
 };
+function setLivePhase(el) {
+  if (!el) return;
+  const t = Date.now();
+  el.style.setProperty("--ph9", `-${t % 900}ms`);
+  el.style.setProperty("--ph11", `-${t % 1100}ms`);
+  el.style.setProperty("--ph14", `-${t % 1400}ms`);
+  el.style.setProperty("--ph16", `-${t % 1600}ms`);
+  el.style.setProperty("--ph18", `-${t % 1800}ms`);
+}
 const liveBorn = new Map();
 function liveEnter(key) {
   const now = Date.now();
@@ -780,17 +879,21 @@ function liveForget(keys) {
 // the session to jump to: one waiting for the user first, then the longest running
 const agentLead = () => agents.find((a) => a.state === "ask") || [...agents].sort((a, b) => a.started - b.started)[0];
 
+function agentsPillTip() {
+  return agents.map((a) => `${tr("{0}：{1}", a.project, a.state === "ask" ? a.ask || tr("等你确认") : tr("运行 ") + elapsed(Date.now() - a.started))}`).join("\n") + tr("\n点一下切到它的窗口");
+}
+
 function agentsPill() {
   if (!agents.length || !sget("ai.live", true)) return "";
   const ask = agents.filter((a) => a.state === "ask").length;
   const lead = agentLead();
   const st = ask ? "ask" : "run";
-  const tip = agents.map((a) => `${tr("{0}：{1}", a.project, a.state === "ask" ? a.ask || tr("等你确认") : tr("运行 ") + elapsed(Date.now() - a.started))}`).join("\n") + tr("\n点一下切到它的窗口");
+  const tip = agentsPillTip();
   const name = agents.length === 1 ? esc(lead.project) : `${tr("{0} 个任务", agents.length)}`;
   const tail = ask
     ? `<span class="ag-ask">${agents.length === 1 ? tr("等你确认") : `${tr("{0} 个等你", ask)}`}</span>`
     : `<span class="ag-t mono">${elapsed(Date.now() - lead.started)}</span>`;
-  return `<span class="ag-pill ${st}${liveEnter("pill-ag")}" style="${livePhase()}" data-ag="${esc(lead.id)}" title="${esc(tip)}"><span class="ag-ic ${st}">${brandIcon(lead.tool, 15)}<i class="ag-orbit"></i></span><span class="ag-name">${name}</span>${tail}</span>`;
+  return `<span class="ag-pill ${st}${liveEnter("pill-ag")}" data-ag="${esc(lead.id)}" title="${esc(tip)}"><span class="ag-ic ${st}">${brandIcon(lead.tool, 15)}<i class="ag-orbit"></i></span><span class="ag-name">${name}</span>${tail}</span>`;
 }
 
 const DG_PATH = {
@@ -804,9 +907,9 @@ function diagPill() {
   if (!p || !sget("diag.on", true)) return "";
   const sys = p.kind === "sysproxy";
   const since = !sys && p.downSince ? `<span class="dg-t mono">${elapsed(Date.now() - p.downSince)}</span>` : "";
-  return `<span class="dg-pill ${sys ? "warn" : "bad"}${liveEnter("pill-dg")}" style="${livePhase()}" data-dg="1" title="${tr("{0}\n点一下看诊断", esc(p.verdict || ""))}">
+  return `<span class="dg-pill ${sys ? "warn" : "bad"}${liveEnter("pill-dg")}" data-dg="1" title="${esc(noFlags(tr("{0}\n点一下看诊断", p.verdict || "")))}">
     <span class="dg-ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="${sys ? DG_PATH.plug : DG_PATH.wifiOff}"/></svg></span>
-    <span class="dg-txt">${esc(p.problem || tr("网络异常"))}</span>${since}</span>`;
+    <span class="dg-txt">${decorate(p.problem || tr("网络异常"))}</span>${since}</span>`;
 }
 
 // a short press on a live item: jump to the session's window / open the diagnosis
@@ -826,9 +929,10 @@ function liveClick(t) {
 
 listen("agents", (e) => {
   agents = e.payload || [];
+  if (document.hidden) { dirtyOnShow = true; return; }
   renderPill();
   if (expanded) renderLiveBar();
-  if (expanded && tab === "ai") renderList();
+  if (expanded && tab === "ai") renderList(true);
 });
 invoke("agents_get").then((l) => { agents = l || []; renderPill(); }).catch(() => {});
 
@@ -872,9 +976,11 @@ function diagSheetHtml() {
     return `${link}<div class="dg-node ${s.status}" style="--i:${i}">
       <span class="dg-orb">${svgI(DG_ICON[s.id] || DG_ICON.net)}${badge}</span>
       <span class="dg-lab">${esc(s.label)}</span>
-      <span class="dg-det" title="${esc(det)}">${esc(det)}${s.ms != null && s.status === "ok" ? `<i class="mono">${s.ms} ms</i>` : ""}</span>
+      <span class="dg-det" title="${esc(noFlags(det))}">${decorate(det)}${s.ms != null && s.status === "ok" ? `<i class="mono">${s.ms} ms</i>` : ""}</span>
     </div>`;
   }).join("")}</div>` : "";
+  const retryBtn = `<button class="ghost dg-retry" data-dg-fix="retry" ${running ? "disabled" : ""}>${running ? tr("检测中…") : tr("重新检测")}</button>`;
+  const hasFixes = !!(r && !running && !r.ok && r.fixes?.length);
   let verdict;
   if (running) {
     verdict = `<div class="dg-verdict run"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>${tr("正在逐项检查…")}</b><span>${tr("从网卡一路查到节点，十秒内出结果")}</span></div></div>`;
@@ -882,18 +988,18 @@ function diagSheetHtml() {
     verdict = `<div class="dg-verdict"><span class="dg-big">${svgI(DG_PATH.pulse, 22, 2.2)}</span><div><b>${tr("还没检查过")}</b><span>${tr("点下面的按钮开始")}</span></div></div>`;
   } else if (r.ok) {
     const n = (r.steps || []).filter((s) => s.status === "ok").length;
-    verdict = `<div class="dg-verdict ok"><span class="dg-big">${svgI(DG_BADGE.ok, 22, 2.6)}</span><div><b>${esc(r.verdict || tr("网络正常"))}</b><span>${n ? `${tr("{0} 项检查都通过了", n)}` : esc(r.advice || "")}${r.tookMs ? ` ${tr("· 用时 {0} 秒", (r.tookMs / 1000).toFixed(1))}` : ""}</span></div></div>`;
+    verdict = `<div class="dg-verdict ok"><span class="dg-big">${svgI(DG_BADGE.ok, 22, 2.6)}</span><div><b>${decorate(r.verdict || tr("网络正常"))}</b><span>${n ? `${tr("{0} 项检查都通过了", n)}` : decorate(r.advice || "")}${r.tookMs ? ` ${tr("· 用时 {0} 秒", (r.tookMs / 1000).toFixed(1))}` : ""}</span></div></div>`;
   } else {
     const since = r.downSince ? `<span class="dg-since">${tr("已持续 {0}", durText(Date.now() - r.downSince))}</span>` : "";
     verdict = `<div class="dg-verdict ${r.kind === "sysproxy" ? "warn" : "bad"}"><span class="dg-big">${svgI(r.kind === "sysproxy" ? DG_PATH.plug : DG_BADGE.fail, 22, 2.4)}</span>
-      <div><b>${esc(r.verdict)}</b>${since}<span>${esc(r.advice || "")}</span></div></div>
-      ${r.fixes?.length ? `<div class="dg-fixes">${r.fixes.map((f) => `<button class="${f.primary ? "primary" : "ghost"}" data-dg-fix="${esc(f.id)}">${esc(f.label)}</button>`).join("")}</div>` : ""}`;
+      <div><b>${decorate(r.verdict)}</b>${since}<span>${decorate(r.advice || "")}</span></div></div>
+      ${hasFixes ? `<div class="dg-fixes">${r.fixes.map((f) => `<button class="${f.primary ? "primary" : "ghost"}" data-dg-fix="${esc(f.id)}">${esc(f.label)}</button>`).join("")}${retryBtn}</div>` : ""}`;
   }
   const when = r && !running ? (r.kind === "sysproxy" && r.ok ? `${tr("刚刚处理 · {0}", ago(r.at))}` : `${r.auto ? tr("自动发现") : tr("手动检测")} · ${ago(r.at)}`) : running ? tr("检测中") : "";
   return `<div class="as-head dg-head" data-sheet-drag><span class="dg-logo">${svgI(DG_PATH.pulse, 18, 2.2)}</span><div class="as-title"><b>${tr("网络诊断")}</b><span>${esc(when)}</span></div>
-      <button class="ghost" data-sheet-do="close" title="${tr("关闭（Esc）")}">✕</button></div>
+      <button class="ghost" data-sheet-do="close" title="${esc(tr("关闭（Esc）"))}">✕</button></div>
     ${chain}${verdict}
-    <div class="m-actions end dg-foot"><button class="ghost" data-dg-fix="retry" ${running ? "disabled" : ""}>${running ? tr("检测中…") : tr("重新检测")}</button></div>`;
+    ${hasFixes ? "" : `<div class="m-actions end dg-foot">${retryBtn}</div>`}`;
 }
 
 function diagSync() {
@@ -914,7 +1020,6 @@ function startDiag() {
 }
 
 function openDiagSheet(run) {
-  if (MANAGER) return;
   sheetApp = null;
   diagSheetOpen = true;
   Sheet.open($("panel"), diagSheetHtml(), {
@@ -952,11 +1057,12 @@ listen("netdiag", (e) => {
     // fixed (restored here, by the client, or "是我关的"): the sheet says so instead of going blank
     diag.last = { at: Date.now(), ok: true, kind: "sysproxy", steps: [], verdict: tr("系统代理好了"), advice: tr("浏览器等程序会重新经过代理软件。"), tookMs: 0 };
   }
-  if (was?.kind === "net" && !diag.problem && diag.last?.recoveredMs) {
+  if (!MANAGER && was?.kind === "net" && !diag.problem && diag.last?.recoveredMs) {
     fireFlash("recover", `${tr("网络恢复了 · 断了 {0}", durText(diag.last.recoveredMs))}`, "info");
-  } else if (!was && diag.problem) {
+  } else if (!MANAGER && !was && diag.problem) {
     invoke("log_js", { msg: `netdiag problem: ${diag.problem.problem}` }).catch(() => {});
   }
+  if (document.hidden) { dirtyOnShow = true; return; }
   diagSync();
   renderPill();
   if (expanded) renderLiveBar();
@@ -965,7 +1071,8 @@ listen("netdiag", (e) => {
 listen("netdiag-progress", (e) => {
   diag.running = true;
   diag.prog = e.payload;
-  diagSync();
+  if (!document.hidden) diagSync();
+  else dirtyOnShow = true;
 });
 invoke("netdiag_get").then((s) => { diag.last = s?.last || null; diag.problem = s?.problem || null; diag.running = !!s?.running; renderPill(); }).catch(() => {});
 
@@ -978,14 +1085,14 @@ function renderLiveBar() {
   const chips = [];
   if (diag.problem && sget("diag.on", true)) {
     const sys = diag.problem.kind === "sysproxy";
-    chips.push(`<button class="lv-chip dg ${sys ? "warn" : "bad"}${liveEnter("bar-dg")}" style="${livePhase()}" data-do="diag-open" title="${esc(diag.problem.verdict || "")}">${svgI(sys ? DG_PATH.plug : DG_PATH.wifiOff, 13, 2.2)}<span>${esc(diag.problem.problem || tr("网络异常"))}</span></button>`);
+    chips.push(`<button class="lv-chip dg ${sys ? "warn" : "bad"}${liveEnter("bar-dg")}" data-do="diag-open" title="${esc(noFlags(diag.problem.verdict || ""))}">${svgI(sys ? DG_PATH.plug : DG_PATH.wifiOff, 13, 2.2)}<span>${decorate(diag.problem.problem || tr("网络异常"))}</span></button>`);
   }
   if (sget("ai.live", true)) {
     const list = [...agents].sort((a, b) => (a.state === "ask") === (b.state === "ask") ? a.started - b.started : a.state === "ask" ? -1 : 1);
     const shown = list.slice(0, chips.length ? 1 : 2);
     for (const a of shown) {
-      chips.push(`<button class="lv-chip ag ${a.state}${liveEnter("bar-" + a.id)}" style="${livePhase()}" data-do="agent-focus" data-id="${esc(a.id)}" title="${tr("{0}：{1}\n点一下切到它的窗口", esc(a.project), a.state === "ask" ? esc(a.ask || tr("等你确认")) : tr("正在工作"))}">
-        <span class="ag-ic ${a.state}">${brandIcon(a.tool, 13)}<i class="ag-orbit"></i></span><span class="lv-name">${esc(a.project)}</span>${a.state === "ask" ? `<span class="ag-ask">${tr("等你")}</span>` : `<span class="mono lv-t">${elapsed(Date.now() - a.started)}</span>`}</button>`);
+      chips.push(`<button class="lv-chip ag ${a.state}${liveEnter("bar-" + a.id)}" data-do="agent-focus" data-id="${esc(a.id)}" title="${esc(tr("{0}：{1}\n点一下切到它的窗口", a.project, a.state === "ask" ? a.ask || tr("等你确认") : tr("正在工作")))}">
+        <span class="ag-ic ${a.state}">${brandIcon(a.tool, 13)}<i class="ag-orbit"></i></span><span class="lv-name">${esc(a.project)}</span>${a.state === "ask" ? `<span class="ag-ask">${tr("等你")}</span>` : `<span class="mono lv-t" data-ag-t="${a.started}">${elapsed(Date.now() - a.started)}</span>`}</button>`);
     }
     const more = agents.length - shown.length;
     if (more > 0) chips.push(`<button class="lv-chip more" data-do="page-ai">+${more}</button>`);
@@ -993,9 +1100,16 @@ function renderLiveBar() {
   const keep = [...liveBorn.keys()].filter((k) => k.startsWith("pill-") || (k === "bar-dg" && diag.problem) || agents.some((a) => k === "bar-" + a.id));
   liveForget(keep);
   const html = chips.join("");
-  if (html.replace(/style="[^"]*"/g, "") !== liveBarLast.replace(/style="[^"]*"/g, "")) {
-    liveBarLast = html;
+  const norm = html.replace(/<span class="mono lv-t" data-ag-t="\d+">[^<]*<\/span>/g, '<span class="mono lv-t"></span>');
+  if (norm !== liveBarLast) {
+    liveBarLast = norm;
+    setLivePhase(el);
     el.innerHTML = html;
+  } else {
+    el.querySelectorAll("[data-ag-t]").forEach(( node ) => {
+      const v = elapsed(Date.now() - Number(node.dataset.agT));
+      if (node.textContent !== v) node.textContent = v;
+    });
   }
 }
 
@@ -1005,7 +1119,7 @@ function agentsSectionHtml() {
     <div class="ag-row ${a.state}" style="${livePhase()}">
       <span class="ag-ic big ${a.state}">${brandIcon(a.tool, 20)}<i class="ag-orbit"></i></span>
       <div class="ag-main"><b>${esc(a.project)}</b><span>${a.state === "ask" ? esc(a.ask || tr("等你确认")) : tr("正在工作")}</span></div>
-      <span class="ag-time mono">${elapsed(Date.now() - a.started)}</span>
+      <span class="ag-time mono" data-ag-started="${a.started}">${elapsed(Date.now() - a.started)}</span>
       <button class="${a.state === "ask" ? "primary" : "ghost"}" data-do="agent-focus" data-id="${esc(a.id)}">${a.state === "ask" ? tr("去确认") : tr("切过去")}</button>
     </div>`).join("");
   return `<div class="ag-list"><div class="ag-h">${tr("进行中")}<span>${agents.length}</span></div>${rows}</div>`;
@@ -1013,7 +1127,7 @@ function agentsSectionHtml() {
 
 // ---------- threshold flashes (5 s message in the pill) ----------
 
-const flash = { msg: null, until: 0, cool: {}, prevExit: null, latAt: 0, latOk: true, latMs: null, hist: [] };
+const flash = { msg: null, until: 0, cool: {}, prevExit: null, prevProxyOn: null, latAt: 0, latOk: true, latMs: null, hist: [] };
 
 function fireFlash(kind, text, level) {
   const now = Date.now();
@@ -1027,12 +1141,19 @@ function fireFlash(kind, text, level) {
 
 function checkFlashes(s) {
   if (!S) return;
-  const proxyOn = s.proxy?.detected;
+  const proxyOn = !!s.proxy?.detected;
   const ip = (proxyOn ? s.exit?.proxy?.ip : s.exit?.direct?.ip) || null;
-  if (sget("flash.exitChange", true) && ip && flash.prevExit && ip !== flash.prevExit) {
+  const sameMode = flash.prevProxyOn === proxyOn;
+  if (sget("flash.exitChange", true) && sameMode && ip && flash.prevExit && ip !== flash.prevExit) {
     fireFlash("exit", `${tr("出口 IP 变了：{0} → {1}", flash.prevExit, ip)}`, "warn");
   }
-  if (ip) flash.prevExit = ip;
+  if (ip) {
+    flash.prevExit = ip;
+    flash.prevProxyOn = proxyOn;
+  } else if (flash.prevProxyOn !== null && flash.prevProxyOn !== proxyOn) {
+    flash.prevExit = null;
+    flash.prevProxyOn = proxyOn;
+  }
 
   const L = s.latency;
   if (L?.at && L.at !== flash.latAt) {
@@ -1060,6 +1181,14 @@ function checkFlashes(s) {
 }
 
 let pillLast = "";
+const normPillHtml = (s) => s
+  .replace(/style="[^"]*"/g, "")
+  .replace(/(data-ag="[^"]*" title=")[^"]*(")/g, "$1$2")
+  .replace(/(<span class="(?:ag-t|dg-t) mono">)([^<]*)(<\/span>)/g, (_, a, m, b) => a + m.replace(/\d/g, "#") + b)
+  .replace(/(<span class="ck-(?:hm|sec)">)([^<]*)(<\/span>)/g, (_, a, m, b) => a + m.replace(/\d/g, "#") + b)
+  .replace(/(<span[^>]*data-sv="(?:up|down)"[^>]*>)([^<]*)(<\/span>)/g, "$1#$3")
+  .replace(/(<span[^>]*data-pn="(?:conns|lat|cpu|mem)"[^>]*>)([^<]*)(<\/span>)/g, "$1#$3");
+
 function renderPill() {
   if (MANAGER) return;
   const p = snap?.proxy;
@@ -1100,12 +1229,45 @@ function renderPill() {
     html = foldPill(dot, [...live, ...items]);
   }
   const full = `<span class="${dot}"></span>${html}`;
-  if (full !== pillLast) {
-    pillLast = full;
+  const norm = normPillHtml(full);
+  if (norm !== pillLast) {
+    pillLast = norm;
+    setLivePhase(pill);
     pill.innerHTML = full;
     JSPERF.pill++;
+    if (!expanded) applySize();
+  } else {
+    // update live timers & clock digits in-place without destroying pill DOM or triggering reflow
+    const agEl = pill.querySelector(".ag-t");
+    if (agEl && agents.length) {
+      const v = elapsed(Date.now() - agentLead().started);
+      if (agEl.textContent !== v) agEl.textContent = v;
+    }
+    const agPill = pill.querySelector(".ag-pill");
+    if (agPill && agents.length) {
+      const tip = agentsPillTip();
+      if (agPill.getAttribute("title") !== tip) agPill.setAttribute("title", tip);
+    }
+    const dgEl = pill.querySelector(".dg-t");
+    if (dgEl && diag.problem?.downSince) {
+      const v = elapsed(Date.now() - diag.problem.downSince);
+      if (dgEl.textContent !== v) dgEl.textContent = v;
+    }
+    const hmEl = pill.querySelector(".ck-hm");
+    if (hmEl) {
+      const c = clockParts();
+      if (hmEl.textContent !== c.hm) hmEl.textContent = c.hm;
+      const secEl = pill.querySelector(".ck-sec");
+      if (secEl && secEl.textContent !== c.sec) secEl.textContent = c.sec;
+    }
+    const setPillAll = (sel, v) => pill.querySelectorAll(sel).forEach((el) => { if (el.textContent !== v) el.textContent = v; });
+    setPillAll('[data-sv="up"]', shortRate(snap?.up));
+    setPillAll('[data-sv="down"]', shortRate(snap?.down));
+    setPillAll('[data-pn="conns"]', String(snap ? snap.connCount : 0));
+    if (snap?.latency?.ms != null) setPillAll('[data-pn="lat"]', String(Math.min(snap.latency.ms, 9999)));
+    if (snap?.sys?.cpu != null) setPillAll('[data-pn="cpu"]', `${Math.round(snap.sys.cpu)}%`);
+    if (snap?.sys?.memTotal) setPillAll('[data-pn="mem"]', `${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%`);
   }
-  if (!expanded) applySize();
   updateViz();
 }
 
@@ -1164,7 +1326,7 @@ function foldPill(dot, items) {
   return `${kept}${kept ? PILL_SEP : ""}<span class="pill-item rot-slot fold" style="width:${Math.ceil(fold.slotW)}px">${rotateCards(cards, "fold")}</span>`;
 }
 // the rotating slot advances on its own, between snapshots too
-if (!MANAGER) setInterval(() => { if (!expanded) renderPill(); }, 1000);
+if (!MANAGER) setInterval(() => { if (!expanded && !document.hidden) renderPill(); }, 1000);
 
 // ---------- notifications ----------
 // A note springs out of the island like on an iPhone: the pill becomes a card (app icon or the
@@ -1173,14 +1335,23 @@ if (!MANAGER) setInterval(() => { if (!expanded) renderPill(); }, 1000);
 // The notes page keeps today's notes grouped by app (in memory only, like the backend).
 
 let notes = []; // newest first
+let notesVer = 0;
 const NOTE_W = 400;
 const nst = { active: [], hover: false, fan: false, timer: 0, h: 0, on: false };
 var gameOn = false; // var: shape() may run before this line (no TDZ)
 const BELL = "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0";
-// a note without an app icon: the AI tool's mark, else the app's initial
-const NOTE_BRAND = { claude: "brands/claude-tile.svg", codex: "brands/codex.svg" };
+// known AI tools & test-1 always use their crisp brand mark
+const NOTE_BRAND = {
+  claude: "brands/claude-tile.svg",
+  "test-1": "brands/claude-tile.svg",
+  codex: "brands/codex.svg",
+  antigravity: "brands/antigravity.svg",
+  grok: "grok",
+};
 function noteGlyph(n) {
-  if (NOTE_BRAND[n.key]) return `<img class="app-icon n-brand b-${n.key}" src="${NOTE_BRAND[n.key]}" alt="">`;
+  const b = NOTE_BRAND[n.key];
+  if (b === "grok") return `<span class="app-icon n-brand b-grok">${brandIcon("grok", 20)}</span>`;
+  if (b) return `<img class="app-icon n-brand b-${esc(n.key)}" src="${esc(b)}" alt="">`;
   return `<div class="app-icon letter n-glyph g-${esc(n.key.replace(/[^a-z0-9-]/gi, ""))}">${esc([...(n.app || "?")][0])}</div>`;
 }
 
@@ -1198,12 +1369,14 @@ function noteHidden(n) {
 }
 
 function noteIcon(n) {
-  const app = n.iconUrl
-    ? `<img class="n-appimg" src="${n.iconUrl}" alt="">`
-    : n.icon
-      ? iconHtml({ path: n.icon, name: n.app })
-      : noteGlyph(n);
-  if (n.avatar && noteHidden(n) < 2) return `<div class="n-ico avatar"><img class="n-av" src="${n.avatar}" alt=""><span class="n-badge">${app}</span></div>`;
+  const app = NOTE_BRAND[n.key]
+    ? noteGlyph(n)
+    : n.iconUrl
+      ? `<img class="n-appimg" src="${esc(n.iconUrl)}" alt="">`
+      : n.icon
+        ? iconHtml({ path: n.icon, name: n.app })
+        : noteGlyph(n);
+  if (n.avatar && noteHidden(n) < 2) return `<div class="n-ico avatar"><img class="n-av" src="${esc(n.avatar)}" alt=""><span class="n-badge">${app}</span></div>`;
   if (n.kind === "firstnet") return `<div class="n-ico">${n.icon ? iconHtml({ path: n.icon, name: n.title }) : app}<span class="n-fn">${svgI(DG_ICON.net, 11, 2.4)}</span></div>`;
   return `<div class="n-ico">${app}</div>`;
 }
@@ -1212,7 +1385,7 @@ function noteText(n) {
   const h = noteHidden(n);
   if (!h) return { title: n.title, body: n.body, sub: n.sub };
   // without the text: a neutral line (AI notes say what happened, not what they wrote)
-  const body = n.kind === "done" ? n.sub || tr("任务完成") : n.kind === "ask" ? tr("等你确认") : n.count > 1 ? `${tr("{0} 条新消息", n.count)}` : n.source === "flash" && n.app !== "微信" ? tr("需要你注意") : tr("新消息");
+  const body = n.kind === "done" ? n.sub || tr("任务完成") : n.kind === "ask" ? tr("等你确认") : n.count > 1 ? `${tr("{0} 条新消息", n.count)}` : n.source === "flash" && n.key !== "weixin" && n.app !== "微信" && n.app !== "WeChat" ? tr("需要你注意") : tr("新消息");
   return { title: h === 2 ? n.app : n.title, body, sub: "" };
 }
 
@@ -1220,16 +1393,16 @@ function noteCardHtml(n, close) {
   const t = noteText(n);
   const showApp = t.title !== n.app;
   const cnt = n.count > 1 && n.source !== "flash" && noteHidden(n) < 2 ? `<span class="n-cnt">${n.count}</span>` : "";
-  return `<div class="ncard ${n.read ? "read" : ""} k-${esc(n.kind)}" data-nid="${n.id}">
+  return `<div class="ncard ${n.read ? "read" : ""} k-${esc(n.kind)}" data-nid="${n.id}" tabindex="0">
     ${noteIcon(n)}
     <div class="n-main">
       <div class="n-top">${showApp ? `<span class="n-app">${esc(n.app)}</span>` : ""}<b class="n-title">${esc(t.title)}</b>${cnt}<span class="n-time">${esc(ago(n.at))}</span></div>
       <div class="n-body">${esc(t.body)}</div>
       ${t.sub ? `<div class="n-sub">${n.kind === "done" ? "✓ " : n.kind === "ask" ? "● " : ""}${esc(t.sub)}</div>` : ""}
       ${n.actions?.length ? `<div class="n-acts">${n.actions.map((a) => `<button class="n-act ${esc(a.style)}" data-nact="${esc(a.id)}">${esc(a.label)}</button>`).join("")}</div>`
-        : n.done ? `<div class="n-done ${n.done}${n.doneWarn ? " warn" : ""}${Date.now() - (n.doneAt || 0) < 400 ? " fresh" : ""}">${n.doneWarn ? "⚠ " : n.done === "block" ? "⛔ " : "✓ "}${esc(n.doneMsg || (n.done === "block" ? tr("已阻止联网") : tr("已允许")))}</div>` : ""}
+        : n.done ? `<div class="n-done ${esc(n.done)}${n.doneWarn ? " warn" : ""}${Date.now() - (n.doneAt || 0) < 400 ? " fresh" : ""}">${n.doneWarn ? WARN_SVG : n.done === "block" ? "⛔ " : "✓ "}<span>${esc(n.doneMsg || (n.done === "block" ? tr("已阻止联网") : tr("已允许")))}</span></div>` : ""}
     </div>
-    ${close ? `<button class="n-x" data-nclose="${n.id}" title="${tr("关闭")}" aria-label="${tr("关闭")}">✕</button>` : ""}
+    ${close ? `<button class="n-x" data-nclose="${n.id}" title="${esc(tr("关闭"))}" aria-label="${esc(tr("关闭"))}">✕</button>` : ""}
   </div>`;
 }
 
@@ -1241,8 +1414,9 @@ let notePop = 0; // newest note: its icon pops in the pill
 
 // small round icon: the sender's picture (inline only, privacy permitting) or the app's icon
 function noteMini(n, avatar) {
-  if (avatar && n.avatar && noteHidden(n) < 2) return `<img class="nm-av" src="${n.avatar}" alt="">`;
-  if (n.iconUrl) return `<img class="app-icon" src="${n.iconUrl}" alt="">`;
+  if (avatar && n.avatar && noteHidden(n) < 2) return `<img class="nm-av" src="${esc(n.avatar)}" alt="">`;
+  if (NOTE_BRAND[n.key]) return noteGlyph(n);
+  if (n.iconUrl) return `<img class="app-icon" src="${esc(n.iconUrl)}" alt="">`;
   if (n.icon) return iconHtml({ path: n.icon, name: n.app });
   return noteGlyph(n);
 }
@@ -1379,17 +1553,21 @@ function placeTail(r) {
 
 function readNotes(ids) {
   notes.forEach((n) => { if (ids.includes(n.id)) n.read = true; });
+  notesVer++;
   invoke("notify_read", { ids }).catch(() => {});
 }
 
 function openNote(id) {
   const n = noteById(id);
   if (n) n.read = true;
+  notesVer++;
   invoke("notify_open", { id }).catch((e) => toast(String(e), true));
   afterNotesChange();
 }
 
 function afterNotesChange() {
+  notesVer++;
+  if (document.hidden) { dirtyOnShow = true; return; }
   renderPill();
   if (!MANAGER) renderPages();
   const c = $("tab-notes");
@@ -1487,8 +1665,8 @@ function notesPageHtml() {
     return `<div class="ng ${open ? "open" : "stacked"}">
       <div class="ng-head" data-ngkey="${esc(key)}"><span class="ng-app">${esc(list[0].app)}</span>${list.length > 1 ? `<span class="ng-n mono">${list.length}</span>` : ""}${muted ? `<span class="tag">${tr("已静音")}</span>` : ""}<span class="sp"></span>
         ${list.length > 1 ? `<button class="link" data-ngtoggle="${esc(key)}">${open ? tr("收起") : tr("展开")}</button>` : ""}
-        <button class="link" data-ngmute="${esc(key)}" title="${muted ? tr("恢复这个程序的提醒") : tr("这个程序的通知只收进这里：不弹出、不亮红点")}">${muted ? tr("取消静音") : tr("静音")}</button>
-        <button class="ng-x" data-ngclear="${esc(key)}" title="${tr("清除这一组")}" aria-label="${tr("清除这一组")}">✕</button></div>
+        <button class="link" data-ngmute="${esc(key)}" title="${esc(muted ? tr("恢复这个程序的提醒") : tr("这个程序的通知只收进这里：不弹出、不亮红点"))}">${muted ? tr("取消静音") : tr("静音")}</button>
+        <button class="ng-x" data-ngclear="${esc(key)}" title="${esc(tr("清除这一组"))}" aria-label="${esc(tr("清除这一组"))}">✕</button></div>
       <div class="ng-cards" ${open ? "" : `data-ngtoggle="${esc(key)}"`}>${cards}</div></div>`;
   }).join("");
   return `<div class="viz nc">${head}${body}
@@ -1505,21 +1683,38 @@ let clipVer = 0; // bumped on every load; the page rebuilds when it differs from
 let clipShown = -1;
 let clipShownAt = 0;
 let clipQuery = "";
+let clipLoadedQuery = null;
+let clipSearchTimer = 0;
 let clipPop = 0; // a new copy: the pill icon bounces
+let clipPopTimer = 0;
 let clipLoading = false;
+let clipQueued = false;
+let clipCopiedId = 0;
+let clipCopiedUntil = 0;
 
 function loadClips() {
-  if (clipLoading) return;
+  if (clipLoading) { clipQueued = true; return; }
   clipLoading = true;
-  invoke("clip_list").then((v) => {
+  const q = clipQuery.trim() || null;
+  invoke("clip_list", { query: q }).then((v) => {
     clipItems = v || [];
+    clipLoadedQuery = (q || "").toLowerCase();
     clipVer++;
     if (tab === "clip") renderList(true);
-  }).catch(() => {}).finally(() => { clipLoading = false; });
+  }).catch(() => {}).finally(() => {
+    clipLoading = false;
+    if (clipQueued) { clipQueued = false; loadClips(); }
+  });
 }
 
 listen("clip", (e) => {
-  if (e.payload) { clipPop = Date.now(); renderPill(); }
+  if (e.payload) {
+    clipPop = Date.now();
+    pillLast = "";
+    renderPill();
+    clearTimeout(clipPopTimer);
+    clipPopTimer = setTimeout(() => { clipPop = 0; pillLast = ""; renderPill(); }, 950);
+  }
   loadClips();
 });
 
@@ -1528,21 +1723,36 @@ const clipSize = (it) => it.kind === "image" ? `${it.w}×${it.h}` : tr("{0} 字"
 function clipRowHtml(it) {
   const app = it.appPath ? `<span class="clip-app">${iconHtml({ path: it.appPath, name: it.app })}<span>${esc(it.app.replace(/\.exe$/i, ""))}</span></span>` : "";
   const body = it.kind === "image"
-    ? `<div class="clip-pic"><img src="${it.thumb}" alt=""></div>`
+    ? `<div class="clip-pic"><img src="${esc(it.thumb)}" alt=""></div>`
     : `<div class="clip-text">${esc(it.preview)}${it.more ? "…" : ""}</div>`;
-  return `<div class="clip-row${it.pinned ? " pinned" : ""}" data-cid="${it.id}" title="${tr("点一下复制回剪贴板")}">
+  const copied = it.id === clipCopiedId && Date.now() < clipCopiedUntil ? " copied" : "";
+  return `<div class="clip-row${it.pinned ? " pinned" : ""}${copied}" data-cid="${it.id}" tabindex="0" title="${esc(tr("点一下复制回剪贴板"))}">
     ${body}
     <div class="clip-meta">${app}<span>${esc(ago(it.at))}</span><span class="mono">${esc(clipSize(it))}</span></div>
     <span class="clip-btns">
-      <button class="clip-b${it.pinned ? " on" : ""}" data-cpin="${it.id}" title="${it.pinned ? tr("取消置顶") : tr("置顶（不会被自动删除）")}" aria-label="${it.pinned ? tr("取消置顶") : tr("置顶")}"><svg width="13" height="13" viewBox="0 0 24 24" fill="${it.pinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${PIN_ICON}"/></svg></button>
-      <button class="clip-b" data-cdel="${it.id}" title="${tr("删除")}" aria-label="${tr("删除")}">✕</button>
+      <button class="clip-b${it.pinned ? " on" : ""}" data-cpin="${it.id}" title="${esc(it.pinned ? tr("取消置顶") : tr("置顶（不会被自动删除）"))}" aria-label="${esc(it.pinned ? tr("取消置顶") : tr("置顶"))}"><svg width="13" height="13" viewBox="0 0 24 24" fill="${it.pinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${PIN_ICON}"/></svg></button>
+      <button class="clip-b" data-cdel="${it.id}" title="${esc(tr("删除"))}" aria-label="${esc(tr("删除"))}">✕</button>
     </span>
   </div>`;
 }
 
+function clipFiltered() {
+  const q = clipQuery.trim().toLowerCase();
+  const backendMatched = !!(q && clipLoadedQuery === q);
+  return (clipItems || []).filter((it) => !q || backendMatched || (it.kind === "text" && it.preview.toLowerCase().includes(q)) || it.app.toLowerCase().includes(q));
+}
+
+function syncClipCount() {
+  const sel = document.querySelector("#list .clip .viz-sel");
+  if (!sel || !clipItems) return;
+  const hasQ = !!clipQuery.trim();
+  const n = hasQ ? clipFiltered().length : clipItems.length;
+  sel.textContent = n || hasQ ? tr("{0} 条记录", n) : tr("剪贴板");
+}
+
 function clipRowsHtml() {
   const q = clipQuery.trim().toLowerCase();
-  const list = (clipItems || []).filter((it) => !q || (it.kind === "text" && it.preview.toLowerCase().includes(q)) || it.app.toLowerCase().includes(q));
+  const list = clipFiltered();
   if (!list.length) return `<div class="nc-empty"><div class="nc-e1">${q ? tr("没有找到") : tr("还没有复制过东西")}</div></div>`;
   const pinned = list.filter((it) => it.pinned);
   const rest = list.filter((it) => !it.pinned);
@@ -1557,9 +1767,11 @@ function clipPageHtml() {
   const days = Number(sget("clip.days", 7)) || 0;
   const keep = days ? tr("保留 {0} 天、最多 {1} 条", days, sget("clip.max", 200)) : tr("最多 {0} 条", sget("clip.max", 200));
   const where = sget("clip.store", "disk") === "memory" ? tr("只在内存") : tr("加密保存在本机");
+  const hasQ = !!clipQuery.trim();
+  const shownCount = hasQ ? clipFiltered().length : clipItems.length;
   return `<div class="viz clip">
-    <div class="viz-head"><span class="viz-sel">${clipItems.length ? tr("{0} 条记录", clipItems.length) : tr("剪贴板")}</span>
-      <input class="clip-q" type="text" placeholder="${tr("搜索")}" spellcheck="false" value="${esc(clipQuery)}"><span class="sp"></span>
+    <div class="viz-head"><span class="viz-sel">${shownCount || hasQ ? tr("{0} 条记录", shownCount) : tr("剪贴板")}</span>
+      <span class="clip-q-wrap"><input class="clip-q" type="text" placeholder="${esc(tr("搜索"))}" spellcheck="false" value="${esc(clipQuery)}"><button class="clip-q-x" type="button" data-do="clip-q-clear" ${clipQuery ? "" : "hidden"} title="${esc(tr("清空"))}" aria-label="${esc(tr("清空"))}">✕</button></span><span class="sp"></span>
       ${clipItems.some((it) => !it.pinned) ? `<button class="ghost" data-do="clip-clear">${tr("清空")}</button>` : ""}</div>
     <div class="clip-list">${clipRowsHtml()}</div>
     <div class="m-hint">${tr("点一条复制回剪贴板。{0}，置顶的不会被删；{1}。", keep, where)}</div></div>`;
@@ -1568,11 +1780,42 @@ function clipPageHtml() {
 // rebuild only when the history changed (or once a minute for the "x 分钟前")
 const clipStale = () => clipShown !== clipVer || Date.now() - clipShownAt > 60_000;
 
+function markCopiedEl(el) {
+  if (!el) return;
+  el.classList.remove("copied");
+  void el.offsetWidth;
+  el.classList.add("copied");
+  clearTimeout(el._cpT);
+  el._cpT = setTimeout(() => el.classList.remove("copied"), 650);
+}
+
+function copyText(text, pulseEl = null) {
+  if (!text) return;
+  const done = () => {
+    if (pulseEl) markCopiedEl(pulseEl);
+    toast(`${tr("已复制")} ${text}`);
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => toast(tr("没能放进剪贴板"), true));
+  }
+}
+
 function clipClick(e) {
   const pin = e.target.closest("[data-cpin]");
   if (pin) {
     const it = clipItems?.find((x) => x.id === Number(pin.dataset.cpin));
-    if (it) invoke("clip_pin", { id: it.id, on: !it.pinned }).catch((err) => toast(String(err), true));
+    if (it) {
+      const prev = !!it.pinned;
+      it.pinned = !prev;
+      clipVer++;
+      renderList(true);
+      invoke("clip_pin", { id: it.id, on: !prev }).catch((err) => {
+        it.pinned = prev;
+        clipVer++;
+        renderList(true);
+        toast(String(err), true);
+      });
+    }
     return true;
   }
   const del = e.target.closest("[data-cdel]");
@@ -1586,21 +1829,40 @@ function clipClick(e) {
   }
   const row = e.target.closest("#list [data-cid]");
   if (row) {
-    invoke("clip_copy", { id: Number(row.dataset.cid) }).then(() => {
-      row.classList.add("copied");
+    const cid = Number(row.dataset.cid);
+    clipCopiedId = cid;
+    clipCopiedUntil = Date.now() + 650;
+    markCopiedEl(row);
+    invoke("clip_copy", { id: cid }).then(() => {
+      markCopiedEl(document.querySelector(`#list [data-cid="${cid}"]`));
       toast(tr("已复制"));
-    }).catch((err) => toast(String(err), true));
+    }).catch((err) => {
+      clipCopiedId = 0;
+      clipCopiedUntil = 0;
+      row.classList.remove("copied");
+      toast(String(err), true);
+    });
     return true;
   }
   return false;
 }
 
-// typing in the search box filters the rows only (the box keeps its focus)
+$("list").addEventListener("animationend", (e) => {
+  if (e.animationName === "clip-copied") e.target.classList.remove("copied");
+});
+
+// typing in the search box filters the rows immediately and queries backend full-text search
 document.addEventListener("input", (e) => {
   if (!e.target.classList?.contains("clip-q")) return;
   clipQuery = e.target.value;
+  const clr = e.target.parentElement?.querySelector(".clip-q-x");
+  if (clr) clr.hidden = !clipQuery.length;
   const box = document.querySelector("#list .clip-list");
   if (box) box.innerHTML = clipRowsHtml();
+  syncClipCount();
+  measurePanel();
+  clearTimeout(clipSearchTimer);
+  clipSearchTimer = setTimeout(loadClips, 120);
 });
 
 // mute / unmute a program's notes; muting also marks what is already there read (no red dot)
@@ -1739,12 +2001,12 @@ function exitCard(title, r, opts = {}) {
   const same = opts.sameAs && r.ip && opts.sameAs === r.ip ? `<span class="same">${tr("· 与直连相同")}</span>` : "";
   return `<div class="exit-card${opts.direct ? " direct" : ""}">
     <div class="label">${esc(title)} ${r.ip ? kindTag(r) : ""} ${same}</div>
-    ${r.ip ? `<div class="ip mono" title="${esc(ipTip(r))}">${flagImg(r.cc)}${esc(r.ip)}</div>` : `<div class="ip mono">—</div>`}
+    ${r.ip ? `<div class="ip mono copyable" data-copy="${esc(r.ip)}" title="${esc(ipTip(r))}">${flagImg(r.cc)}${esc(r.ip)}</div>` : `<div class="ip mono">—</div>`}
     ${geo ? `<div class="meta" title="${esc(ipTip(r))}">${esc(geo)}</div>` : ""}
     ${route}
     ${hostLine(r)}
     ${r.error ? `<div class="error">${esc(r.error)}</div>` : ""}
-    ${opts.when ? `<div class="ex-when">${opts.checking ? tr("检测中…") : `${tr("{0}检测", esc(opts.when))}`}</div>` : ""}
+    ${opts.when ? `<div class="ex-when" data-ex-when="1">${opts.checking ? tr("检测中…") : `${tr("{0}检测", esc(opts.when))}`}</div>` : ""}
   </div>`;
 }
 
@@ -1782,7 +2044,7 @@ function groupExitCard(groups) {
     const key = x.ip || "err";
     // row 1: IP + tags, the groups on the right; row 2: node · region · who
     return `<div class="gx-row">
-      <div class="gx-ip mono" title="${esc(ipTip(x))}">${x.ip ? `<span class="ip-t">${flagImg(x.cc)}${esc(x.ip)}</span>${kindTag(x)}` : `<span class="crit">${esc(x.error ? tr("检测失败") : "—")}</span>`}</div>
+      <div class="gx-ip mono" title="${esc(ipTip(x))}">${x.ip ? `<span class="ip-t copyable" data-copy="${esc(x.ip)}">${flagImg(x.cc)}${esc(x.ip)}</span>${kindTag(x)}` : `<span class="crit">${esc(x.error ? tr("检测失败") : "—")}</span>`}</div>
       <div class="gx-groups${gxOpen.has(key) ? " open" : ""}" data-gx="${esc(key)}">${chips}</div>
       <div class="gx-meta" title="${esc(ipTip(x))}">${x.nodes.map(decorate).join(tr("、"))}${org ? `${x.nodes.length ? " · " : ""}${esc(org)}` : ""}</div>
     </div>`;
@@ -1806,11 +2068,13 @@ function foldChips() {
 // returns false when not even one chip + "+N" fits on the line
 function foldBox(box) {
   {
+    const hadFocus = kbActive && box.contains(document.activeElement);
     box.querySelector(".gx-more")?.remove();
     const chips = [...box.querySelectorAll(".gx-chip")];
     chips.forEach((c) => (c.hidden = false));
     if (box.classList.contains("open")) {
-      if (chips.length > 1) box.insertAdjacentHTML("beforeend", `<span class="gx-chip gx-more" title="${tr("收起")}">${tr("收起")}</span>`);
+      if (chips.length > 1) box.insertAdjacentHTML("beforeend", `<span class="gx-chip gx-more" tabindex="0" role="button" title="${esc(tr("收起"))}">${tr("收起")}</span>`);
+      if (hadFocus) box.querySelector(".gx-more")?.focus({ preventScroll: true });
       return true;
     }
     // the line doesn't wrap: a chip is out when its right edge passes the box's
@@ -1820,6 +2084,8 @@ function foldBox(box) {
     if (!over.length) return true;
     const more = document.createElement("span");
     more.className = "gx-chip gx-more";
+    more.tabIndex = 0;
+    more.setAttribute("role", "button");
     box.appendChild(more);
     // hide from the end until the "+N" chip fits on the line too
     let hidden = over.length;
@@ -1831,6 +2097,7 @@ function foldBox(box) {
       more.textContent = `+${++hidden}`;
     }
     more.title = tr("还有：") + chips.filter((c) => c.hidden).map((c) => c.dataset.gname).join(tr("、")) + tr("（点开看全部）");
+    if (hadFocus) more.focus({ preventScroll: true });
     return !out(more);
   }
 }
@@ -1842,12 +2109,19 @@ function mainExit(ex, detected) {
   return d && (d.ip || d.error) ? d : ex?.proxy;
 }
 
+let exitRowLast = "";
+const normExitHtml = (s) => s
+  .replace(/(<div class="ex-when" data-ex-when="1">)[^<]*(<\/div>)/g, "$1#$2")
+  .replace(/(id="refresh"[^>]*title=")[^"]*(")/g, "$1#$2");
+
 function renderExit() {
+  if (MANAGER) return;
   const p = snap?.proxy;
   const ex = exitState || {};
   let html = "";
   const spin = ex.checking ? "spin" : "";
   const when = ex.lastCheck ? ago(ex.lastCheck) : "";
+  const refTitle = tr("重新检测出口 IP{0}", when ? tr("（上次 ") + when + tr("）") : "");
   if (p?.detected && ex.groups?.length) {
     html += groupExitCard(ex.groups);
     html += exitCard(tr("直连出口"), ex.direct, { checking: ex.checking, direct: true, when });
@@ -1858,12 +2132,23 @@ function renderExit() {
     html += exitCard(tr("出口 IP（未检测到代理）"), ex.direct, { checking: ex.checking, direct: true, when });
   }
   html = `<div class="exit-wrap">${html}
-    <button id="diag-btn" class="${diag.problem ? "hot" : ""}" style="${livePhase()}" data-do="diag-open" title="${tr("网络诊断：从网卡一路查到节点")}">${svgI(DG_PATH.pulse, 13, 2.4)}</button>
-    <button id="refresh" class="${spin}" title="${tr("重新检测出口 IP{0}", when ? tr("（上次 ") + when + tr("）") : "")}">
+    <button id="diag-btn" class="${diag.problem ? "hot" : ""}" data-do="diag-open" title="${esc(tr("网络诊断：从网卡一路查到节点"))}">${svgI(DG_PATH.pulse, 13, 2.4)}</button>
+    <button id="refresh" class="${spin}" title="${esc(refTitle)}">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
     </button></div>`;
-  $("exit-row").innerHTML = html;
-  foldChips();
+  const rowEl = $("exit-row");
+  const norm = normExitHtml(html);
+  if (norm !== exitRowLast || !rowEl.firstElementChild) {
+    exitRowLast = norm;
+    if (diag.problem) setLivePhase(rowEl);
+    rowEl.innerHTML = html;
+    foldChips();
+  } else {
+    const whenText = ex.checking ? tr("检测中…") : when ? tr("{0}检测", when) : "";
+    rowEl.querySelectorAll("[data-ex-when]").forEach((el) => { if (el.textContent !== whenText) el.textContent = whenText; });
+    const refBtn = $("refresh");
+    if (refBtn && refBtn.title !== refTitle) refBtn.title = refTitle;
+  }
 }
 
 function renderProxyLine() {
@@ -1881,7 +2166,9 @@ function renderProxyLine() {
       else if (p.mihomoError) parts.push(`${tr("控制接口")} <span class="bad">${esc(p.mihomoError)}</span>`);
     }
   }
-  $("proxy-line").innerHTML = parts.map((x) => `<span>${x}</span>`).join("");
+  const html = parts.map((x) => `<span>${x}</span>`).join("");
+  const el = $("proxy-line");
+  if (el._last !== html) { el._last = html; el.innerHTML = html; }
 }
 
 function matches(app, c) {
@@ -1897,7 +2184,10 @@ function matches(app, c) {
 // ---------- exit control helpers ----------
 
 const TARGET_LABEL = { proxy: tr("代理"), direct: tr("直连"), reject: tr("拦截") };
-let refs = []; // [app, conn] per rendered connection row, for the ⋯ menu
+let refs = []; // legacy fallback
+const connRefs = new Map(); // "${appKey}\n${ckey}" -> [app, conn], for the ⋯ menu
+const busyActions = new Set(); // in-flight async action ids
+let switchingNode = null; // optimistic pending node name in rules tab
 let menuState = null;
 let nodesCache = null;
 let confirmDisable = false;
@@ -1957,8 +2247,11 @@ function openMenu(anchor, html) {
   const mw = menu.offsetWidth, mh = menu.offsetHeight;
   let left = ar.right - pr.left - mw;
   let top = ar.bottom - pr.top + 4;
-  if (top + mh > pr.height - 6) top = Math.max(6, ar.top - pr.top - mh - 4);
-  menu.style.left = Math.max(6, left) + "px";
+  if (top + mh > pr.height - 8) {
+    const above = ar.top - pr.top - mh - 4;
+    top = above >= 8 ? above : Math.max(8, pr.height - mh - 8);
+  }
+  menu.style.left = Math.max(8, Math.min(pr.width - mw - 8, left)) + "px";
   menu.style.top = top + "px";
 }
 
@@ -1992,8 +2285,18 @@ function appMenu(app) {
     <div class="m-hint">${tr("再点一次已选中的按钮 = 恢复按规则")}</div>`;
 }
 
+const COPY_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+
+function connCopyHtml(c) {
+  const btns = [];
+  if (c.host) btns.push(`<button class="m-cp" data-copy="${esc(c.host)}" title="${esc(tr("复制 {0}", c.host))}">${COPY_SVG}<span>${esc(c.host)}</span></button>`);
+  if (c.remote && c.remote !== c.host) btns.push(`<button class="m-cp mono" data-copy="${esc(c.remote)}" title="${esc(tr("复制 {0}", c.remote))}">${COPY_SVG}<span>${esc(c.remote)}</span></button>`);
+  return btns.length ? `<div class="m-row m-copy">${btns.join("")}</div>` : "";
+}
+
 function connMenu(app, c) {
-  if (ctrl().status !== "active") return `<div class="m-title">${esc(c.host || c.remote || "")}</div>${setupPrompt()}`;
+  const cp = connCopyHtml(c);
+  if (ctrl().status !== "active") return `<div class="m-title">${esc(c.host || c.remote || "")}</div>${setupPrompt()}${cp}`;
   const rows = [];
   if (c.host) {
     const md = mainDomain(c.host);
@@ -2004,7 +2307,7 @@ function connMenu(app, c) {
     rows.push(targetRow(`IP <b class="mono">${esc(c.remote)}</b>`, "ip", null, c.remote));
     rows.push(targetRow(`${tr("仅")} <b>${esc(app.exe)}</b> ${tr("访问这个 IP")}`, "process_ip", app.exe, c.remote));
   }
-  return `<div class="m-title">${tr("这条连接走哪个出口")}</div>${rows.join("")}<div class="m-hint">${tr("再点一次已选中的按钮 = 恢复按规则")}</div>`;
+  return `<div class="m-title">${tr("这条连接走哪个出口")}</div>${rows.join("")}<div class="m-hint">${tr("再点一次已选中的按钮 = 恢复按规则")}</div>${cp}`;
 }
 
 function exitChip(app) {
@@ -2014,25 +2317,28 @@ function exitChip(app) {
   if (app.isProxy) return `<span class="exit-chip ph" aria-hidden="true">${tr("出口")}</span>`;
   const r = findRule("process", app.exe, null);
   const t = r ? r.target : "";
-  return `<button class="exit-chip ${t ? "t-" + t : ""}" data-chip="${esc(app.key)}" title="${tr("选择这个程序的出口")}">${t ? TARGET_LABEL[t] : tr("出口")}</button>`;
+  return `<button class="exit-chip ${t ? "t-" + t : ""}" data-chip="${esc(app.key)}" title="${esc(tr("选择这个程序的出口"))}">${t ? TARGET_LABEL[t] : tr("出口")}</button>`;
 }
 
 function rulesTabHtml() {
   const c = ctrl();
   if (c.status !== "active") return `<div class="rules-setup">${setupPrompt()}</div>`;
+  const testing = busyActions.has("test");
+  const loadingNodes = busyActions.has("nodes");
   const nodeList = nodesCache
     ? `<div class="node-list">${nodesCache.nodes.map((n) => {
-        const d = n.delay ? `<span class="delay ${n.delay < 200 ? "good" : n.delay < 500 ? "mid" : "bad"}">${n.delay} ms</span>` : `<span class="delay">—</span>`;
-        return `<div class="node-item ${n.name === nodesCache.now ? "now" : ""}" data-node="${esc(n.name)}"><span>${decorate(n.name)}</span>${d}</div>`;
+        const d = n.delay ? `<span class="delay ${n.delay < 200 ? "good" : n.delay < 500 ? "mid" : "bad"}">${n.delay} ms</span>` : `<span class="delay">${testing ? "…" : "—"}</span>`;
+        return `<div class="node-item ${n.name === nodesCache.now ? "now" : ""}${switchingNode === n.name ? " switching" : ""}" data-node="${esc(n.name)}" tabindex="0" title="${esc(noFlags(n.name))}"><span class="node-name">${decorate(n.name)}</span>${d}</div>`;
       }).join("")}</div>`
     : "";
   const rules = c.rules.length
-    ? c.rules.slice().reverse().map((r) => `<div class="rule"><span class="rule-t t-${r.target}">${TARGET_LABEL[r.target]}</span><span class="rule-d">${ruleText(r)}</span><button class="rule-x" data-rm="${esc(r.id)}" title="${tr("删除")}">✕</button></div>`).join("")
+    ? c.rules.slice().reverse().map((r) => `<div class="rule"><span class="rule-t t-${r.target}">${TARGET_LABEL[r.target]}</span><span class="rule-d">${ruleText(r)}</span><button class="rule-x" data-rm="${esc(r.id)}" title="${esc(tr("删除"))}">✕</button></div>`).join("")
     : `<div class="empty">${tr("还没有出口规则。在「连接」页点程序右边的「出口」或连接右边的「⋯」来添加。")}</div>`;
+  const shownNode = switchingNode || c.node;
   return `<div class="node-bar">
-      <span>${tr("「代理」使用节点")}</span><b class="node-now">${c.node ? decorate(c.node) : "—"}</b>
-      <button data-do="nodes">${nodesCache ? tr("收起") : tr("换节点")}</button>
-      ${nodesCache ? `<button data-do="test">${tr("测速")}</button>` : ""}
+      <span>${tr("「代理」使用节点")}</span><b class="node-now${switchingNode ? " switching" : ""}">${shownNode ? decorate(shownNode) : "—"}</b>
+      <button class="${loadingNodes ? "is-busy" : ""}" data-do="nodes" ${loadingNodes ? "disabled" : ""}>${nodesCache ? tr("收起") : tr("换节点")}</button>
+      ${nodesCache ? `<button class="${testing ? "is-busy" : ""}" data-do="test" ${testing ? "disabled" : ""}>${testing ? tr("测速中…") : tr("测速")}</button>` : ""}
     </div>${nodeList}
     <div class="rules">${rules}</div>
     <div class="m-actions end"><button class="${confirmDisable ? "danger" : "ghost"}" data-do="disable">${confirmDisable ? tr("再点一次：移除覆写并重启 Clash Party（代理会断开几秒）") : tr("停用出口控制")}</button></div>`;
@@ -2141,9 +2447,14 @@ function speedRead(i) {
 }
 Charts.onScrub("speed", (i) => speedRead(i));
 
-function speedTabHtml() {
+const speedOrder = { order: null, last: new Map() };
+
+function reconcileSpeed(list) {
   const n = Math.min(speedRange, speedHist.t.length);
-  if (n < 2) return `<div class="empty">${tr("正在收集网速数据…")}</div>`;
+  if (n < 2) {
+    if (!list.querySelector(".empty")) list.innerHTML = `<div id="list-inner"><div class="empty">${tr("正在收集网速数据…")}</div></div>`;
+    return;
+  }
   const src = speedApp ? appHist.get(speedApp) : null;
   if (speedApp && !src) speedApp = null;
   const xs = speedHist.t.slice(-n);
@@ -2151,39 +2462,119 @@ function speedTabHtml() {
   const down = (src ? src.down : speedHist.down).slice(-n);
   speedView = { xs, up, down };
   const chart = Charts.line({
-    id: "speed", width: chartW() - 28, height: 140, xs,
+    id: "speed", width: Math.max(280, chartW() - 28), height: 140, xs,
     series: [{ name: tr("下载"), cls: "s1", values: down }, { name: tr("上传"), cls: "s2", values: up }],
     fmtY: (v) => fmtRate(v), fmtTick: tickRate, fmtX: hms, binary: true, area: true, scrub: true, slide: true,
+    slideMs: sget("general.profile", "balanced") === "saver" ? 2000 : 1000,
   });
   const peakD = Math.max(...down, 0), peakU = Math.max(...up, 0);
-  const apps = [...appHist.entries()]
+  const rawApps = [...appHist.entries()]
     .map(([key, h]) => ({ key, ...h, cur: (h.up[h.up.length - 1] || 0) + (h.down[h.down.length - 1] || 0), sum: h.up.slice(-n).reduce((a, b) => a + b, 0) + h.down.slice(-n).reduce((a, b) => a + b, 0) }))
     .filter((a) => a.sum > 0)
     .sort((a, b) => b.cur - a.cur || b.sum - a.sum)
     .slice(0, 15);
-  const rows = apps.map((a) => {
-    const series = a.up.slice(-n).map((u, i) => u + a.down.slice(-n)[i]);
-    return `<div class="sp-row ${a.key === speedApp ? "sel" : ""} ${a.key === sheetApp ? "open" : ""}" data-sheet-app="${esc(a.key)}" tabindex="0" title="${tr("点一下看详情")}">
-      ${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span>${Charts.spark(series, 110, 24, "s1", true)}
-      <span class="speed mono">${speedHtml(a.up[a.up.length - 1], a.down[a.down.length - 1])}</span><span class="chev">›</span></div>`;
-  }).join("");
+  const rowsElNow = list.querySelector(".sp-rows");
+  const hold = !!(rowsElNow?.matches(":hover") || sheetApp);
+  let apps;
+  if (!hold) {
+    speedOrder.order = null;
+    speedOrder.last = new Map(rawApps.map((a) => [a.key, a]));
+    apps = rawApps;
+  } else {
+    const curMap = new Map(rawApps.map((a) => [a.key, a]));
+    if (!speedOrder.order) speedOrder.order = rawApps.map((a) => a.key);
+    const known = new Set(speedOrder.order);
+    for (const k of curMap.keys()) if (!known.has(k)) speedOrder.order.push(k);
+    apps = [];
+    for (const k of speedOrder.order) {
+      if (curMap.has(k)) apps.push(curMap.get(k));
+      else if (appHist.has(k)) {
+        const h = appHist.get(k);
+        apps.push({ key: k, ...h, cur: 0, sum: 0 });
+      }
+    }
+  }
   const range = { 60: tr("1 分钟"), 120: tr("2 分钟"), 300: tr("5 分钟") }[speedRange] || "";
-  return `<div class="viz sp-viz">
-    <div class="viz-head">${segmented("srange", speedRange, [[60, tr("1 分钟")], [120, tr("2 分钟")], [300, tr("5 分钟")]])}
-      <span class="viz-sel">${src ? `${tr("只看")} <b>${esc(src.name)}</b> <button data-sapp="">${tr("✕ 看全部")}</button>` : tr("全部程序")}</span></div>
-    <div class="hero-wrap"><i class="hero-glow"></i>
-      <div class="sp-hero glow-card">
-        <div class="sp-read">
-          <div class="sp-num"><span class="sp-k"><i class="key s1"></i>${tr("下载")}</span>${Odo.slot("sp-down", "big")}</div>
-          <div class="sp-num"><span class="sp-k"><i class="key s2"></i>${tr("上传")}</span>${Odo.slot("sp-up", "big")}</div>
-          <div class="sp-when"><span class="sp-when-t">${tr("现在")}</span><span class="sp-peak">${tr("{0}峰值 ↓{1} · ↑{2}", range, esc(fmtRate(peakD) || "0"), esc(fmtRate(peakU) || "0"))}</span></div>
+  const selHtml = src ? `${tr("只看")} <b>${esc(src.name)}</b> <button data-sapp="">${tr("✕ 看全部")}</button>` : tr("全部程序");
+  const peakText = tr("{0}峰值 ↓{1} · ↑{2}", range, fmtRate(peakD) || "0", fmtRate(peakU) || "0");
+
+  let inner = $("list-inner");
+  if (!inner || inner.dataset.view !== "speed") {
+    list.innerHTML = `<div id="list-inner" data-view="speed"><div class="viz sp-viz">
+      <div class="viz-head">${segmented("srange", speedRange, [[60, tr("1 分钟")], [120, tr("2 分钟")], [300, tr("5 分钟")]])}
+        <span class="viz-sel">${selHtml}</span></div>
+      <div class="hero-wrap"><i class="hero-glow"></i>
+        <div class="sp-hero glow-card">
+          <div class="sp-read">
+            <div class="sp-num"><span class="sp-k"><i class="key s1"></i>${tr("下载")}</span>${Odo.slot("sp-down", "big")}</div>
+            <div class="sp-num"><span class="sp-k"><i class="key s2"></i>${tr("上传")}</span>${Odo.slot("sp-up", "big")}</div>
+            <div class="sp-when"><span class="sp-when-t">${tr("现在")}</span><span class="sp-peak">${esc(peakText)}</span></div>
+          </div>
+          <div id="sp-chart-box">${chart}</div>
         </div>
-        ${chart}
       </div>
-    </div>
-    <div class="g-head">${tr("按程序")}<span class="g-note">${tr("点一下看详情")}</span></div>
-    <div class="sp-rows cascade-items">${rows || `<div class="empty">${tr("这段时间没有程序在传数据")}</div>`}</div>
-  </div>`;
+      <div class="g-head">${tr("按程序")}<span class="g-note">${tr("点一下看详情")}</span></div>
+      <div class="sp-rows cascade-items"></div>
+    </div></div>`;
+    inner = $("list-inner");
+    inner._sel = selHtml;
+    inner._peak = peakText;
+    inner._range = speedRange;
+  } else {
+    if (inner._range !== speedRange) {
+      inner._range = speedRange;
+      inner.querySelectorAll('[data-seg="srange"]').forEach((b) => b.classList.toggle("on", Number(b.dataset.val) === speedRange));
+    }
+    if (inner._sel !== selHtml) {
+      inner._sel = selHtml;
+      inner.querySelector(".viz-sel").innerHTML = selHtml;
+    }
+    if (inner._peak !== peakText) {
+      inner._peak = peakText;
+      inner.querySelector(".sp-peak").textContent = peakText;
+    }
+    const cbox = $("sp-chart-box");
+    if (cbox) cbox.innerHTML = chart;
+  }
+
+  const rowsBox = inner.querySelector(".sp-rows");
+  if (!apps.length) {
+    if (!rowsBox.querySelector(".empty")) rowsBox.innerHTML = `<div class="empty">${tr("这段时间没有程序在传数据")}</div>`;
+    return;
+  }
+  rowsBox.querySelector(":scope > .empty")?.remove();
+  const existing = new Map();
+  for (const ch of rowsBox.children) if (ch.dataset.sheetApp) existing.set(ch.dataset.sheetApp, ch);
+  const seen = new Set();
+  let cursor = rowsBox.firstElementChild;
+  for (const a of apps) {
+    seen.add(a.key);
+    const series = a.up.slice(-n).map((u, i) => u + a.down.slice(-n)[i]);
+    const sparkHtml = Charts.spark(series, 110, 24, "s1", true);
+    const spdHtml = speedHtml(a.up[a.up.length - 1], a.down[a.down.length - 1]);
+    const iconKey = `${a.icon || a.path || ""}|${icons.get(a.icon || a.path) || ""}|${a.name || a.exe || ""}`;
+    let row = existing.get(a.key);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "sp-row";
+      row.dataset.sheetApp = a.key;
+      row.tabIndex = 0;
+      row.title = tr("点一下看详情");
+      row.innerHTML = `${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span><span class="spark-slot">${sparkHtml}</span><span class="speed mono">${spdHtml}</span><span class="chev">›</span>`;
+      row._ic = iconKey;
+      row._spk = sparkHtml;
+      row._spd = spdHtml;
+    } else {
+      if (row._ic !== iconKey) { row._ic = iconKey; row.querySelector(".app-icon").outerHTML = iconHtml(a); }
+      if (row._spk !== sparkHtml) { row._spk = sparkHtml; row.querySelector(".spark-slot").innerHTML = sparkHtml; }
+      if (row._spd !== spdHtml) { row._spd = spdHtml; row.querySelector(".speed").innerHTML = spdHtml; }
+    }
+    row.classList.toggle("sel", a.key === speedApp);
+    row.classList.toggle("open", a.key === sheetApp);
+    if (row !== cursor) rowsBox.insertBefore(row, cursor);
+    else cursor = cursor.nextElementSibling;
+  }
+  for (const [k, el] of existing) if (!seen.has(k)) el.remove();
 }
 
 // ---------- one program's details (bottom sheet over the speed page) ----------
@@ -2201,7 +2592,7 @@ function appSheetHtml(key) {
   const range = { 60: tr("1 分钟"), 120: tr("2 分钟"), 300: tr("5 分钟") }[speedRange] || tr("这段时间");
   const stat = (k, v) => `<div class="as-stat"><span>${k}</span><b>${v}</b></div>`;
   return `<div class="as-head" data-sheet-drag>${iconHtml(h)}<div class="as-title"><b>${esc(h.name)}</b><span>${esc(h.path || h.exe || "")}</span></div>
-      <button class="ghost" data-sheet-do="close" title="${tr("关闭（Esc）")}">✕</button></div>
+      <button class="ghost" data-sheet-do="close" title="${esc(tr("关闭（Esc）"))}">✕</button></div>
     <div class="as-read">
       <div class="sp-num"><span class="sp-k"><i class="key s1"></i>${tr("下载")}</span>${Odo.slot("as-down", "big")}</div>
       <div class="sp-num"><span class="sp-k"><i class="key s2"></i>${tr("上传")}</span>${Odo.slot("as-up", "big")}</div>
@@ -2255,6 +2646,7 @@ function openAppSheet(key) {
         switchTab("conns");
         $("search").value = name;
         query = name;
+        syncSearchClear();
         renderList(true);
       }
     },
@@ -2284,12 +2676,13 @@ let trafficSort = "total";
 try { trafficSort = localStorage.getItem("mb-traffic-sort") || "total"; } catch { /* ignore */ }
 let trafficData = null;
 let trafficAt = 0;
+let trafficVer = 0;
 
 function loadTraffic(force) {
   if (!force && Date.now() - trafficAt < 10_000) return;
   trafficAt = Date.now();
   invoke("traffic_query", { days: trafficDays, day: trafficDays > 1 ? trafficDay : null })
-    .then((r) => { trafficData = r; if (tab === "traffic" || tab === "home") renderList(true); })
+    .then((r) => { trafficData = r; trafficVer++; if (tab === "traffic" || tab === "home") renderList(true); })
     .catch(() => {});
 }
 
@@ -2349,19 +2742,25 @@ function trafficTabHtml() {
 
 let latHist = [];
 let latAt = -1;
+let latVer = 0;
 let nodeRange = 120; // minutes
 
 function loadLatency() {
   const at = snap?.latency?.at || 0;
   if (at === latAt) return;
   latAt = at;
-  invoke("latency_history").then((h) => { latHist = h || []; if (tab === "nodes" || tab === "home") renderList(true); }).catch(() => {});
+  invoke("latency_history").then((h) => { latHist = h || []; latVer++; if (tab === "nodes" || tab === "home") renderList(true); }).catch(() => {});
 }
 
 // colour per node, kept for the session (colour follows the node, not its rank); four slots
 const nodeColor = new Map();
-function nodeCls(node) {
+function nodeCls(node, activeNames = null) {
   if (!nodeColor.has(node)) {
+    if (activeNames && nodeColor.size >= 4) {
+      for (const k of [...nodeColor.keys()]) {
+        if (!activeNames.has(k)) { nodeColor.delete(k); if (nodeColor.size < 4) break; }
+      }
+    }
     const used = new Set(nodeColor.values());
     const free = ["s1", "s2", "s3", "s4"].find((c) => !used.has(c));
     if (!free) return null;
@@ -2388,7 +2787,12 @@ function nodesTabHtml() {
   const lastAt = latHist.reduce((m, s) => Math.max(m, s.at), 0);
   const current = latHist.filter((s) => s.at === lastAt).map((s) => s.node);
   const pts = latHist.filter((s) => nodeRange >= 100000 || s.at > now - nodeRange * 60_000);
-  const nodes = [...new Set([...current, ...pts.map((s) => s.node)])].filter((n) => nodeCls(n));
+  const candidates = [...new Set([...current, ...pts.map((s) => s.node)])];
+  const activeSet = new Set(candidates.slice(0, 4));
+  if (nodeColor.size >= 4) {
+    for (const k of [...nodeColor.keys()]) if (!activeSet.has(k)) nodeColor.delete(k);
+  }
+  const nodes = candidates.filter((n) => nodeCls(n, activeSet));
   const hourOf = (n) => latHist.filter((s) => s.node === n && s.at > now - 3600_000);
   const main = latStats(hourOf(L?.node));
   const tile = (label, value, note = "") => `<div class="tile"><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
@@ -2428,10 +2832,11 @@ function nodesTabHtml() {
           <span class="mono">${st.loss != null ? `${st.loss}%` : "—"}</span></div>`;
       }).join("")}
     </div>` : "";
+  const probing = busyActions.has("lat-probe");
   return `<div class="viz">
     <div class="viz-head">${segmented("nrange", nodeRange, [[30, tr("30 分钟")], [120, tr("2 小时")], [100000, tr("全部")]])}
       <span class="viz-sel">${tr("各出口节点的延迟（{0} 秒测一次）", { saver: 60, balanced: 30, smooth: 15 }[sget("general.profile", "balanced")])}</span>
-      <button class="ghost" data-do="lat-probe">${tr("立即测速")}</button></div>
+      <button class="ghost${probing ? " is-busy" : ""}" data-do="lat-probe" ${probing ? "disabled" : ""}>${probing ? tr("测速中…") : tr("立即测速")}</button></div>
     ${tiles}${chart}${table}
     <div class="m-hint">${tr("每个分组正在用的节点都会测（最多 4 个）。✕ 表示那次测速没有响应。主出口（默认分组）无响应 / 延迟超过阈值时会在胶囊上提示（设置里可改）。")}</div></div>`;
 }
@@ -2522,9 +2927,10 @@ function aiTabHtml() {
   const list = aiState.length ? aiState.map((q) => aiCard(q, false)).join("") : `<div class="empty">${tr("正在查询…")}</div>`;
   const last = aiState.reduce((m, q) => Math.max(m, q.at || 0), 0);
   const via = [...new Set(aiState.filter((q) => q.via).map((q) => q.via))];
+  const refreshing = busyActions.has("ai-refresh");
   return `${live}<div class="viz">
     <div class="viz-head"><span class="viz-sel">${tr("订阅额度：用了多少、什么时候重置{0}{1}", last ? ` ${tr("· 更新于 {0}", ago(last))}` : "", via.length ? ` ${tr("· 经代理 127.0.0.1:{0}", via.join("/"))}` : "")}</span>
-      <button class="ghost" data-do="ai-refresh">${tr("立即刷新")}</button></div>
+      <button class="ghost${refreshing ? " is-busy" : ""}" data-do="ai-refresh" ${refreshing ? "disabled" : ""}>${refreshing ? tr("正在查询…") : tr("立即刷新")}</button></div>
     <div class="ai-grid">${list}</div>
     <div class="m-hint">${tr("用各工具在本机已登录的凭据向它自己的官方服务查询（Antigravity 读本机语言服务器），只读，凭据不保存、不发给其他地方； 查询一律经代理软件的本地端口发出，找不到端口就先不查，不会直连； 登录过期时请打开对应工具用一下，它会自己续期。每 {0} 分钟查一次（Claude 至少 10 分钟一次，点「立即刷新」也一样：官方接口限流很严，可能还和 Claude Code 自己共用）；结果会保存，重启 MicaBar 不会重新查。", sget("ai.interval", 10))}</div>
   </div>`;
@@ -2628,9 +3034,9 @@ function renderStartup() {
   const row = (i) => `<div class="sm-app su-row ${i.enabled ? "" : "off"}">
       ${iconHtml({ name: i.name, path: i.path })}
       <span class="sm-app-name" title="${esc(i.command)}">${esc(i.name)}<span class="sub">${i.desc ? esc(i.desc) + " · " : ""}${esc(i.source)}${i.missing ? ` · <span class="su-miss">${tr("程序文件已不存在")}</span>` : ""}</span></span>
-      <input type="checkbox" class="su-sw" data-su="${esc(i.id)}" ${i.enabled ? "checked" : ""} title="${i.enabled ? tr("开机自启：开") : tr("开机自启：关")}">
+      <input type="checkbox" class="su-sw" data-su="${esc(i.id)}" ${i.enabled ? "checked" : ""} title="${esc(i.enabled ? tr("开机自启：开") : tr("开机自启：关"))}">
     </div>`;
-  const mine = row({ id: "self", name: "MicaBar", desc: null, source: tr("计划任务 · 登录 10 秒后以管理员权限启动"), command: tr("设置 → 常规 → 开机自启"), path: appInfo?.exe || null, enabled: self, missing: false });
+  const mine = row({ id: "self", name: "MicaBar", desc: null, source: tr("计划任务 · 登录时以管理员权限启动"), command: tr("设置 → 常规 → 开机自启"), path: appInfo?.exe || null, enabled: self, missing: false });
   list.innerHTML = mine + startupItems.map(row).join("");
   measurePanel();
 }
@@ -2688,6 +3094,7 @@ function updateSys() {
     }
   });
   set("sm-name", d.cpuName ? ` · ${d.cpuName}` : "");
+  if ($("sm-name") && $("sm-name").title !== (d.cpuName || "")) $("sm-name").title = d.cpuName || "";
   set("sm-mem", d.memTotal ? `${GB(d.memUsed)} / ${GB(d.memTotal)} GB` : "–");
   $("sm-mem-bar").style.width = d.memTotal ? `${(d.memUsed / d.memTotal) * 100}%` : "0";
   const vr = d.vramTotal && d.vramUsed != null;
@@ -2717,7 +3124,7 @@ function updateSys() {
   list.innerHTML = rows.map((a) => `<div class="sm-app">
       ${iconHtml(a)}<span class="sm-app-name">${esc(a.name)}${a.procs > 1 ? `<span class="sub">${tr("{0} 个进程", a.procs)}</span>` : ""}</span>
       <span class="mono sm-num ${sysSort === "cpu" ? "on" : ""}">${a.cpu.toFixed(1)}%</span><span class="mono sm-num ${sysSort === "mem" ? "on" : ""}">${fmtMem(a.mem)}</span>
-      ${a.killable ? `<button class="sm-end" data-do="proc-end" data-name="${esc(a.name)}" data-n="${a.procs}" title="${tr("结束 {0}", esc(a.name))}">✕</button>` : `<span></span>`}
+      ${a.killable ? `<button class="sm-end" data-do="proc-end" data-name="${esc(a.name)}" data-n="${a.procs}" title="${esc(tr("结束 {0}", a.name))}">✕</button>` : `<span></span>`}
     </div>`).join("") || `<div class="empty">${tr("正在读取…")}</div>`;
   measurePanel();
 }
@@ -2739,8 +3146,8 @@ function musicPageHtml() {
   const cover = m.cover && sget("media.cover", true) ? m.cover : null;
   const pos = mediaPos(m);
   return `<div class="music" id="music">
-    ${cover ? `<div class="mu-bg" style="background-image:url('${cover}')"></div>` : ""}
-    ${cover ? `<img class="mu-cover" src="${cover}" alt="">` : `<div class="mu-cover none">♪</div>`}
+    ${cover ? `<div class="mu-bg" style="background-image:url('${safeCssUrl(cover)}')"></div>` : ""}
+    ${cover ? `<img class="mu-cover" src="${esc(cover)}" alt="">` : `<div class="mu-cover none">♪</div>`}
     <div class="mu-info">
       <div class="mu-title">${esc(m.title)}</div>
       <div class="mu-artist">${esc([m.artist, m.album].filter(Boolean).join(" · "))}</div>
@@ -2748,22 +3155,35 @@ function musicPageHtml() {
       ${m.duration > 0 ? `<div class="mu-bar"><i id="mu-fill" style="width:${(pos / m.duration) * 100}%"></i></div>
         <div class="mu-time mono"><span id="mu-pos">${mmss(pos)}</span><span>${mmss(m.duration)}</span></div>` : ""}
       <div class="mu-ctl">
-        <button data-do="media-prev" title="${tr("上一首")}">${ICON.prev}</button>
-        <button class="main" data-do="media-toggle" title="${tr("播放 / 暂停")}">${m.playing ? ICON.pause : ICON.play}</button>
-        <button data-do="media-next" title="${tr("下一首")}">${ICON.next}</button>
+        <button data-do="media-prev" title="${esc(tr("上一首"))}">${ICON.prev}</button>
+        <button class="main" data-do="media-toggle" title="${esc(tr("播放 / 暂停"))}">${m.playing ? ICON.pause : ICON.play}</button>
+        <button data-do="media-next" title="${esc(tr("下一首"))}">${ICON.next}</button>
       </div>
       ${m.playing ? vizBars(12, true) : ""}
     </div>
   </div>`;
 }
 
-// progress between media events
-setInterval(() => {
-  if (tab !== "music" || !media?.duration || !$("mu-fill")) return;
-  const pos = mediaPos(media);
-  $("mu-fill").style.width = `${(pos / media.duration) * 100}%`;
-  $("mu-pos").textContent = mmss(pos);
-}, 1000);
+// progress between media events (paused when collapsed, hidden, or not playing)
+let muTimer = null;
+function muWanted() {
+  return tab === "music" && !!media?.playing && media?.duration > 0 && (MANAGER ? !document.hidden : expanded);
+}
+function ensureMuTimer() {
+  if (muWanted()) {
+    if (!muTimer) {
+      muTimer = setInterval(() => {
+        if (!muWanted() || !$("mu-fill")) { clearInterval(muTimer); muTimer = null; return; }
+        const pos = mediaPos(media);
+        $("mu-fill").style.width = `${(pos / media.duration) * 100}%`;
+        $("mu-pos").textContent = mmss(pos);
+      }, 1000);
+    }
+  } else if (muTimer) {
+    clearInterval(muTimer);
+    muTimer = null;
+  }
+}
 
 // ---------- pages of the open island (icons at its top) ----------
 
@@ -2794,7 +3214,7 @@ function renderPages() {
   const html = pages.length > 1 ? pages.map((id) => {
     const [label, d] = PAGE_DEFS[id];
     const dot = id === "notes" && unreadCount() ? `<i class="pg-dot"></i>` : "";
-    return `<button class="pg ${id === curPage() ? "active" : ""}" data-page="${id}" title="${label}" aria-label="${label}" role="tab" aria-selected="${id === curPage()}">
+    return `<button class="pg ${id === curPage() ? "active" : ""}" data-page="${id}" title="${esc(label)}" aria-label="${esc(label)}" role="tab" aria-selected="${id === curPage()}">
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>${dot}</button>`;
   }).join("") : "";
   if ($("pages").innerHTML !== html) $("pages").innerHTML = html;
@@ -2811,7 +3231,7 @@ if (!MANAGER) {
     if (b) switchPage(b.dataset.page);
   });
   // clock in the page bar
-  setInterval(() => { if (expanded) $("page-clock").textContent = clockText(); }, 1000);
+  setInterval(() => { if (expanded && !document.hidden) $("page-clock").textContent = clockText(); }, 1000);
 }
 
 // ---------- overview (manager home) ----------
@@ -2829,7 +3249,7 @@ const ICON = {
 // block grows by pools, not by windows, and many tools spread sideways instead of downwards.
 function aiMini(q) {
   const st = q.status === "stale" ? `<span class="q-stale" title="${esc(q.message || "")}">${tr("上次数据 · {0}", ago(q.at))}</span>` : "";
-  const head = `<div class="am-head"><b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}</div>`;
+  const head = `<div class="am-head">${brandIcon(q.tool, 16)}<b>${esc(q.name)}</b>${q.plan ? `<span class="tag">${esc(q.plan)}</span>` : ""}${st}</div>`;
   const ws = (q.windows || []).filter((w) => w && w.used != null);
   if (!ws.length) return `<div class="am">${head}<div class="q-msg ${q.status === "error" ? "bad" : ""}">${esc(q.message || tr("暂无数据"))}</div></div>`;
   if (ws.length >= GROUP_FROM) return `<div class="am">${head}${quotaBars(q, true)}</div>`;
@@ -2848,8 +3268,13 @@ function aiMini(q) {
   return `<div class="am">${head}<div class="am-grid" style="grid-template-columns:${cols}">${top}${rows}</div></div>`;
 }
 
-function homeHtml() {
-  if (!snap) return `<div class="empty">${tr("正在读取…")}</div>`;
+const homeTopOrder = { order: null, last: new Map() };
+
+function reconcileHome(list) {
+  if (!snap) {
+    if (!list.querySelector(".empty")) list.innerHTML = `<div id="list-inner"><div class="empty">${tr("正在读取…")}</div></div>`;
+    return;
+  }
   loadTraffic(false);
   loadLatency();
   const ex = exitState || {};
@@ -2857,22 +3282,23 @@ function homeHtml() {
   const groups = ex.groups || [];
   const exitCards = [];
   if (p.detected && groups.length) {
-    for (const g of groups) {
-      const geo = placeText(g);
+    for (const x of exitsByIp(groups)) {
+      const geo = placeText(x);
+      const chips = x.groups.map((g) => `<span class="gx-chip">${decorate(g.group)}${g.isDefault ? `<span class="tag">${tr("默认")}</span>` : ""}</span>`).join("");
       exitCards.push(`<div class="hx tilt" data-tilt="5">
-        <div class="hx-g">${decorate(g.group)}${g.isDefault ? `<span class="tag">${tr("默认")}</span>` : ""}${g.ip ? kindTag(g) : ""}</div>
-        <div class="hx-ip mono">${g.ip ? `${flagImg(g.cc)}${esc(g.ip)}` : `<span class="crit">${g.error ? tr("检测失败") : "—"}</span>`}</div>
-        <div class="hx-m">${esc(geo)}</div>
-        ${g.node ? `<div class="hx-n">${decorate(g.node)}</div>` : ""}
+        <div class="hx-g hx-chips">${chips}${x.ip ? kindTag(x) : ""}</div>
+        <div class="hx-ip mono${x.ip ? " copyable" : ""}" ${x.ip ? `data-copy="${esc(x.ip)}"` : ""} title="${esc(ipTip(x))}">${x.ip ? `${flagImg(x.cc)}${esc(x.ip)}` : `<span class="crit">${x.error ? tr("检测失败") : "—"}</span>`}</div>
+        <div class="hx-m" title="${esc(ipTip(x))}">${esc(geo)}</div>
+        ${x.nodes.length ? `<div class="hx-n">${x.nodes.map(decorate).join(tr("、"))}</div>` : ""}
       </div>`);
     }
   } else if (p.detected && ex.proxy) {
     const r = ex.proxy;
-    exitCards.push(`<div class="hx tilt" data-tilt="5"><div class="hx-g">${tr("代理出口{0}", r.ip ? kindTag(r) : "")}</div><div class="hx-ip mono">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc(placeText(r))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
+    exitCards.push(`<div class="hx tilt" data-tilt="5"><div class="hx-g">${tr("代理出口{0}", r.ip ? kindTag(r) : "")}</div><div class="hx-ip mono${r.ip ? " copyable" : ""}" ${r.ip ? `data-copy="${esc(r.ip)}"` : ""} title="${esc(ipTip(r))}">${r.ip ? `${flagImg(r.cc)}${esc(r.ip)}` : "—"}</div><div class="hx-m">${esc(placeText(r))}</div>${r.node ? `<div class="hx-n">${decorate(r.node)}</div>` : ""}</div>`);
   }
   const d = ex.direct;
   exitCards.push(`<div class="hx direct tilt" data-tilt="5"><div class="hx-g">${tr("直连出口{0}{1}", p.detected ? "" : tr("（未检测到代理）"), d?.ip ? kindTag(d) : "")}</div>
-    <div class="hx-ip mono">${d?.ip ? `${flagImg(d.cc)}${esc(d.ip)}` : "—"}</div>
+    <div class="hx-ip mono${d?.ip ? " copyable" : ""}" ${d?.ip ? `data-copy="${esc(d.ip)}"` : ""} title="${esc(d ? ipTip(d) : "")}">${d?.ip ? `${flagImg(d.cc)}${esc(d.ip)}` : "—"}</div>
     <div class="hx-m">${esc(d ? placeText(d) : "")}</div></div>`);
   const groupNote = p.detected && !groups.length
     ? ctrl().status === "active"
@@ -2881,18 +3307,21 @@ function homeHtml() {
     : "";
 
   const r = trafficData;
-  const today = r?.days[r.days.length - 1]; // the traffic page may hold 7 or 30 days: the tile is today only
+  const today = r?.days[r.days.length - 1];
   const tp = today ? today.pu + today.pd : 0, td = today ? today.du + today.dd : 0;
   const L = snap.latency;
   const leaks = snap.guard?.unacked || 0;
-  const tile = (label, value, note = "", go = "") => `<div class="tile tilt ${go ? "go" : ""}" ${go ? `data-tab="${go}"` : ""}><div class="tile-label">${label}</div><div class="tile-value">${value}</div>${note ? `<div class="tile-note">${note}</div>` : ""}</div>`;
-  const tiles = `<div class="tiles home-tiles">
-    ${tile(tr("网速"), `<span class="mono">${speedHtml(snap.up, snap.down)}</span>`, "", "speed")}
-    ${tile(tr("连接"), `<span class="mono">${snap.connCount}</span>`, `${tr("{0} 个程序", snap.apps.filter((a) => a.conns.length).length)}`, "conns")}
-    ${tile(tr("今日流量"), r ? fmtBytes(tp + td) : "—", r && tp + td ? `${tr("代理 {0}% · 直连 {1}%", Math.round((tp / (tp + td)) * 100), Math.round((td / (tp + td)) * 100))}` : "", "traffic")}
-    ${tile(tr("节点延迟"), L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">${tr("无响应")}</span>`) : "—", L?.node ? decorate(L.node) : "", "nodes")}
-    ${tile(tr("泄漏预警"), leaks ? `<span class="crit">${leaks}</span>` : "0", leaks ? tr("点击查看") : tr("没有泄漏"), "guard")}
-  </div>`;
+  const activeAppsCount = snap.apps.filter((a) => a.conns.length || (snap.slim && !a.isProxy)).length;
+  const spdIdle = (!snap.up || snap.up < 1) && (!snap.down || snap.down < 1);
+  const spdPrimary = spdIdle ? `<span class="mono z">—</span>` : `<span class="mono home-spd"><span class="d">↓</span> ${fmtRate(snap.down)}</span>`;
+  const spdSub = spdIdle ? `↑ 0 · ↓ 0` : `<span class="mono home-spd-sub"><span class="u">↑</span> ${fmtRate(snap.up)}</span>`;
+  const tileData = [
+    ["speed", tr("网速"), spdPrimary, spdSub],
+    ["conns", tr("连接"), `<span class="mono">${snap.connCount}</span>`, `${tr("{0} 个程序", activeAppsCount)}`],
+    ["traffic", tr("今日流量"), r ? fmtBytes(tp + td) : "—", r && tp + td ? `${tr("代理 {0}% · 直连 {1}%", Math.round((tp / (tp + td)) * 100), Math.round((td / (tp + td)) * 100))}` : ""],
+    ["nodes", tr("节点延迟"), L?.at ? (L.ms != null ? `${L.ms} ms` : `<span class="crit">${tr("无响应")}</span>`) : "—", L?.node ? decorate(L.node) : ""],
+    ["guard", tr("泄漏预警"), leaks ? `<span class="crit">${leaks}</span>` : "0", leaks ? tr("点击查看") : tr("没有泄漏")],
+  ];
 
   const n = Math.min(120, speedHist.t.length);
   const chart = n >= 2
@@ -2903,25 +3332,108 @@ function homeHtml() {
       })
     : "";
 
-  const top = snap.apps.filter((a) => !a.isProxy && a.conns.length).slice(0, 8).map((a) => `<div class="top-row" data-tab="conns">
-      ${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span>
-      <span class="route-tag ${a.viaProxy ? "proxy" : "direct"}">${a.viaProxy ? tr("代理") : tr("直连")}</span>
-      <span class="app-count mono">${a.conns.length}</span>
-      <span class="speed mono">${speedHtml(a.up, a.down)}</span></div>`).join("");
+  let inner = $("list-inner");
+  if (!inner || inner.dataset.view !== "home") {
+    list.innerHTML = `<div id="list-inner" data-view="home"><div class="home">
+      <div class="h-sec" data-hm="exits"></div>
+      <div class="tiles home-tiles" data-hm="tiles">${tileData.map(([go, label]) => `<div class="tile tilt go" data-tab="${go}" tabindex="0" role="button"><div class="tile-label" title="${esc(label)}">${label}</div><div class="tile-value"></div><div class="tile-note"></div></div>`).join("")}</div>
+      <div class="h-sec" data-hm="chart"></div>
+      <div class="h-sec" data-hm="ai"></div>
+      <div class="h-sec" data-hm="top"><div class="h-head"><b>${tr("正在联网的程序")}</b><span class="h-note">${tr("走代理的排在前面")}</span><span class="sp"></span><button class="link" data-tab="conns">${tr("全部连接")}</button></div><div class="hm-top-list"></div></div>
+    </div></div>`;
+    inner = $("list-inner");
+  }
 
-  const ai = sget("ai.on", true) && aiState.length
-    ? `<div class="h-sec"><div class="h-head"><b>${tr("AI 额度")}</b><span class="sp"></span><button class="link" data-tab="ai">${tr("详情")}</button></div>
-        ${(() => { const l = aiState.filter((q) => q.status !== "absent"); return l.length ? `<div class="am-list">${l.map(aiMini).join("")}</div>` : `<div class="q-msg">${tr("没找到已登录的 AI 工具")}</div>`; })()}</div>`
-    : "";
+  // 1. Exits section: keep cards mounted unless exit data or checking state changed
+  const checkingExit = !!(ex.checking || busyActions.has("exit-refresh"));
+  const whenNote = checkingExit ? tr("检测中…") : ex.lastCheck ? tr("上次检测 ") + ago(ex.lastCheck) : "";
+  const exitsBox = inner.querySelector('[data-hm="exits"]');
+  const exitsBodyHtml = `<div class="hx-grid">${exitCards.join("")}</div>${groupNote}`;
+  const exitsSig = `${checkingExit ? 1 : 0}|${!!ex.lastCheck}|${exitsBodyHtml}`;
+  if (exitsBox._sig !== exitsSig) {
+    exitsBox._sig = exitsSig;
+    exitsBox.innerHTML = `<div class="h-head"><b>${tr("出口")}</b><span class="sp"></span>${ex.lastCheck || checkingExit ? `<span class="h-note" data-hm-when="1">${esc(whenNote)}</span>` : ""}<button class="ghost${checkingExit ? " is-busy" : ""}" data-do="exit-refresh" ${checkingExit ? "disabled" : ""}>${checkingExit ? tr("检测中…") : tr("重新检测")}</button></div>${exitsBodyHtml}`;
+  } else {
+    const wEl = exitsBox.querySelector("[data-hm-when]");
+    if (wEl && wEl.textContent !== whenNote) wEl.textContent = whenNote;
+  }
 
-  return `<div class="home">
-    <div class="h-sec"><div class="h-head"><b>${tr("出口")}</b><span class="sp"></span>${ex.lastCheck ? `<span class="h-note">${ex.checking ? tr("检测中…") : tr("上次检测 ") + ago(ex.lastCheck)}</span>` : ""}<button class="ghost" data-do="exit-refresh">${tr("重新检测")}</button></div>
-      <div class="hx-grid">${exitCards.join("")}</div>${groupNote}</div>
-    ${tiles}
-    <div class="h-sec">${chart}</div>
-    ${ai}
-    <div class="h-sec"><div class="h-head"><b>${tr("正在联网的程序")}</b><span class="h-note">${tr("走代理的排在前面")}</span><span class="sp"></span><button class="link" data-tab="conns">${tr("全部连接")}</button></div>${top || `<div class="empty">${tr("没有连接")}</div>`}</div>
-  </div>`;
+  // 2. Summary tiles: update values & notes in place so .tile.tilt cards never reset
+  const tileEls = inner.querySelectorAll('[data-hm="tiles"] > .tile');
+  tileData.forEach(([, , valHtml, noteHtml], idx) => {
+    const tEl = tileEls[idx];
+    if (!tEl) return;
+    if (tEl._v !== valHtml) { tEl._v = valHtml; tEl.querySelector(".tile-value").innerHTML = valHtml; }
+    const nEl = tEl.querySelector(".tile-note");
+    if (tEl._n !== noteHtml) { tEl._n = noteHtml; nEl.innerHTML = noteHtml; nEl.hidden = !noteHtml; }
+  });
+
+  // 3. Speed chart section
+  const chartBox = inner.querySelector('[data-hm="chart"]');
+  chartBox.hidden = !chart;
+  if (chart) chartBox.innerHTML = chart;
+
+  // 4. AI quota section: only re-render when aiVer / setting / minute bucket changes
+  const aiBox = inner.querySelector('[data-hm="ai"]');
+  const showAi = !!(sget("ai.on", true) && aiState.length);
+  aiBox.hidden = !showAi;
+  if (showAi) {
+    const aiSig = `${aiVer}|${Math.floor(Date.now() / 60_000)}`;
+    if (aiBox._sig !== aiSig) {
+      aiBox._sig = aiSig;
+      const l = aiState.filter((q) => q.status !== "absent");
+      aiBox.innerHTML = `<div class="h-head"><b>${tr("AI 额度")}</b><span class="sp"></span><button class="link" data-tab="ai">${tr("详情")}</button></div>` +
+        (l.length ? `<div class="am-list">${l.map(aiMini).join("")}</div>` : `<div class="q-msg">${tr("没找到已登录的 AI 工具")}</div>`);
+    }
+  }
+
+  // 5. Top active apps: hold order on hover and reconcile rows in place
+  const topListBox = inner.querySelector(".hm-top-list");
+  const rawTop = snap.apps.filter((a) => !a.isProxy && (a.conns.length || snap.slim)).slice(0, 8);
+  let topApps;
+  if (!topListBox.matches(":hover")) {
+    homeTopOrder.order = null;
+    homeTopOrder.last = new Map(rawTop.map((a) => [a.key, a]));
+    topApps = rawTop;
+  } else {
+    topApps = stable(rawTop, (a) => a.key, homeTopOrder).filter((a) => !a._gone);
+  }
+  if (!topApps.length) {
+    if (!topListBox.querySelector(".empty")) topListBox.innerHTML = `<div class="empty">${tr("没有连接")}</div>`;
+    return;
+  }
+  topListBox.querySelector(":scope > .empty")?.remove();
+  const existingTop = new Map();
+  for (const ch of topListBox.children) if (ch.dataset.appKey) existingTop.set(ch.dataset.appKey, ch);
+  const seenTop = new Set();
+  let tCursor = topListBox.firstElementChild;
+  for (const a of topApps) {
+    seenTop.add(a.key);
+    const rCls = a.viaProxy ? "proxy" : "direct";
+    const rTxt = a.viaProxy ? tr("代理") : tr("直连");
+    const cntTxt = a.conns.length ? String(a.conns.length) : (snap.slim ? "–" : "0");
+    const spdHtml = speedHtml(a.up, a.down);
+    const iconKey = `${a.icon || a.path || ""}|${icons.get(a.icon || a.path) || ""}|${a.name || a.exe || ""}`;
+    let row = existingTop.get(a.key);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "top-row";
+      row.dataset.tab = "conns";
+      row.dataset.appKey = a.key;
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.innerHTML = `${iconHtml(a)}<span class="sp-name">${esc(a.name)}</span><span class="route-tag ${rCls}">${rTxt}</span><span class="app-count mono">${cntTxt}</span><span class="speed mono">${spdHtml}</span>`;
+      row._ic = iconKey; row._rc = rCls; row._cnt = cntTxt; row._spd = spdHtml;
+    } else {
+      if (row._ic !== iconKey) { row._ic = iconKey; row.querySelector(".app-icon").outerHTML = iconHtml(a); }
+      if (row._rc !== rCls) { row._rc = rCls; const rt = row.querySelector(".route-tag"); rt.className = `route-tag ${rCls}`; rt.textContent = rTxt; }
+      if (row._cnt !== cntTxt) { row._cnt = cntTxt; row.querySelector(".app-count").textContent = cntTxt; }
+      if (row._spd !== spdHtml) { row._spd = spdHtml; row.querySelector(".speed").innerHTML = spdHtml; }
+    }
+    if (row !== tCursor) topListBox.insertBefore(row, tCursor);
+    else tCursor = tCursor.nextElementSibling;
+  }
+  for (const [k, el] of existingTop) if (!seenTop.has(k)) el.remove();
 }
 
 // ---------- settings page ----------
@@ -2948,19 +3460,21 @@ function notifySettingsHtml() {
   const hooks = (notifyInfo?.hooks || []).map((h) => {
     const state = !h.found ? `${tr("没找到 {0} 的配置文件夹", esc(h.name))}` : h.installed ? tr("已接入：完成任务、等你确认时会通知") : h.conflict ? tr("已有别的 notify 设置，MicaBar 不覆盖") : tr("未接入");
     const btn = !h.found || (h.conflict && !h.installed) ? ""
-      : h.installed ? `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="0">${tr("移除")}</button>`
-        : hookConfirm === h.tool ? `<button class="primary" data-do="hook" data-tool="${h.tool}" data-on="1">${tr("确认：修改 {0}（先自动备份）", esc(h.path.replace(/^.*\\(\.[^\\]+\\[^\\]+)$/, "~\\$1")))}</button>`
-          : `<button class="ghost" data-do="hook" data-tool="${h.tool}" data-on="1">${tr("接入")}</button>`;
-    return `<div class="s-row"><span class="s-label">${esc(h.name)}<span class="s-note">${state}</span></span>${btn}</div>`;
+      : h.installed ? `<button class="ghost" data-do="hook" data-tool="${esc(h.tool)}" data-on="0">${tr("移除")}</button>`
+        : hookConfirm === h.tool ? `<button class="primary" data-do="hook" data-tool="${esc(h.tool)}" data-on="1">${tr("确认：修改 {0}（先自动备份）", esc(h.path.replace(/^.*\\(\.[^\\]+\\[^\\]+)$/, "~\\$1")))}</button>`
+          : `<button class="ghost" data-do="hook" data-tool="${esc(h.tool)}" data-on="1">${tr("接入")}</button>`;
+    return `<div class="s-row"><span class="s-label"><span class="s-brand-row">${brandIcon(h.tool, 16)}<span>${esc(h.name)}</span></span><span class="s-note">${state}</span></span>${btn}</div>`;
   }).join("");
   const apps = (notifyApps || []).filter((a) => a.source !== "test").map((a) => {
     const cfg = sget("notify.apps", {})?.[a.key] || {};
-    const icon = a.iconUrl ? `<img class="app-icon" src="${a.iconUrl}" alt="">` : iconHtml({ path: a.icon, name: a.app });
+    const icon = NOTE_BRAND[a.key] ? noteGlyph(a) : a.iconUrl ? `<img class="app-icon" src="${esc(a.iconUrl)}" alt="">` : iconHtml({ path: a.icon, name: a.app });
     return `<div class="na-row">${icon}<span class="na-name" title="${esc(a.key)}">${esc(a.app)}</span><span class="na-src">${tr("{0} · {1} 条", SRC_LABEL[a.source] || "", a.count)}</span>
-      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="island" ${cfg.island !== false ? "checked" : ""}> ${tr("岛上弹出")}</label>
-      <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="mute" ${cfg.mute ? "checked" : ""}> ${tr("静音")}</label>
-      ${a.source === "toast" ? `<label title="${tr("关掉 Windows 自己右下角的弹窗，只在岛上显示（随时可以还原）")}"><input type="checkbox" data-ntake="${esc(a.key)}" ${a.takeover ? "checked" : ""}> ${tr("接管弹窗")}</label>`
-        : a.source === "popup" ? `<label title="${tr("{0} 自己的右下角小窗一出现就藏起来，只在岛上显示", esc(a.app))}"><input type="checkbox" data-napp="${esc(a.key)}" data-f="takeover" ${cfg.takeover ? "checked" : ""}> ${tr("接管弹窗")}</label>` : "<span></span>"}</div>`;
+      <span class="na-opts">
+        <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="island" ${cfg.island !== false ? "checked" : ""}> ${tr("岛上弹出")}</label>
+        <label><input type="checkbox" data-napp="${esc(a.key)}" data-f="mute" ${cfg.mute ? "checked" : ""}> ${tr("静音")}</label>
+        ${a.source === "toast" ? `<label title="${esc(tr("关掉 Windows 自己右下角的弹窗，只在岛上显示（随时可以还原）"))}"><input type="checkbox" data-ntake="${esc(a.key)}" ${a.takeover ? "checked" : ""}> ${tr("接管弹窗")}</label>`
+          : a.source === "popup" ? `<label title="${esc(tr("{0} 自己的右下角小窗一出现就藏起来，只在岛上显示", a.app))}"><input type="checkbox" data-napp="${esc(a.key)}" data-f="takeover" ${cfg.takeover ? "checked" : ""}> ${tr("接管弹窗")}</label>` : ""}
+      </span></div>`;
   }).join("");
   return `<div class="s-sec"><div class="s-title">${tr("通知")}<span class="s-note">${tr("其他程序的提醒在岛上弹出，收进「通知」页；内容只在内存里")}</span></div>
     ${sToggle("notify.on", tr("在岛上显示通知"))}
@@ -3018,7 +3532,19 @@ document.addEventListener("keydown", async (e) => {
   }, 300);
 }, true);
 
+function sput(path, value) {
+  if (!S) return;
+  const keys = path.split(".");
+  let o = S;
+  for (const k of keys.slice(0, -1)) {
+    if (o[k] == null || typeof o[k] !== "object") o[k] = {};
+    o = o[k];
+  }
+  o[keys[keys.length - 1]] = value;
+}
+
 function setPath(path, value) {
+  sput(path, value);
   const patch = {};
   const keys = path.split(".");
   let o = patch;
@@ -3030,24 +3556,25 @@ function setPath(path, value) {
 // A label starting with full-width spaces ("　") is a sub-option of the row above: the whole row
 // (label and its note, and the separator line) is indented one step per space, so the note
 // lines up under the label instead of starting at the left edge.
-function sRowOpen(label, note) {
+function sRowOpen(label, note, icon = "") {
   const m = /^　+/.exec(label);
   const lv = m ? Math.min(2, m[0].length) : 0;
   const text = m ? label.slice(m[0].length) : label;
-  return `<label class="s-row${lv ? ` lv${lv}` : ""}"><span class="s-label">${text}${note ? `<span class="s-note">${note}</span>` : ""}</span>`;
+  const head = icon ? `<span class="s-brand-row">${icon}<span>${text}</span></span>` : text;
+  return `<label class="s-row${lv ? ` lv${lv}` : ""}"><span class="s-label">${head}${note ? `<span class="s-note">${note}</span>` : ""}</span>`;
 }
 
-function sToggle(path, label, note = "") {
-  return `${sRowOpen(label, note)}
+function sToggle(path, label, note = "", icon = "") {
+  return `${sRowOpen(label, note, icon)}
     <input type="checkbox" data-sp="${path}" ${sget(path, false) ? "checked" : ""}></label>`;
 }
 
 // each language in its own name
 const LANG_NAMES = [["zh-CN", "简体中文"], ["zh-TW", "繁體中文"], ["en", "English"], ["ja", "日本語"], ["ko", "한국어"], ["ru", "Русский"], ["es", "Español"], ["pt-BR", "Português (Brasil)"], ["fr", "Français"], ["de", "Deutsch"]];
 
-function sSelect(path, label, options, note = "") {
+function sSelect(path, label, options, note = "", icon = "") {
   const cur = String(sget(path, ""));
-  return `${sRowOpen(label, note)}
+  return `${sRowOpen(label, note, icon)}
     <select data-sp="${path}">${options.map(([v, t]) => `<option value="${esc(v)}" ${String(v) === cur ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`;
 }
 
@@ -3106,7 +3633,7 @@ let setBack = "home"; // the page the back button returns to
 const navIcon = (d) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
 
 function settingsNavHtml() {
-  return `<button class="tab nav back" data-setback title="${tr("回到{0}", esc((NAV.find((n) => n[0] === setBack) || NAV[0])[1]))}">${navIcon("M15 6l-6 6 6 6")}<span>${tr("返回")}</span></button>
+  return `<button class="tab nav back" data-setback title="${esc(tr("回到{0}", (NAV.find((n) => n[0] === setBack) || NAV[0])[1]))}">${navIcon("M15 6l-6 6 6 6")}<span>${tr("返回")}</span></button>
     ${SET_NAV.map(([group, items]) => `<div class="nav-group">${group}</div>
       ${items.map(([id, label, d]) => `<button class="tab nav ${id === setCat ? "active" : ""}" data-setcat="${id}">${navIcon(d)}<span>${label}</span></button>`).join("")}`).join("")}`;
 }
@@ -3141,9 +3668,9 @@ const GRIP_SVG = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentC
 function sDragList(path, labels) {
   const list = (sget(path, []) || []).filter((i) => labels[i.id]);
   return `<div class="s-drag" data-dl="${path}">${list.map((i) => `<div class="s-drag-row ${i.on ? "" : "off"}" data-id="${esc(i.id)}">
-      <button class="grip" data-grip title="${tr("拖动调整顺序（选中后也可以按 Alt+↑ / ↓）")}" aria-label="${tr("调整「{0}」的顺序", esc(labels[i.id]))}">${GRIP_SVG}</button>
+      <button class="grip" data-grip title="${esc(tr("拖动调整顺序（选中后也可以按 Alt+↑ / ↓）"))}" aria-label="${esc(tr("调整「{0}」的顺序", labels[i.id]))}">${GRIP_SVG}</button>
       <span class="s-drag-name">${labels[i.id]}</span>
-      <input type="checkbox" class="sw" data-ol="${path}" data-id="${esc(i.id)}" ${i.on ? "checked" : ""} aria-label="${tr("显示「{0}」", esc(labels[i.id]))}">
+      <input type="checkbox" class="sw" data-ol="${path}" data-id="${esc(i.id)}" ${i.on ? "checked" : ""} aria-label="${esc(tr("显示「{0}」", labels[i.id]))}">
     </div>`).join("")}</div>`;
 }
 
@@ -3164,7 +3691,7 @@ const BASE_THEMES = {
   "glass-light": { name: tr("白色磨砂"), bg: "#f6f6f9", text: "#15151a", dim: "#4b4b57", green: "#059669", amber: "#b45309" },
 };
 function themePill(t) {
-  return `<div class="tp-pill" style="--p-bg:${t.bg};--p-text:${t.text};--p-dim:${t.dim || t.text};--p-up:${t.amber || "#fbbf24"};--p-down:${t.green || "#34d399"}">
+  return `<div class="tp-pill" style="--p-bg:${esc(safeColor(t.bg, "#16161c"))};--p-text:${esc(safeColor(t.text, "#f2f2f5"))};--p-dim:${esc(safeColor(t.dim || t.text, "#9a9aa6"))};--p-up:${esc(safeColor(t.amber, "#fbbf24"))};--p-down:${esc(safeColor(t.green, "#34d399"))}">
     <img class="tp-flag" src="flags/us.svg" alt=""><span class="mono">107.149.174.88</span>
     <span class="mono tp-sp"><b class="up">↑</b>12K <b class="down">↓</b>1.2M</span><span class="mono tp-clock">14:32</span></div>`;
 }
@@ -3175,7 +3702,12 @@ function themeCardsHtml(ids) {
     let t, name;
     if (id === "auto") { t = BASE_THEMES[sys]; name = `${tr("跟随系统（现在是{0}）", lightQuery.matches ? tr("白") : tr("黑"))}`; }
     else if (BASE_THEMES[id]) { t = BASE_THEMES[id]; name = t.name; }
-    else if (id === "custom") { const c = sget("appearance.custom", {}) || {}; t = { bg: c.bg || "#16161c", text: c.text || "#f2f2f5", dim: mixHex(c.text || "#f2f2f5", c.bg || "#16161c", 0.3) }; name = tr("自定义"); }
+    else if (id === "custom") {
+      const c = sget("appearance.custom", {}) || {};
+      const bg = safeColor(c.bg, "#16161c"), text = safeColor(c.text, "#f2f2f5");
+      t = { bg, text, dim: mixHex(text, bg, 0.3) };
+      name = tr("自定义");
+    }
     else { t = PRESETS[id]; name = t.name; }
     return `<button class="pick-card theme ${cur === id ? "on" : ""}" data-pick="appearance.theme" data-val="${id}" aria-pressed="${cur === id}">
       <div class="tp-stage tilt" data-tilt="9">${themePill(t)}</div><div class="pick-name"><span>${esc(name)}</span>${cur === id ? CHECK_SVG : ""}</div></button>`;
@@ -3190,7 +3722,7 @@ const SET_PAGES = {
     ${sSelect("general.lang", tr("界面语言"), [["auto", tr("跟随系统")], ...LANG_NAMES], tr("改完所有窗口会刷新一下；托盘菜单也会换"))}
   </div>
   <div class="s-sec"><div class="s-title">${tr("启动与屏幕")}</div>
-    ${sToggle("general.autostart", trc("setting", "开机自启"), tr("登录 10 秒后以管理员权限启动（计划任务，不弹 UAC）"))}
+    ${sToggle("general.autostart", trc("setting", "开机自启"), tr("登录时以管理员权限启动（计划任务，不弹 UAC）"))}
     ${sSelect("general.monitor", tr("显示在哪块屏幕"), [["primary", tr("主屏幕")], ["cursor", tr("跟随鼠标所在的屏幕")], ...monitorsCache.map((m) => [m.name, `${tr("{0}（{1}×{2}{3}）", m.name.replace("\\\\.\\", ""), m.w, m.h, m.primary ? tr("，主屏") : "")}`])])}
     ${sSelect("general.profile", tr("资源档位"), [["saver", tr("省电")], ["balanced", tr("均衡")], ["smooth", tr("流畅")]], tr("影响节点测速等后台任务的频率"))}
   </div>
@@ -3260,7 +3792,7 @@ const SET_PAGES = {
     ${sRange("appearance.opacity", tr("背景不透明度"), 20, 100, 5, "", tr("50 = 默认；往右更不透明，往左更通透"))}
     ${sSelect("appearance.legible", tr("背景亮度限制"), [["normal", tr("标准（默认）")], ["strong", tr("强")], ["off", tr("关")]], tr("白磨砂下把背后的深色区域提亮、黑磨砂下把亮色区域压暗，背景一半亮一半暗时文字也看得清"))}
     <label class="s-row"><span class="s-label">${tr("字体")}<span class="s-note">${tr("留空 = 系统默认")}</span></span>
-      <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="${tr("例如 微软雅黑")}" spellcheck="false"></span></label>
+      <span class="s-num"><input class="s-text" list="font-list" data-sp="appearance.font" value="${esc(sget("appearance.font", ""))}" placeholder="${esc(tr("例如 微软雅黑"))}" spellcheck="false"></span></label>
     <datalist id="font-list">${fontsCache.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
   </div>
   <div class="s-sec"><div class="s-title">${tr("动效")}</div>
@@ -3297,18 +3829,18 @@ const SET_PAGES = {
   <div class="s-sec"><div class="s-title">${tr("AI 额度")}<span class="s-note">${tr("用本机已登录的凭据向各家官方查询，只读，不保存、不外传")}</span></div>
     ${sToggle("ai.live", tr("正在跑的 AI 任务"), tr("Claude Code 干活时胶囊最前面显示项目名和用时，等你批准时变成橙色；点一下切到它的终端。需要在「通知」里接好 Claude Code 钩子"))}
     ${sToggle("ai.on", tr("显示 AI 额度"))}
-    ${sToggle("ai.claude", tr("　Claude Code"))}
-    ${sToggle("ai.codex", tr("　Codex"), tr("需要用 ChatGPT 账号登录的 Codex"))}
-    ${sToggle("ai.antigravity", tr("　Antigravity"), tr("Antigravity 打开着时才能读到（只问本机的语言服务器）"))}
-    ${sToggle("ai.grok", tr("　Grok"), tr("需要用 grok CLI 登录过"))}
+    ${sToggle("ai.claude", tr("　Claude Code"), "", brandIcon("claude", 16))}
+    ${sToggle("ai.codex", tr("　Codex"), tr("需要用 ChatGPT 账号登录的 Codex"), brandIcon("codex", 16))}
+    ${sToggle("ai.antigravity", tr("　Antigravity"), tr("Antigravity 打开着时才能读到（只问本机的语言服务器）"), brandIcon("antigravity", 16))}
+    ${sToggle("ai.grok", tr("　Grok"), tr("需要用 grok CLI 登录过"), brandIcon("grok", 16))}
     ${sNumber("ai.interval", tr("　每隔多久查一次"), 1, 120, 1, tr("分钟"), tr("Claude 最少 10 分钟一次，设得更短也按 10 分钟"))}
     ${sNumber("ai.proxyPort", tr("　走哪个代理端口"), 0, 65535, 1, "", tr("0 = 自动用代理软件的端口（Clash 的 mixed/http 端口或系统代理）。额度只经代理查询，找不到端口就不查，绝不直连；Antigravity 只问本机，不出网"))}
   </div>
   <div class="s-sec"><div class="s-title">${tr("额度环")}<span class="s-note">${tr("胶囊和「AI 额度」页里的圆环")}</span></div>
-    ${sSelect("ai.ring.mode.claude", tr("Claude 显示"), RING_MODES)}
-    ${sSelect("ai.ring.mode.codex", tr("Codex 显示"), RING_MODES)}
-    ${sSelect("ai.ring.mode.antigravity", tr("Antigravity 显示"), RING_MODES, tr("两组模型（Gemini、Claude / GPT）各有 5 小时和每周额度，环显示用得多的那一组"))}
-    ${sSelect("ai.ring.mode.grok", tr("Grok 显示"), RING_MODES)}
+    ${sSelect("ai.ring.mode.claude", tr("Claude 显示"), RING_MODES, "", brandIcon("claude", 16))}
+    ${sSelect("ai.ring.mode.codex", tr("Codex 显示"), RING_MODES, "", brandIcon("codex", 16))}
+    ${sSelect("ai.ring.mode.antigravity", tr("Antigravity 显示"), RING_MODES, tr("两组模型（Gemini、Claude / GPT）各有 5 小时和每周额度，环显示用得多的那一组"), brandIcon("antigravity", 16))}
+    ${sSelect("ai.ring.mode.grok", tr("Grok 显示"), RING_MODES, "", brandIcon("grok", 16))}
     ${sNumber("ai.ring.warn", tr("用到多少变成提醒色"), 1, 99, 1, "%")}
     ${sNumber("ai.ring.crit", tr("用到多少变成警告色"), 1, 100, 1, "%")}
     ${sColor("ai.ring.colors.ok", tr("　正常"))}
@@ -3343,7 +3875,7 @@ const SET_PAGES = {
   about: () => `
   <div class="s-sec"><div class="s-title">${tr("关于")}</div>
     <div class="s-row"><span class="s-label">MicaBar ${esc(appInfo?.version || "")}<span class="s-note">${appInfo ? (appInfo.installed ? tr("安装版") : tr("便携版（不能自动更新）")) : ""}</span></span>
-      <button class="ghost" data-do="update-check">${tr("检查更新")}</button></div>
+      <button class="ghost${busyActions.has("update-check") ? " is-busy" : ""}" data-do="update-check" ${busyActions.has("update-check") ? "disabled" : ""}>${busyActions.has("update-check") ? tr("正在检查更新…") : tr("检查更新")}</button></div>
     ${updateInfo?.available ? updateCardHtml() : ""}
     ${sToggle("general.autoUpdate", tr("自动检查更新"), tr("每天检查一次 GitHub 上的新版本，有新版本时在胶囊上提示"))}
     <div class="s-row"><span class="s-label">${tr("日志与数据")}<span class="s-note">${esc(appInfo?.logDir || "")}</span></span>
@@ -3583,10 +4115,16 @@ $("list").addEventListener("keydown", (e) => {
   moveItem({ path, id, dir: e.key === "ArrowUp" ? -1 : 1 });
 });
 
-// picture cards (collapsed shape, theme)
+// picture cards (collapsed shape, theme): apply immediately in-place before disk roundtrip
 $("list").addEventListener("click", (e) => {
   const p = e.target.closest("[data-pick]");
-  if (p && sget(p.dataset.pick) !== p.dataset.val) setPath(p.dataset.pick, p.dataset.val);
+  if (p && sget(p.dataset.pick) !== p.dataset.val) {
+    sput(p.dataset.pick, p.dataset.val);
+    applyTheme();
+    applySize();
+    renderList(true);
+    setPath(p.dataset.pick, p.dataset.val);
+  }
 });
 
 // ---------- leak guard tab ----------
@@ -3649,7 +4187,7 @@ function guardTabHtml() {
           else if (!g.tun) acts.push(`<button class="danger" data-block='${ds({ path: a.path, exe: a.exe })}'>${tr("禁止 {0} 直连", esc(a.exe))}</button>`);
         }
         if (a.kind === "rule" && !ctlActive) acts.push(`<button data-do="goto-rules">${tr("启用出口控制来自动纠正")}</button>`);
-        if (a.host) acts.push(`<button data-exclude="${esc(a.host)}" title="${tr("以后这个域名直连也不预警")}">${tr("忽略这个域名")}</button>`);
+        if (a.host) acts.push(`<button data-exclude="${esc(a.host)}" title="${esc(tr("以后这个域名直连也不预警"))}">${tr("忽略这个域名")}</button>`);
         if (a.active && !a.acked) acts.push(`<button data-ack="${esc(a.key)}">${tr("知道了")}</button>`);
         return `<div class="alert-card ${cls}">
           <div class="a-top">${iconHtml({ path: a.path, name: a.app, exe: a.exe })}${kind}<span class="a-what"><b>${esc(a.app)}</b> → ${what}</span><span class="a-when">${a.active ? tr("进行中") : ago(a.last)}</span></div>
@@ -3669,7 +4207,7 @@ function guardTabHtml() {
     : tr("需要先在「出口」页启用出口控制");
   const imports = (s.imports || []).map((i) => `<label class="g-opt"><input type="checkbox" data-imp='${ds({ url: i.url })}' ${i.enabled ? "checked" : ""}><span class="g-note" title="${esc(i.url)}">${esc(i.url)}</span><span class="g-note" style="flex:none">${tr("{0} 条", i.count)}</span><button data-imprm="${esc(i.url)}">${tr("删除")}</button></label>`).join("");
   const kindLabel = { suffix: "", keyword: tr("关键词 "), cidr: "IP ", exclude: tr("排除 ") };
-  const chips = (s.custom || []).map((e) => `<span class="chip ${e.kind === "exclude" ? "exclude" : ""}"><span class="k">${kindLabel[e.kind] || ""}</span>${esc(e.value)}<button data-crm='${ds(e)}' title="${tr("删除")}">✕</button></span>`).join("");
+  const chips = (s.custom || []).map((e) => `<span class="chip ${e.kind === "exclude" ? "exclude" : ""}"><span class="k">${kindLabel[e.kind] || ""}</span>${esc(e.value)}<button data-crm='${ds(e)}' title="${esc(tr("删除"))}">✕</button></span>`).join("");
   const blocked = (s.blocked || []).map((b) => `<div class="g-opt"><span>${esc(b.exe)}</span><span class="g-note" title="${esc(b.path)}">${esc(b.path)}</span><button data-unblock="${esc(b.path)}">${tr("解除")}</button></div>`).join("");
 
   return `<div class="g-sec">
@@ -3682,15 +4220,15 @@ function guardTabHtml() {
     <div class="g-sec">
       <div class="g-head"><b>${tr("应走代理的规则库")}</b><span>${tr("共 {0} 条", g.total || 0)}</span></div>
       ${opt("builtin", tr("内置常见服务"), `${tr("{0} 个主域：Google、YouTube、GitHub、Telegram、X、OpenAI、Claude…", srcCount(tr("内置")))}`)}
-      ${opt("gfw", tr("订阅 gfw 列表"), gfwNote, `<button data-do="gfw-update">${tr("更新")}</button>`)}
+      ${opt("gfw", tr("订阅 gfw 列表"), gfwNote, `<button class="${busyActions.has("gfw-update") ? "is-busy" : ""}" data-do="gfw-update" ${busyActions.has("gfw-update") ? "disabled" : ""}>${busyActions.has("gfw-update") ? tr("正在下载…") : tr("更新")}</button>`)}
       ${opt("forceProxy", tr("提前拦截：强制走代理"), forceNote)}
       ${opt("notify", tr("系统通知"), tr("同一程序 + 域名 10 分钟内只通知一次；全屏游戏时不弹"))}
       <div class="g-head" style="margin-top:6px">${tr("导入规则列表（Clash / v2fly / 纯域名格式）")}</div>
       ${imports}
-      <div class="g-row"><input id="g-import" placeholder="${tr("https://…/xxx.txt 或 .yaml")}" spellcheck="false"><button data-do="import">${tr("导入")}</button></div>
+      <div class="g-row"><input id="g-import" placeholder="${esc(tr("https://…/xxx.txt 或 .yaml"))}" spellcheck="false"><button data-do="import">${tr("导入")}</button></div>
       <div class="g-head" style="margin-top:6px">${tr("自定义")}</div>
       <div class="chips">${chips || `<span class="g-note">${tr("还没有")}</span>`}</div>
-      <div class="g-row"><input id="g-add" placeholder="${tr("域名 / IP 或 CIDR / keyword:关键词 / !域名（排除）")}" spellcheck="false"><button data-do="add">${tr("添加")}</button></div>
+      <div class="g-row"><input id="g-add" placeholder="${esc(tr("域名 / IP 或 CIDR / keyword:关键词 / !域名（排除）"))}" spellcheck="false"><button data-do="add">${tr("添加")}</button></div>
     </div>
     ${blocked ? `<div class="g-sec"><div class="g-head"><b>${tr("已禁止直连的程序")}</b><span>${tr("Windows 防火墙规则，只拦公网直连，本机代理端口不受影响")}</span></div>${blocked}</div>` : ""}`;
 }
@@ -3741,11 +4279,21 @@ const releaseList = () => {
 document.addEventListener("pointerup", releaseList);
 document.addEventListener("pointercancel", releaseList);
 
-function connHtml(app, c) {
-  if (c._gone) {
-    return `<div class="c gone"><div class="c-l1"><span class="c-proto mono">${c.proto}</span><span class="c-lp mono">:${c.localPort}</span><span class="c-arrow">→</span><span class="c-dst">${esc(c.host || c.remote || "")}</span><span class="c-spd">${tr("已断开")}</span></div></div>`;
+function syncIcon(parent, app) {
+  const p = app.icon || app.path;
+  const url = p && icons.get(p) && icons.get(p) !== "pending" ? icons.get(p) : null;
+  const cur = parent.querySelector(":scope > .app-icon");
+  if (url) {
+    if (cur?.tagName === "IMG" && cur.getAttribute("src") === url) return;
+    if (cur) cur.outerHTML = `<img class="app-icon" src="${esc(url)}" alt="">`;
+  } else {
+    const letter = (app.name || app.exe || "?").trim().charAt(0).toUpperCase();
+    if (cur?.classList.contains("letter") && cur.textContent === letter && (cur.dataset.icon || "") === (p || "")) return;
+    if (cur) cur.outerHTML = iconHtml(app);
   }
-  const idx = refs.push([app, c]) - 1;
+}
+
+function connParts(app, c) {
   const dst = c.host
     ? `${esc(c.host)}<span class="port">:${c.remotePort ?? ""}</span>`
     : c.remote
@@ -3759,20 +4307,298 @@ function connHtml(app, c) {
     const route = `<span class="${routeClass(c.node)}">${decorate(c.node)}</span>${c.group ? " · " + decorate(c.group) : ""}`;
     l2.push(route);
   }
-  if (c.rule && /micabar-guard/.test(c.rule)) l2.push(`<span class="ni" title="${tr("规则库里的网站本该被判成直连，守卫让它改走代理")}">${tr("守卫：强制走代理")}</span>`);
+  if (c.rule && /micabar-guard/.test(c.rule)) l2.push(`<span class="ni" title="${esc(tr("规则库里的网站本该被判成直连，守卫让它改走代理"))}">${tr("守卫：强制走代理")}</span>`);
   else if (c.rule && /micabar-/.test(c.rule)) l2.push(`<span class="ni">${tr("MicaBar 规则")}</span>`);
   else if (c.rule) l2.push(esc(c.rule));
   if (c.viaProxyPort) l2.push(tr("经本地代理端口"));
-  if (c.leak) l2.push(`<span class="leak" title="${tr("规则库里的「{0}」本该走代理", esc(c.leak))}">${tr("⚠ 泄漏")}</span>`);
-  if (c.bypass) l2.push(`<span class="st" title="${tr("代理软件在运行，但这条连接没经过它（程序不走系统代理，或连接早于 TUN 建立）")}">${tr("未经代理")}</span>`);
+  if (c.leak) l2.push(`<span class="leak" title="${esc(tr("规则库里的「{0}」本该走代理", c.leak))}">${WARN_SVG}<span>${esc(tr("⚠ 泄漏").replace(/^⚠\s*/, ""))}</span></span>`);
+  if (c.bypass) l2.push(`<span class="st" title="${esc(tr("代理软件在运行，但这条连接没经过它（程序不走系统代理，或连接早于 TUN 建立）"))}">${tr("未经代理")}</span>`);
   if (c.state && c.state !== "ESTABLISHED" && c.state !== "ACTIVE") l2.push(`<span class="st">${esc(c.state)}</span>`);
-  const sp = (c.up || c.down) ? `<span class="c-spd mono">${speedHtml(c.up, c.down)}</span>` : "";
-  const act = !app.isProxy && ctrl().status !== "unavailable" && (c.host || c.remote)
-    ? `<button class="c-act" data-act="${idx}" title="${tr("这条连接走哪个出口")}">⋯</button>` : "";
-  return `<div class="c">
-    <div class="c-l1"><span class="c-proto mono ${c.proto === "UDP" ? "udp" : ""}">${c.proto}</span><span class="c-lp mono">:${c.localPort}</span><span class="c-arrow">→</span><span class="c-dst">${dst}</span>${sp}${act}</div>
-    ${l2.length ? `<div class="c-l2">${l2.join(" · ")}</div>` : ""}
-  </div>`;
+  const sp = (c.up || c.down) ? speedHtml(c.up, c.down) : "";
+  const hasAct = !app.isProxy && (c.host || c.remote);
+  return { dst, l2: l2.join(" · "), sp, hasAct };
+}
+
+function reconcileAppConns(connsBox, app, conns) {
+  const limit = showAll.has(app.key) ? conns.length : MAX_CONNS_PER_APP;
+  const slice = conns.slice(0, limit);
+  const existing = new Map();
+  for (const ch of connsBox.children) if (ch.dataset.ckey) existing.set(ch.dataset.ckey, ch);
+  const seen = new Set();
+  let cursor = connsBox.firstElementChild;
+  for (const c of slice) {
+    const ckey = connKey(c);
+    seen.add(ckey);
+    if (cursor?.classList.contains("more")) cursor = null;
+    let cEl = existing.get(ckey);
+    if (c._gone) {
+      if (!cEl || !cEl.classList.contains("gone")) {
+        const g = document.createElement("div");
+        g.className = "c gone";
+        g.dataset.ckey = ckey;
+        g.innerHTML = `<div class="c-l1"><span class="c-proto mono">${esc(c.proto)}</span><span class="c-lp mono">:${c.localPort}</span><span class="c-arrow">→</span><span class="c-dst">${esc(c.host || c.remote || "")}</span><span class="c-spd">${tr("已断开")}</span></div>`;
+        if (cEl) { connsBox.replaceChild(g, cEl); if (cursor === cEl) cursor = g; }
+        cEl = g;
+      }
+    } else {
+      connRefs.set(`${app.key}\n${ckey}`, [app, c]);
+      const { dst, l2, sp, hasAct } = connParts(app, c);
+      const actTitle = ctrl().status !== "unavailable" ? tr("这条连接走哪个出口") : tr("复制 {0}", c.host || c.remote || "");
+      if (!cEl || cEl.classList.contains("gone")) {
+        const el = document.createElement("div");
+        el.className = "c";
+        el.dataset.ckey = ckey;
+        el.innerHTML = `<div class="c-l1"><span class="c-proto mono ${c.proto === "UDP" ? "udp" : ""}">${esc(c.proto)}</span><span class="c-lp mono">:${c.localPort}</span><span class="c-arrow">→</span><span class="c-dst">${dst}</span><span class="c-spd mono"${sp ? "" : " hidden"}>${sp}</span>${hasAct ? `<button class="c-act" data-act="1" title="${esc(actTitle)}">⋯</button>` : ""}</div>${l2 ? `<div class="c-l2">${l2}</div>` : ""}`;
+        el._dst = dst; el._sp = sp; el._act = hasAct; el._actT = actTitle; el._l2 = l2;
+        if (cEl) { connsBox.replaceChild(el, cEl); if (cursor === cEl) cursor = el; }
+        cEl = el;
+      } else {
+        if (cEl._dst !== dst) { cEl._dst = dst; cEl.querySelector(".c-dst").innerHTML = dst; }
+        if (cEl._sp !== sp) {
+          cEl._sp = sp;
+          const spEl = cEl.querySelector(".c-spd");
+          spEl.hidden = !sp;
+          spEl.innerHTML = sp;
+        }
+        if (cEl._act !== hasAct) {
+          cEl._act = hasAct;
+          cEl._actT = actTitle;
+          const actEl = cEl.querySelector(".c-act");
+          if (hasAct && !actEl) cEl.querySelector(".c-l1").insertAdjacentHTML("beforeend", `<button class="c-act" data-act="1" title="${esc(actTitle)}">⋯</button>`);
+          else if (!hasAct && actEl) actEl.remove();
+        } else if (hasAct && cEl._actT !== actTitle) {
+          cEl._actT = actTitle;
+          const actEl = cEl.querySelector(".c-act");
+          if (actEl) actEl.title = actTitle;
+        }
+        if (cEl._l2 !== l2) {
+          cEl._l2 = l2;
+          let l2El = cEl.querySelector(".c-l2");
+          if (l2) {
+            if (!l2El) { l2El = document.createElement("div"); l2El.className = "c-l2"; cEl.appendChild(l2El); }
+            l2El.innerHTML = l2;
+          } else if (l2El) l2El.remove();
+        }
+      }
+    }
+    if (cEl !== cursor) connsBox.insertBefore(cEl, cursor);
+    else cursor = cursor.nextElementSibling;
+  }
+  for (const [k, el] of existing) if (!seen.has(k) && el.isConnected) el.remove();
+  const moreCount = conns.length - limit;
+  let moreEl = connsBox.querySelector(":scope > .more");
+  if (moreCount > 0) {
+    const moreText = tr("还有 {0} 条，点击显示全部", moreCount);
+    if (!moreEl) {
+      moreEl = document.createElement("div");
+      moreEl.className = "more";
+      moreEl.dataset.more = app.key;
+      moreEl.textContent = moreText;
+      connsBox.appendChild(moreEl);
+    } else {
+      if (moreEl.textContent !== moreText) moreEl.textContent = moreText;
+      if (connsBox.lastElementChild !== moreEl) connsBox.appendChild(moreEl);
+    }
+  } else if (moreEl) moreEl.remove();
+}
+
+function reconcileConns(list) {
+  connRefs.clear();
+  const bannerParts = [];
+  const leaks = snap.guard?.unacked || 0;
+  if (diag.problem && sget("diag.on", true)) {
+    const dp = diag.problem;
+    bannerParts.push(`<div class="banner alert dg-banner ${dp.kind === "sysproxy" ? "warn" : ""}">${svgI(dp.kind === "sysproxy" ? DG_PATH.plug : DG_PATH.wifiOff, 15, 2.2)}<span><b>${decorate(dp.problem || tr("网络异常"))}</b> · ${decorate(dp.verdict || "")}</span><button class="primary" data-do="diag-open">${tr("查看诊断")}</button></div>`);
+  }
+  if (leaks) bannerParts.push(`<div class="banner alert dg-banner">${WARN_SVG}<span>${esc(tr("⚠ 检测到 {0} 条代理泄漏：本该走代理的连接直连了。", leaks).replace(/^⚠\s*/, ""))}</span><button class="primary" data-do="goto-guard">${tr("查看")}</button></div>`);
+  const b = bannerHtml();
+  if (b) bannerParts.push(b);
+  const bannersHtml = bannerParts.join("");
+
+  let visible = snap.apps.filter((app) => app.conns.some((c) => matches(app, c)));
+  if (!visible.length && snap.slim && snap.connCount > 0 && !query) {
+    visible = snap.apps.filter((app) => !app.isProxy || snap.apps.length === 1);
+  }
+  const ordered = stable(visible, (a) => a.key, appOrder);
+  if (!ordered.length && !bannersHtml) {
+    const emptyText = query ? tr("没有匹配的结果") : tr("没有连接");
+    const curEmpty = list.querySelector("#list-inner > .empty");
+    if (!curEmpty || curEmpty.textContent !== emptyText) {
+      list.innerHTML = `<div id="list-inner"><div class="empty">${esc(emptyText)}</div></div>`;
+    }
+    return;
+  }
+
+  let inner = $("list-inner");
+  if (!inner || inner.dataset.view !== "conns") {
+    list.innerHTML = `<div id="list-inner" data-view="conns"><div class="list-banners"></div><div class="app-list cascade-items"></div></div>`;
+    inner = $("list-inner");
+  }
+  const bannersBox = inner.querySelector(".list-banners");
+  if (bannersBox._html !== bannersHtml) {
+    bannersBox._html = bannersHtml;
+    bannersBox.innerHTML = bannersHtml;
+  }
+  const appListBox = inner.querySelector(".app-list");
+  if (!ordered.length) {
+    const emptyText = query ? tr("没有匹配的结果") : tr("没有连接");
+    const curEmpty = appListBox.querySelector(":scope > .empty");
+    if (!curEmpty || curEmpty.textContent !== emptyText) appListBox.innerHTML = `<div class="empty">${esc(emptyText)}</div>`;
+    return;
+  }
+  appListBox.querySelector(":scope > .empty")?.remove();
+
+  const existingApps = new Map();
+  for (const ch of appListBox.children) if (ch.dataset.key) existingApps.set(ch.dataset.key, ch);
+  const seenApps = new Set();
+  let cursor = appListBox.firstElementChild;
+  for (const app of ordered) {
+    seenApps.add(app.key);
+    if (!connOrders.has(app.key)) connOrders.set(app.key, { order: null, last: new Map() });
+    const conns = app._gone ? [] : stable(app.conns.filter((c) => matches(app, c)), connKey, connOrders.get(app.key));
+    let appEl = existingApps.get(app.key);
+    if (app._gone) {
+      if (!appEl || !appEl.classList.contains("gone")) {
+        const g = document.createElement("div");
+        g.className = "app gone";
+        g.dataset.key = app.key;
+        g.innerHTML = `<div class="app-head">${iconHtml(app)}<div class="app-name">${esc(app.name)}<span class="sub">${tr("连接已结束")}</span></div></div>`;
+        if (appEl) { appListBox.replaceChild(g, appEl); if (cursor === appEl) cursor = g; }
+        appEl = g;
+      }
+    } else {
+      const open = openApps.has(app.key) || !!(query && conns.length > 0 && conns.length <= 8);
+      const procs = app.pids.length > 1 ? `<span class="sub">${tr("{0} 个进程", app.pids.length)}</span>` : "";
+      const tag = app.isProxy ? `<span class="tag">${tr("代理")}</span>` : "";
+      const nameHtml = `${esc(app.name)}${tag}${procs}`;
+      const cntText = conns.length ? String(conns.length) : (snap.slim ? "–" : "0");
+      const spdHtml = snap.speedOk || app.up || app.down ? speedHtml(app.up, app.down) : "";
+      const chipHtml = exitChip(app);
+      const headTitle = app.path || app.exe || "";
+      if (!appEl || appEl.classList.contains("gone")) {
+        const el = document.createElement("div");
+        el.className = "app" + (open ? " open" : "");
+        el.dataset.key = app.key;
+        el.innerHTML = `<div class="app-head" tabindex="0" title="${esc(headTitle)}" aria-expanded="${open}">${iconHtml(app)}<div class="app-name">${nameHtml}</div><div class="app-count mono">${cntText}</div><div class="speed mono">${spdHtml}</div><span class="chip-slot">${chipHtml}</span><svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg></div>`;
+        el._nm = nameHtml; el._cnt = cntText; el._spd = spdHtml; el._chip = chipHtml; el._ttl = headTitle;
+        if (appEl) { appListBox.replaceChild(el, appEl); if (cursor === appEl) cursor = el; }
+        appEl = el;
+      } else {
+        appEl.classList.toggle("open", open);
+        const head = appEl.firstElementChild;
+        if (head.getAttribute("aria-expanded") !== String(open)) head.setAttribute("aria-expanded", String(open));
+        if (appEl._ttl !== headTitle) { appEl._ttl = headTitle; head.title = headTitle; }
+        syncIcon(head, app);
+        if (appEl._nm !== nameHtml) { appEl._nm = nameHtml; head.querySelector(".app-name").innerHTML = nameHtml; }
+        if (appEl._cnt !== cntText) { appEl._cnt = cntText; head.querySelector(".app-count").textContent = cntText; }
+        if (appEl._spd !== spdHtml) { appEl._spd = spdHtml; head.querySelector(".speed").innerHTML = spdHtml; }
+        if (appEl._chip !== chipHtml) { appEl._chip = chipHtml; head.querySelector(".chip-slot").innerHTML = chipHtml; }
+      }
+      let connsBox = appEl.querySelector(":scope > .conns");
+      if (!open) {
+        if (connsBox) connsBox.remove();
+      } else {
+        if (!connsBox) {
+          connsBox = document.createElement("div");
+          connsBox.className = "conns";
+          appEl.appendChild(connsBox);
+        }
+        reconcileAppConns(connsBox, app, conns);
+      }
+    }
+    if (appEl !== cursor) appListBox.insertBefore(appEl, cursor);
+    else cursor = cursor.nextElementSibling;
+  }
+  for (const [k, el] of existingApps) if (!seenApps.has(k) && el.isConnected) el.remove();
+}
+
+let kbActive = false;
+document.addEventListener("keydown", (e) => {
+  if (["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", " "].includes(e.key)) kbActive = true;
+}, true);
+document.addEventListener("pointerdown", () => { kbActive = false; }, true);
+
+const FOCUS_ATTRS = ["data-cpin", "data-cdel", "data-cid", "data-nact", "data-nclose", "data-ngtoggle", "data-ngmute", "data-ngclear", "data-nid", "data-sheet-app", "data-node", "data-rm", "data-chip", "data-ai-more", "data-tday", "data-more", "data-sp", "data-do"];
+function captureListFocus(list) {
+  if (!kbActive || !list.contains(document.activeElement) || document.activeElement === list) return null;
+  const ae = document.activeElement;
+  for (const attr of FOCUS_ATTRS) {
+    if (ae.hasAttribute(attr)) {
+      const id = ae.getAttribute("data-id") || "";
+      return { attr, val: ae.getAttribute(attr), id };
+    }
+  }
+  if (ae.hasAttribute("data-seg")) return { attr: "data-seg", val: ae.getAttribute("data-seg"), sub: ae.getAttribute("data-val") };
+  if (ae.hasAttribute("data-ol")) return { attr: "data-ol", val: ae.getAttribute("data-ol"), id: ae.getAttribute("data-id") };
+  if (ae.classList.contains("app-head")) {
+    const key = ae.parentElement?.getAttribute("data-key");
+    if (key) return { appKey: key };
+  }
+  if (ae.hasAttribute("data-tab")) return { attr: "data-tab", val: ae.getAttribute("data-tab"), cls: ae.classList.contains("top-row") ? "top-row" : "" };
+  return null;
+}
+function restoreListFocus(list, saved) {
+  if (!saved || !kbActive) return;
+  let el = null;
+  if (saved.appKey) {
+    el = list.querySelector(`.app[data-key="${CSS.escape(saved.appKey)}"] > .app-head`);
+  } else if (saved.attr === "data-seg") {
+    el = list.querySelector(`[data-seg="${CSS.escape(saved.val)}"][data-val="${CSS.escape(saved.sub || "")}"]`);
+  } else if (saved.attr === "data-ol") {
+    el = list.querySelector(`[data-ol="${CSS.escape(saved.val)}"][data-id="${CSS.escape(saved.id || "")}"]`);
+  } else if (saved.attr === "data-tab" && saved.cls) {
+    el = list.querySelector(`.${saved.cls}[data-tab="${CSS.escape(saved.val)}"]`);
+  } else if (saved.attr) {
+    const q = `[${saved.attr}="${CSS.escape(saved.val)}"]` + (saved.id ? `[data-id="${CSS.escape(saved.id)}"]` : "");
+    el = list.querySelector(q);
+  }
+  el?.focus?.({ preventScroll: true });
+}
+
+let aiVer = 0;
+let lastTabKey = "";
+let readNotesTimer = 0;
+
+function scheduleReadNotes() {
+  if (tab !== "notes" || (MANAGER ? document.hidden : !expanded)) return;
+  const un = notes.filter((n) => !n.read).map((n) => n.id);
+  if (un.length && !readNotesTimer) {
+    readNotesTimer = setTimeout(() => {
+      readNotesTimer = 0;
+      if (tab !== "notes" || (MANAGER ? document.hidden : !expanded)) return;
+      const cur = notes.filter((n) => !n.read).map((n) => n.id);
+      if (cur.length) { readNotes(cur); afterNotesChange(); }
+    }, 1500);
+  }
+}
+
+function tabDataKey() {
+  const cw = chartW();
+  const busy = [...busyActions].join(",");
+  switch (tab) {
+    case "ai":
+      return `ai|${sget("ai.on", true)}|${sget("ai.live", true)}|${sget("ai.interval", 10)}|${aiVer}|${Math.floor(Date.now() / 60_000)}|${[...aiExpanded].join(",")}|${busy}|${agents.map((a) => `${a.id}:${a.state}:${a.ask || ""}`).join("|")}`;
+    case "notes":
+      return `notes|${sget("notify.on", true)}|${!!notifyInfo?.quiet}|${notesVer}|${Math.floor(Date.now() / 30_000)}|${[...ncOpen].join(",")}`;
+    case "rules": {
+      const c = ctrl();
+      const ns = nodesCache ? `${nodesCache.now}:${nodesCache.nodes.map((n) => `${n.name}=${n.delay || 0}`).join(",")}` : "closed";
+      return `rules|${c.status}|${c.message || ""}|${c.node || ""}|${switchingNode || ""}|${busy}|${ctlOff()}|${confirmDisable}|${c.rules.map((r) => `${r.id}:${r.target}:${r.kind}:${r.process || ""}:${r.value || ""}`).join(",")}|${ns}`;
+    }
+    case "guard": {
+      const g = snap?.guard || {};
+      const gs = g.settings || {};
+      const fnSig = fnView ? `${fnView.learnUntil || 0}:${(fnView.apps || []).map((a) => `${a.path}:${a.blocked ? 1 : 0}:${a.allowed ? 1 : 0}`).join(",")}` : "";
+      return `guard|${g.unacked || 0}|${g.total || 0}|${!!g.tun}|${ctrl().status}|${sget("firstNet.on", true)}|${busy}|${Math.floor(Date.now() / 30_000)}|${(g.alerts || []).map((a) => `${a.key}:${a.active ? 1 : 0}:${a.acked ? 1 : 0}:${a.blocked ? 1 : 0}`).join(",")}|${!!gs.builtin}:${!!gs.gfw}:${!!gs.forceProxy}:${!!gs.notify}:${gs.gfwUpdated || 0}:${gs.gfwError || ""}|${(gs.imports || []).map((i) => `${i.url}:${i.enabled ? 1 : 0}:${i.count}`).join(",")}|${(gs.custom || []).map((c) => `${c.kind}:${c.value}`).join(",")}|${(gs.blocked || []).map((b) => b.path).join(",")}|${fnSig}`;
+    }
+    case "listen":
+      return `listen|${query}|${snap?.slim ? "slim" : "full"}|${(snap?.apps || []).map((a) => `${a.key}:${a.listen.join(",")}`).join("|")}`;
+    case "traffic":
+      return `traffic|${trafficVer}|${trafficDays}|${trafficDay || ""}|${trafficSort}|${cw}`;
+    case "nodes":
+      return `nodes|${latVer}|${snap?.latency?.at || 0}|${snap?.latency?.ms ?? "x"}|${snap?.latency?.node || ""}|${!!snap?.proxy?.mihomoOk}|${nodeRange}|${busy}|${sget("general.profile", "balanced")}|${sget("flash.latencyMs", 800)}|${(exitState?.groups || []).map((g) => `${g.group}=${g.node}`).join(",")}|${cw}`;
+  }
+  return "";
 }
 
 function renderList(force = false) {
@@ -3781,13 +4607,15 @@ function renderList(force = false) {
 }
 
 function renderListNow(force) {
-  JSPERF.list++;
   const list = $("list");
   if (listPress && !force) return;
+  if (force) lastTabKey = "";
   if (tab === "settings") {
     // the settings page only re-renders when settings change (not on every snapshot), so open
     // dropdowns and number fields are not destroyed while the user works with them
     if (!force || sortDrag) return;
+    JSPERF.list++;
+    const saved = captureListFocus(list);
     const scroll = list.scrollTop;
     list.innerHTML = `<div id="list-inner">${settingsHtml()}</div>`;
     list.scrollTop = scroll;
@@ -3795,7 +4623,7 @@ function renderListNow(force) {
       const r = [...list.querySelectorAll(`[data-dl="${gripFocus.path}"] .s-drag-row`)].find((x) => x.dataset.id === gripFocus.id);
       r?.querySelector("[data-grip]")?.focus({ preventScroll: true });
       gripFocus = null;
-    }
+    } else restoreListFocus(list, saved);
     measurePanel();
     return;
   }
@@ -3803,9 +4631,16 @@ function renderListNow(force) {
     // built once and updated in place (sys) or rebuilt only when the song / state changes (music)
     const m = media;
     const key = m ? `${m.title}|${m.artist}|${m.playing}|${m.cover ? m.cover.length : 0}|${m.duration > 0}` : "";
-    if (!force && (tab === "sys" ? $("sysmon") : list.querySelector(".music") && key === musicKey)) return;
+    if (!force && (tab === "sys" ? $("sysmon") : list.querySelector(".music") && key === musicKey)) {
+      if (tab === "music") ensureMuTimer();
+      return;
+    }
+    JSPERF.list++;
+    const saved = captureListFocus(list);
     list.innerHTML = `<div id="list-inner">${tab === "sys" ? sysPageHtml() : musicPageHtml()}</div>`;
     if (tab === "sys") { updateSys(); renderStartup(); ensureSysPoll(); }
+    if (tab === "music") ensureMuTimer();
+    restoreListFocus(list, saved);
     updateViz();
     measurePanel();
     return;
@@ -3814,13 +4649,16 @@ function renderListNow(force) {
     // searching: only the rows change, the box keeps its focus
     if (list.contains(document.activeElement) && document.activeElement.classList.contains("clip-q")) {
       const box = list.querySelector(".clip-list");
-      if (box && clipShown !== clipVer) { box.innerHTML = clipRowsHtml(); clipShown = clipVer; }
+      if (box && clipShown !== clipVer) { box.innerHTML = clipRowsHtml(); syncClipCount(); clipShown = clipVer; measurePanel(); }
       return;
     }
     if (!force && !clipStale()) return;
+    JSPERF.list++;
+    const saved = captureListFocus(list);
     const scroll = list.scrollTop;
     list.innerHTML = `<div id="list-inner">${clipPageHtml()}</div>`;
     list.scrollTop = scroll;
+    restoreListFocus(list, saved);
     measurePanel();
     return;
   }
@@ -3830,66 +4668,72 @@ function renderListNow(force) {
   }
   // don't wipe what the user is typing into an input inside the list
   if (list.contains(document.activeElement) && ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (tab === "traffic") loadTraffic(false);
+  if (tab === "nodes") loadLatency();
+  const tKey = tabDataKey();
+  if (!force && tKey && tKey === lastTabKey) {
+    if (tab === "ai") {
+      list.querySelectorAll("[data-ag-started]").forEach((el) => {
+        const v = elapsed(Date.now() - Number(el.dataset.agStarted));
+        if (el.textContent !== v) el.textContent = v;
+      });
+    }
+    if (tab === "notes") scheduleReadNotes();
+    return;
+  }
+  lastTabKey = tKey;
+  JSPERF.list++;
+  const savedFocus = captureListFocus(list);
   const rows = [];
   refs = [];
-  if (tab === "speed" || tab === "traffic" || tab === "nodes" || tab === "home" || tab === "ai" || tab === "notes") {
-    const scroll = list.scrollTop;
-    const html = { speed: speedTabHtml, traffic: trafficTabHtml, nodes: nodesTabHtml, home: homeHtml, ai: aiTabHtml, notes: notesPageHtml }[tab]();
-    list.innerHTML = `<div id="list-inner">${html}</div>`;
-    list.scrollTop = scroll;
+  if (tab === "speed") {
+    reconcileSpeed(list);
     Charts.restore(list);
     measurePanel();
-    // the notes page was looked at: everything on it counts as seen (the pill icons go away)
-    if (tab === "notes" && (MANAGER ? !document.hidden : expanded)) {
-      const un = notes.filter((n) => !n.read).map((n) => n.id);
-      if (un.length) setTimeout(() => { readNotes(un); renderPill(); if (!MANAGER) renderPages(); }, 1500);
-    }
+    return;
+  }
+  if (tab === "home") {
+    reconcileHome(list);
+    Charts.restore(list);
+    measurePanel();
+    return;
+  }
+  if (tab === "traffic" || tab === "nodes" || tab === "ai" || tab === "notes") {
+    const scroll = list.scrollTop;
+    const html = { traffic: trafficTabHtml, nodes: nodesTabHtml, ai: aiTabHtml, notes: notesPageHtml }[tab]();
+    list.innerHTML = `<div id="list-inner">${html}</div>`;
+    list.scrollTop = scroll;
+    restoreListFocus(list, savedFocus);
+    Charts.restore(list);
+    measurePanel();
+    if (tab === "notes") scheduleReadNotes();
+    return;
+  }
+  if (!listHover && $("menu").hidden && connOrders.size) {
+    const liveKeys = new Set(snap.apps.map((a) => a.key));
+    for (const k of connOrders.keys()) if (!liveKeys.has(k)) connOrders.delete(k);
+  }
+  if (tab === "conns") {
+    reconcileConns(list);
+    measurePanel();
     return;
   }
   if (tab === "rules") {
+    const nodeScroll = list.querySelector(".node-list")?.scrollTop || 0;
     rows.push(rulesTabHtml());
+    const scroll = list.scrollTop;
+    list.innerHTML = `<div id="list-inner">${rows.join("")}</div>`;
+    list.scrollTop = scroll;
+    const nl = list.querySelector(".node-list");
+    if (nl && nodeScroll) nl.scrollTop = nodeScroll;
+    restoreListFocus(list, savedFocus);
+    measurePanel();
+    return;
   } else if (tab === "guard") {
     rows.push(guardTabHtml());
-  } else if (tab === "conns") {
-    const leaks = snap.guard?.unacked || 0;
-    if (diag.problem && sget("diag.on", true)) {
-      const dp = diag.problem;
-      rows.push(`<div class="banner alert dg-banner ${dp.kind === "sysproxy" ? "warn" : ""}">${svgI(dp.kind === "sysproxy" ? DG_PATH.plug : DG_PATH.wifiOff, 15, 2.2)}<span><b>${esc(dp.problem || tr("网络异常"))}</b> · ${esc(dp.verdict || "")}</span><button class="primary" data-do="diag-open">${tr("查看诊断")}</button></div>`);
-    }
-    if (leaks) rows.push(`<div class="banner alert">${tr("⚠ 检测到 {0} 条代理泄漏：本该走代理的连接直连了。", leaks)}<button class="primary" data-do="goto-guard">${tr("查看")}</button></div>`);
-    const b = bannerHtml();
-    if (b) rows.push(b);
-    const visible = snap.apps.filter((app) => app.conns.some((c) => matches(app, c)));
-    for (const app of stable(visible, (a) => a.key, appOrder)) {
-      if (!connOrders.has(app.key)) connOrders.set(app.key, { order: null, last: new Map() });
-      const conns = app._gone ? [] : stable(app.conns.filter((c) => matches(app, c)), connKey, connOrders.get(app.key));
-      if (app._gone) {
-        rows.push(`<div class="app gone" data-key="${esc(app.key)}"><div class="app-head">${iconHtml(app)}<div class="app-name">${esc(app.name)}<span class="sub">${tr("连接已结束")}</span></div></div></div>`);
-        continue;
-      }
-      const open = openApps.has(app.key) || (query && conns.length <= 8);
-      const procs = app.pids.length > 1 ? `<span class="sub">${tr("{0} 个进程", app.pids.length)}</span>` : "";
-      const tag = app.isProxy ? `<span class="tag">${tr("代理")}</span>` : "";
-      let body = "";
-      if (open) {
-        const limit = showAll.has(app.key) ? conns.length : MAX_CONNS_PER_APP;
-        body = `<div class="conns">${conns.slice(0, limit).map((c) => connHtml(app, c)).join("")}${
-          conns.length > limit ? `<div class="more" data-more="${esc(app.key)}">${tr("还有 {0} 条，点击显示全部", conns.length - limit)}</div>` : ""
-        }</div>`;
-      }
-      rows.push(`<div class="app ${open ? "open" : ""}" data-key="${esc(app.key)}">
-        <div class="app-head" tabindex="0" title="${esc(app.path || app.exe)}">
-          ${iconHtml(app)}
-          <div class="app-name">${esc(app.name)}${tag}${procs}</div>
-          <div class="app-count mono">${conns.length}</div>
-          <div class="speed mono">${snap.speedOk || app.up || app.down ? speedHtml(app.up, app.down) : ""}</div>
-          ${exitChip(app)}
-          <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
-        </div>${body}
-      </div>`);
-    }
   } else {
-    for (const app of snap.apps) {
+    let listenApps = snap.apps;
+    for (const app of listenApps) {
       const ports = app.listen.filter((p) => !query || matches(app) || p.toLowerCase().includes(query.toLowerCase()));
       if (!ports.length) continue;
       rows.push(`<div class="app open" data-key="${esc(app.key)}">
@@ -3900,7 +4744,7 @@ function renderListNow(force) {
         </div>
         <div class="ports">${ports.map((p) => {
           const pub = /\s(0\.0\.0\.0|::):/.test(p);
-          return `<span class="port-chip mono ${pub ? "pub" : ""}" title="${pub ? tr("监听所有网卡（局域网可访问）") : ""}">${esc(p)}</span>`;
+          return `<span class="port-chip mono ${pub ? "pub" : ""}" title="${pub ? esc(tr("监听所有网卡（局域网可访问）")) : ""}">${esc(p)}</span>`;
         }).join("")}</div>
       </div>`);
     }
@@ -3908,15 +4752,16 @@ function renderListNow(force) {
   const scroll = list.scrollTop;
   list.innerHTML = `<div id="list-inner">${rows.length ? rows.join("") : `<div class="empty">${query ? tr("没有匹配的结果") : tr("没有连接")}</div>`}</div>`;
   list.scrollTop = scroll;
+  restoreListFocus(list, savedFocus);
   measurePanel();
 }
 
 function renderPanel() {
   if (!expanded) return;
   renderLiveBar();
-  renderExit();
+  if (!MANAGER) renderExit();
   renderProxyLine();
-  const setCount = (id, v) => { const el = $("tab-" + id); if (el) el.textContent = v; };
+  const setCount = (id, v) => { const el = $("tab-" + id); if (el && el.textContent !== String(v)) el.textContent = String(v); };
   setCount("conns", snap?.connCount ?? 0);
   setCount("listen", snap?.listenCount ?? 0);
   setCount("rules", ctrl().rules.length);
@@ -3928,7 +4773,9 @@ function renderPanel() {
     $("tab-notes").parentElement.classList.toggle("has", u > 0);
   }
   $("gear").classList.toggle("active", tab === "settings");
-  $("total-speed").innerHTML = snap && (snap.speedOk || snap.up || snap.down) ? speedHtml(snap.up, snap.down) : "";
+  const totHtml = snap && ((snap.up || 0) >= 1 || (snap.down || 0) >= 1) ? speedHtml(snap.up, snap.down) : "";
+  const totEl = $("total-speed");
+  if (totEl._last !== totHtml) { totEl._last = totHtml; totEl.innerHTML = totHtml; }
   renderList();
   const foot = [];
   if (snap) {
@@ -3936,7 +4783,9 @@ function renderPanel() {
     if (snap.hiddenLoopback) foot.push(`${tr("已隐藏 {0} 条本机回环连接", snap.hiddenLoopback)}`);
     if (!snap.geoSource) foot.push(`<span class="warn">${tr("没找到 IP 归属地库（country.mmdb / ASN.mmdb）")}</span>`);
   }
-  $("foot").innerHTML = foot.map((x) => `<span>${x}</span>`).join("");
+  const footHtml = foot.map((x) => `<span>${x}</span>`).join("");
+  const footEl = $("foot");
+  if (footEl._last !== footHtml) { footEl._last = footHtml; footEl.innerHTML = footHtml; }
   measurePanel();
 }
 
@@ -4025,8 +4874,28 @@ async function runAction(el) {
       toast(await invoke("notify_hook", { tool, on }));
       loadNotifyInfo();
       return;
+    } else if (act === "search-clear") {
+      $("search").value = "";
+      query = "";
+      syncSearchClear();
+      $("search").focus({ preventScroll: true });
+      renderList(true);
+      return;
+    } else if (act === "clip-q-clear") {
+      clipQuery = "";
+      const inp = document.querySelector("#list .clip-q");
+      if (inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
+      const clr = document.querySelector("#list .clip-q-x");
+      if (clr) clr.hidden = true;
+      const box = document.querySelector("#list .clip-list");
+      if (box) box.innerHTML = clipRowsHtml();
+      syncClipCount();
+      measurePanel();
+      loadClips();
+      return;
     } else if (act === "clip-clear") {
       await invoke("clip_clear", { all: false });
+      loadClips();
       toast(tr("已清空（置顶的保留）"));
       return;
     } else if (act === "notes-clear") {
@@ -4052,10 +4921,17 @@ async function runAction(el) {
       afterNotesChange();
       return;
     } else if (act === "update-check") {
-      toast(tr("正在检查更新…"));
-      updateInfo = await invoke("update_check");
-      toast(updateInfo.available ? `${tr("有新版本 {0}", updateInfo.version)}` : tr("已经是最新版本"));
+      if (busyActions.has(act)) return;
+      busyActions.add(act);
       renderList(true);
+      toast(tr("正在检查更新…"));
+      try {
+        updateInfo = await invoke("update_check");
+        toast(updateInfo.available ? `${tr("有新版本 {0}", updateInfo.version)}` : tr("已经是最新版本"));
+      } finally {
+        busyActions.delete(act);
+        renderList(true);
+      }
       return;
     } else if (act === "update-install") {
       updFailed = false;
@@ -4108,9 +4984,16 @@ async function runAction(el) {
       if (appInfo?.logDir) invoke("open_url", { url: appInfo.logDir });
       return;
     } else if (act === "lat-probe") {
+      if (busyActions.has(act)) return;
+      busyActions.add(act);
+      renderList(true);
       toast(tr("测速中…"));
-      const l = await invoke("latency_probe");
-      toast(l.ms != null ? `${l.ms} ms` : `${tr("无响应：{0}", l.error || "")}`, l.ms == null);
+      try {
+        const l = await invoke("latency_probe");
+        toast(l.ms != null ? `${l.ms} ms` : `${tr("无响应：{0}", l.error || "")}`, l.ms == null);
+      } finally {
+        busyActions.delete(act);
+      }
     } else if (act === "hotkey-rec") {
       hotkeyRec = !hotkeyRec;
       renderList(true);
@@ -4128,15 +5011,31 @@ async function runAction(el) {
       toast(tr("到屏幕上的岛那里拖动边缘调整大小，调完点「完成」"));
       return;
     } else if (act === "ai-refresh") {
-      const waiting = (await invoke("ai_refresh")) || [];
-      toast(waiting.length
-        ? `${tr("正在查询；{0} 才能再查（官方接口限流很严，查太勤会被暂停）", waiting.map((w) => w.replace(" ", tr(" 要到 "))).join(tr("、")))}`
-        : tr("正在查询 AI 额度…"));
+      if (busyActions.has(act)) return;
+      busyActions.add(act);
+      renderList(true);
+      try {
+        const waiting = (await invoke("ai_refresh")) || [];
+        toast(waiting.length
+          ? `${tr("正在查询；{0} 才能再查（官方接口限流很严，查太勤会被暂停）", waiting.map((w) => w.replace(" ", tr(" 要到 "))).join(tr("、")))}`
+          : tr("正在查询 AI 额度…"));
+      } finally {
+        setTimeout(() => { busyActions.delete(act); if (tab === "ai") renderList(true); }, 600);
+      }
       return;
     } else if (act === "exit-refresh") {
-      await invoke("refresh_exit");
+      if (busyActions.has(act)) return;
+      busyActions.add(act);
       if (exitState) exitState.checking = true;
+      renderPill();
+      renderList(true);
       toast(tr("正在重新检测出口…"));
+      try {
+        await invoke("refresh_exit");
+      } finally {
+        setTimeout(() => { busyActions.delete(act); if (tab === "home") renderList(); }, 800);
+      }
+      return;
     } else if (act === "media-prev" || act === "media-toggle" || act === "media-next") {
       await invoke("media_control", { action: { "media-prev": "previous", "media-toggle": "play-pause", "media-next": "next" }[act] });
       return;
@@ -4147,13 +5046,30 @@ async function runAction(el) {
       switchTab(act === "goto-guard" ? "guard" : "rules");
       return;
     } else if (act === "ack-all") {
+      if (snap?.guard) {
+        (snap.guard.alerts || []).forEach((a) => { a.acked = true; });
+        snap.guard.unacked = 0;
+        renderPill();
+        renderPanel();
+      }
       await invoke("alert_ack", { key: null });
     } else if (act === "clear-alerts") {
+      if (snap?.guard?.alerts) {
+        snap.guard.alerts = snap.guard.alerts.filter((a) => a.active);
+        renderList(true);
+      }
       await invoke("alert_clear");
     } else if (act === "gfw-update") {
+      if (busyActions.has(act)) return;
+      busyActions.add(act);
+      renderList(true);
       toast(tr("正在下载 gfw 列表…"));
-      const n = await invoke("guard_update_gfw");
-      toast(`${tr("gfw 列表已更新：{0} 条", n)}`);
+      try {
+        const n = await invoke("guard_update_gfw");
+        toast(`${tr("gfw 列表已更新：{0} 条", n)}`);
+      } finally {
+        busyActions.delete(act);
+      }
     } else if (act === "import") {
       const url = $("g-import").value.trim();
       if (!url) return;
@@ -4170,11 +5086,26 @@ async function runAction(el) {
       $("g-add").blur();
       toast(tr("已添加"));
     } else if (act === "nodes") {
-      nodesCache = nodesCache ? null : await invoke("control_nodes", { test: false });
+      if (nodesCache) {
+        nodesCache = null;
+      } else {
+        if (busyActions.has(act)) return;
+        busyActions.add(act);
+        renderList(true);
+        try { nodesCache = await invoke("control_nodes", { test: false }); }
+        finally { busyActions.delete(act); }
+      }
     } else if (act === "test") {
+      if (busyActions.has(act)) return;
+      busyActions.add(act);
+      renderList(true);
       toast(tr("测速中…"));
-      nodesCache = await invoke("control_nodes", { test: true });
-      toast(tr("测速完成"));
+      try {
+        nodesCache = await invoke("control_nodes", { test: true });
+        toast(tr("测速完成"));
+      } finally {
+        busyActions.delete(act);
+      }
     }
   } catch (err) {
     toast(String(err), true);
@@ -4184,11 +5115,21 @@ async function runAction(el) {
 
 async function applyRule(spec) {
   closeMenu();
+  const prevRules = snap?.control?.rules ? [...snap.control.rules] : null;
+  if (snap?.control?.rules) {
+    const lc = (s) => String(s || "").toLowerCase();
+    snap.control.rules = snap.control.rules.filter((r) => !(r.kind === spec.kind && lc(r.process) === lc(spec.process) && lc(r.value) === lc(spec.value)));
+    if (spec.target !== "default") {
+      snap.control.rules.push({ id: `_opt_${Date.now()}`, kind: spec.kind, process: spec.process, value: spec.value, target: spec.target });
+    }
+    renderPanel();
+  }
   try {
     const n = await invoke("control_set", spec);
     const what = spec.target === "default" ? tr("已恢复按规则") : `${tr("已设为{0}", TARGET_LABEL[spec.target])}`;
     toast(n ? `${tr("{0}，断开重连了 {1} 条连接", what, n)}` : what);
   } catch (err) {
+    if (snap?.control && prevRules) { snap.control.rules = prevRules; renderPanel(); }
     toast(String(err), true);
   }
 }
@@ -4197,6 +5138,14 @@ $("panel").addEventListener("contextmenu", (e) => {
   if (tab === "notes" && notesContext(e)) return;
 });
 $("panel").addEventListener("click", (e) => {
+  const cp = e.target.closest("[data-copy]");
+  if (cp) {
+    e.stopPropagation();
+    const inMenuCopy = !!cp.closest("#menu");
+    if (inMenuCopy) closeMenu();
+    copyText(cp.dataset.copy, inMenuCopy ? null : cp);
+    return;
+  }
   if (tab === "notes" && !e.target.closest("[data-do]") && notesClick(e)) return;
   if (tab === "clip" && !e.target.closest("[data-do]") && clipClick(e)) return;
   const inMenu = e.target.closest("#menu");
@@ -4225,15 +5174,31 @@ $("panel").addEventListener("click", (e) => {
   const act = e.target.closest("[data-act]");
   if (act) {
     e.stopPropagation();
-    const ref = refs[Number(act.dataset.act)];
+    const appKey = act.closest(".app")?.dataset.key;
+    const ckey = act.closest(".c")?.dataset.ckey;
+    const ref = (appKey && ckey ? connRefs.get(`${appKey}\n${ckey}`) : null) || refs[Number(act.dataset.act)];
     if (ref) openMenu(act, connMenu(ref[0], ref[1]));
     return;
   }
   const node = e.target.closest("[data-node]");
   if (node) {
-    invoke("control_select", { name: node.dataset.node })
-      .then(() => { if (nodesCache) nodesCache.now = node.dataset.node; toast(tr("已切换节点")); renderList(); })
-      .catch((err) => toast(String(err), true));
+    const nextName = node.dataset.node;
+    if (switchingNode === nextName) return;
+    const prevNow = nodesCache?.now;
+    const prevCtrlNode = snap?.control?.node;
+    switchingNode = nextName;
+    if (nodesCache) nodesCache.now = nextName;
+    if (snap?.control) snap.control.node = nextName;
+    renderList(true);
+    invoke("control_select", { name: nextName })
+      .then(() => { switchingNode = null; toast(tr("已切换节点")); renderList(true); })
+      .catch((err) => {
+        switchingNode = null;
+        if (nodesCache && prevNow !== undefined) nodesCache.now = prevNow;
+        if (snap?.control && prevCtrlNode !== undefined) snap.control.node = prevCtrlNode;
+        renderList(true);
+        toast(String(err), true);
+      });
     return;
   }
   const seg = e.target.closest("[data-seg]");
@@ -4304,14 +5269,28 @@ $("panel").addEventListener("click", (e) => {
   }
   const rm = e.target.closest("[data-rm]");
   if (rm) {
-    invoke("control_remove", { id: rm.dataset.rm }).then(() => toast(tr("已删除规则"))).catch((err) => toast(String(err), true));
+    const rmId = rm.dataset.rm;
+    const prevRules = snap?.control?.rules ? [...snap.control.rules] : null;
+    if (snap?.control?.rules) {
+      snap.control.rules = snap.control.rules.filter((r) => r.id !== rmId);
+      renderPanel();
+    }
+    invoke("control_remove", { id: rmId })
+      .then(() => toast(tr("已删除规则")))
+      .catch((err) => {
+        if (snap?.control && prevRules) { snap.control.rules = prevRules; renderPanel(); }
+        toast(String(err), true);
+      });
     return;
   }
   if (!inMenu) closeMenu();
 }, true);
 
 async function guardAction(el) {
+  if (el.disabled) return;
   const d = el.dataset;
+  el.disabled = true;
+  el.classList.add("is-busy");
   try {
     if (d.block) {
       const { path, exe } = JSON.parse(d.block);
@@ -4320,21 +5299,38 @@ async function guardAction(el) {
       await invoke("guard_unblock", { path: d.unblock });
       toast(tr("已解除"));
     } else if (d.ack) {
+      const al = snap?.guard?.alerts?.find((a) => a.key === d.ack);
+      if (al && !al.acked) {
+        al.acked = true;
+        if (snap.guard.unacked > 0) snap.guard.unacked--;
+        renderPill();
+        renderPanel();
+      }
       await invoke("alert_ack", { key: d.ack });
     } else if (d.exclude) {
       await invoke("guard_add", { text: "!" + d.exclude });
       await invoke("alert_ack", { key: null });
       toast(`${tr("以后 {0} 直连不再预警", d.exclude)}`);
     } else if (d.imprm) {
+      if (snap?.guard?.settings?.imports) {
+        snap.guard.settings.imports = snap.guard.settings.imports.filter((i) => i.url !== d.imprm);
+        renderList(true);
+      }
       await invoke("guard_import_set", { url: d.imprm, enabled: null, remove: true });
     } else if (d.crm) {
       const e = JSON.parse(d.crm);
+      if (snap?.guard?.settings?.custom) {
+        snap.guard.settings.custom = snap.guard.settings.custom.filter((c) => !(c.kind === e.kind && c.value === e.value));
+        renderList(true);
+      }
       await invoke("guard_remove", { kind: e.kind, value: e.value });
     }
   } catch (err) {
     toast(String(err), true);
+  } finally {
+    if (el.isConnected) { el.disabled = false; el.classList.remove("is-busy"); }
   }
-  renderList();
+  renderList(true);
 }
 
 // checkboxes in the guard tab
@@ -4412,11 +5408,37 @@ function visibleTabs() {
   return tabs.length ? tabs : ["conns"];
 }
 
+function syncTabFade() {
+  if (MANAGER || !expanded) return;
+  const t = $("tabs");
+  if (!t) return;
+  const over = t.scrollWidth > t.clientWidth + 2;
+  t.classList.toggle("fade-l", over && t.scrollLeft > 2);
+  t.classList.toggle("fade-r", over && t.scrollLeft + t.clientWidth < t.scrollWidth - 2);
+}
+
+function ensureTabVisible() {
+  if (MANAGER || !expanded) return;
+  const t = $("tabs");
+  if (!t) return;
+  if (t.scrollWidth > t.clientWidth + 2) {
+    const a = t.querySelector(".tab.active");
+    if (a) {
+      const left = a.offsetLeft - t.offsetLeft;
+      const right = left + a.offsetWidth;
+      if (left < t.scrollLeft + 8) t.scrollLeft = Math.max(0, left - 12);
+      else if (right > t.scrollLeft + t.clientWidth - 8) t.scrollLeft = right - t.clientWidth + 12;
+    }
+  }
+  syncTabFade();
+}
+
 function renderTabs() {
   const tabs = visibleTabs();
   if (MANAGER) {
     if (!tabs.includes(tab)) tab = "home";
     document.body.dataset.page = tab;
+    island.dataset.tab = tab;
     if (tab === "settings") {
       // the sidebar becomes the settings categories, with a way back
       $("tabs").innerHTML = settingsNavHtml();
@@ -4431,13 +5453,16 @@ function renderTabs() {
   }
   if (tab !== "settings" && !PAGE_TABS.has(tab) && !tabs.includes(tab)) tab = tabs[0];
   if (!tabs.includes(netTab)) netTab = tabs[0];
+  island.dataset.tab = tab;
   renderPages();
   $("tabs").innerHTML = tabs
     .map((id) => `<button class="tab ${id === tab ? "active" : ""}" data-tab="${id}">${TAB_DEFS[id].label}${TAB_DEFS[id].count ? ` <span id="tab-${id}" class="mono">0</span>` : ""}</button>`)
     .join("");
+  ensureTabVisible();
 }
 
 function switchTab(name, zoomFrom = null) {
+  if (!name) return;
   if (!MANAGER && name === "settings") {
     // the island's gear opens the settings in the desktop window
     invoke("open_manager", { page: "settings" }).catch(() => {});
@@ -4446,6 +5471,8 @@ function switchTab(name, zoomFrom = null) {
   const crossing = MANAGER && (tab === "settings") !== (name === "settings");
   if (MANAGER && name === "settings" && tab !== "settings") setBack = tab;
   tab = name;
+  island.dataset.tab = name;
+  lastTabKey = "";
   if (crossing) {
     renderTabs();
     playIn($("tabs"), name === "settings" ? "nav-fwd" : "nav-back");
@@ -4454,6 +5481,7 @@ function switchTab(name, zoomFrom = null) {
   renderPages();
   document.querySelectorAll(".tab[data-tab]").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   $("gear").classList.toggle("active", name === "settings");
+  if (!MANAGER) ensureTabVisible();
   if (MANAGER) {
     document.body.dataset.page = name;
     if (name === "settings") {
@@ -4462,11 +5490,12 @@ function switchTab(name, zoomFrom = null) {
       refreshAppInfo();
       groupOptions = null;
     }
-    if (name === "ai") invoke("ai_get").then((a) => { aiState = a || []; renderList(true); }).catch(() => {});
+    if (name === "ai") invoke("ai_get").then((a) => { aiState = a || []; aiVer++; renderList(true); }).catch(() => {});
     try { history.replaceState(null, "", "#" + name); } catch { /* ignore */ }
   }
   $("list").scrollTop = 0;
   Sheet.close();
+  Charts.clearHover();
   // a card opened its page: the page grows out of the card; otherwise the items rise in one by one
   if (zoomFrom) Cascade.play(null);
   else Cascade.play($("list"));
@@ -4475,11 +5504,13 @@ function switchTab(name, zoomFrom = null) {
   if (MANAGER) renderPanel();
   else measurePanel();
   ensureSysPoll();
+  ensureMuTimer();
   updateViz();
   if (tour.on && expanded) renderTour();
 }
 
 // a very narrow island: the wheel scrolls the tab row sideways
+$("tabs").addEventListener("scroll", syncTabFade, { passive: true });
 $("tabs").addEventListener("wheel", (e) => {
   const t = $("tabs");
   if (MANAGER || t.scrollWidth <= t.clientWidth || !e.deltaY) return;
@@ -4519,10 +5550,16 @@ function applyGlass() {
 }
 
 let pageRestored = MANAGER;
+let lastLangSetting = undefined;
 function applySettings(s) {
   S = s;
+  lastTabKey = "";
   // the backend resolves general.lang (auto = Windows display language); another one = reload
-  invoke("ui_lang").then((l) => I18N.sync(l)).catch(() => {});
+  const langPref = sget("general.lang", "auto");
+  if (langPref !== lastLangSetting) {
+    lastLangSetting = langPref;
+    invoke("ui_lang").then((l) => I18N.sync(l)).catch(() => {});
+  }
   if (!pageRestored) {
     // open on the page used last time
     pageRestored = true;
@@ -4531,9 +5568,9 @@ function applySettings(s) {
       if (PAGE_TABS.has(p)) tab = p;
     } catch { /* ignore */ }
   }
-  document.documentElement.style.setProperty("--q-ok", sget("ai.ring.colors.ok", "#34d399"));
-  document.documentElement.style.setProperty("--q-warn", sget("ai.ring.colors.warn", "#fbbf24"));
-  document.documentElement.style.setProperty("--q-crit", sget("ai.ring.colors.crit", "#f87171"));
+  document.documentElement.style.setProperty("--q-ok", safeColor(sget("ai.ring.colors.ok", "#34d399"), "#34d399"));
+  document.documentElement.style.setProperty("--q-warn", safeColor(sget("ai.ring.colors.warn", "#fbbf24"), "#fbbf24"));
+  document.documentElement.style.setProperty("--q-crit", safeColor(sget("ai.ring.colors.crit", "#f87171"), "#f87171"));
   applyTheme();
   applyGlass();
   applyMotion();
@@ -4545,6 +5582,7 @@ function applySettings(s) {
   }
   renderTabs();
   if (!editing) fitWindow();
+  pillLast = "";
   renderPill();
   if (tab === "settings") renderList(true);
   else renderPanel();
@@ -4569,8 +5607,14 @@ if (MANAGER && tab === "settings") {
   refreshAppInfo();
 }
 
+function syncSearchClear() {
+  const x = $("search-x");
+  if (x) x.hidden = !$("search").value.length;
+}
+
 $("search").addEventListener("input", (e) => {
   query = e.target.value.trim();
+  syncSearchClear();
   renderList();
 });
 
@@ -4596,6 +5640,7 @@ $("exit-row").addEventListener("click", (e) => {
 {
   let lastW = 0;
   new ResizeObserver(() => {
+    if (!expanded || curPage() !== "net") return;
     const w = $("exit-row").clientWidth;
     if (w && w !== lastW) {
       lastW = w;
@@ -4605,32 +5650,78 @@ $("exit-row").addEventListener("click", (e) => {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    if (editing) {
-      endEdit(false);
-      return;
-    }
+  if (e.key !== "Escape" || hotkeyRec) return;
+  if (editing) {
+    endEdit(false);
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  if (!$("menu").hidden) {
+    closeMenu();
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  if (Sheet.isOpen()) {
+    Sheet.close();
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  if (tab === "clip" && clipQuery) {
+    clipQuery = "";
+    const inp = document.querySelector("#list .clip-q");
+    if (inp) { inp.value = ""; inp.blur(); }
+    const clr = document.querySelector("#list .clip-q-x");
+    if (clr) clr.hidden = true;
+    loadClips();
+    renderList(true);
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  if ($("search").value || query) {
     $("search").value = "";
     query = "";
+    syncSearchClear();
     $("search").blur();
-    if (!MANAGER) invoke("collapse_island").catch(() => {});
+    renderList(true);
+    e.preventDefault();
+    e.stopPropagation();
+    return;
   }
-});
+  if (document.activeElement?.tagName === "INPUT" && (document.activeElement.id === "search" || document.activeElement.classList.contains("clip-q"))) {
+    document.activeElement.blur();
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  if (!MANAGER) {
+    if (nst.on) hideNotes();
+    else invoke("collapse_island").catch(() => {});
+    e.preventDefault();
+  }
+}, true);
 
 listen("ai", (e) => {
   aiState = e.payload || [];
+  aiVer++;
+  if (document.hidden) { dirtyOnShow = true; return; }
   renderPill();
   if (tab === "ai" || tab === "home") renderList(true);
 });
 listen("media", (e) => {
   media = e.payload || null;
+  ensureMuTimer();
+  updateViz();
+  if (document.hidden) { dirtyOnShow = true; return; }
   renderPill();
   if (tab === "home") renderList(true);
   else if (tab === "music") renderList();
-  updateViz();
 });
-invoke("ai_get").then((a) => { aiState = a || []; }).catch(() => {});
-invoke("media_get").then((m) => { media = m || null; }).catch(() => {});
+invoke("ai_get").then((a) => { aiState = a || []; aiVer++; }).catch(() => {});
+invoke("media_get").then((m) => { media = m || null; ensureMuTimer(); }).catch(() => {});
 
 listen("island", (e) => {
   if (MANAGER || editing) return;
@@ -4769,8 +5860,9 @@ if (!MANAGER) {
   listen("tour-start", () => { tour.on = false; startTour(); });
 }
 
-// the panel never scrolls as a whole (only #list inside it does); focus() could shift it
-$("panel").addEventListener("scroll", () => { if ($("panel").scrollTop) $("panel").scrollTop = 0; });
+// neither #island nor #panel ever scrolls as a whole (only #list inside it does); focus()/scrollIntoView() could shift them
+island.addEventListener("scroll", () => { if (island.scrollTop || island.scrollLeft) { island.scrollTop = 0; island.scrollLeft = 0; } });
+$("panel").addEventListener("scroll", () => { if ($("panel").scrollTop || $("panel").scrollLeft) { $("panel").scrollTop = 0; $("panel").scrollLeft = 0; } });
 
 // click-to-open: the window receives the press itself while the cursor is over the pill
 // ---------- grab and fling ----------
@@ -4857,6 +5949,10 @@ function startGrab(e) {
   const { vertical } = edgeAxis();
   expanded = false;
   closeMenu();
+  hideNotes();
+  Sheet.close();
+  Charts.clearHover();
+  ensureMuTimer();
   island.classList.remove("expanded", "peek", "touring");
   island.classList.add("collapsed", "grabbed", "flinging");
   pillLast = "";
@@ -4884,6 +5980,27 @@ function cancelPress() {
   press = null;
 }
 
+function abortGrab() {
+  cancelPress();
+  if (!fling.active) return;
+  cancelAnimationFrame(fling.raf);
+  const target = fling.target || fling.from || sget("shape.anchor", "center");
+  const dock = fling.free && fling.dock ? fling.dock : "";
+  fling.active = false;
+  fling.free = false;
+  fling.phase = "";
+  suppressClick = false;
+  hideDockHint();
+  island.classList.remove("grabbed", "free", "flinging", "bump-x", "bump-y");
+  island.style.transformOrigin = "";
+  invoke("grab_end", { anchor: target, dock: dock || null }).catch(() => {});
+  pillLast = "";
+  renderPill();
+  fitted = "";
+  fitWindow();
+  applySize();
+}
+
 // Is the pointer on a scrollbar of the pressed element or one of its scrolling parents?
 // (Holding a scrollbar still must not grab the island.)
 function onScrollbar(e) {
@@ -4900,8 +6017,8 @@ function onScrollbar(e) {
 
 island.addEventListener("pointerdown", (e) => {
   if (MANAGER || editing || fling.active || e.button !== 0) return;
-  // controls, the scrub chart, the sheet and the tour card are not handles for grabbing the island
-  if (e.target.closest("input, select, textarea, #menu, #tour, .sheet, .sheet-scrim, [data-nograb]")) return;
+  // controls, the scrub chart, notes, the sheet and the tour card are not handles for grabbing the island
+  if (e.target.closest("input, select, textarea, #note, #menu, #tour, .sheet, .sheet-scrim, [data-nograb]")) return;
   if (onScrollbar(e)) return;
   const ev = { pointerId: e.pointerId, screenX: e.screenX, screenY: e.screenY };
   const hold = Math.min(1000, Math.max(150, Number(sget("interaction.holdMs", 260)) || 260));
@@ -4962,6 +6079,17 @@ document.addEventListener("pointerup", (e) => {
   }
   if (fling.active && fling.phase === "drag") release();
 });
+document.addEventListener("pointercancel", () => {
+  if (fling.active) abortGrab();
+  else cancelPress();
+});
+island.addEventListener("lostpointercapture", () => {
+  if (fling.active && fling.phase === "drag") {
+    if (!document.hasFocus()) abortGrab();
+    else release();
+  } else cancelPress();
+});
+window.addEventListener("blur", abortGrab);
 
 // swallow the click that ends a grab (it might land on a button)
 document.addEventListener("click", (e) => {
@@ -5063,6 +6191,11 @@ function bump(dir) {
   island.classList.remove("bump-x", "bump-y");
   void island.offsetWidth; // restart the animation
   island.classList.add(vertical ? "bump-y" : "bump-x");
+  clearTimeout(bump.t);
+  bump.t = setTimeout(() => {
+    island.classList.remove("bump-x", "bump-y");
+    island.style.transformOrigin = "";
+  }, 190);
 }
 
 function endFling() {
@@ -5111,6 +6244,7 @@ function editRect() {
 function showEditPart() {
   if (editPart === "panel") {
     expanded = true;
+  if (snap?.slim) invoke("get_snapshot").then((s) => { if (s) onSnapshot({ payload: s }); }).catch(() => {});
     island.classList.add("expanded");
     island.classList.remove("collapsed");
     panelHNow = panelH();
@@ -5128,6 +6262,9 @@ function showEditPart() {
 
 function startEdit() {
   if (editing || MANAGER) return;
+  hideNotes();
+  Sheet.close();
+  closeMenu();
   editing = true;
   editPart = "panel";
   const cur = {};
@@ -5159,31 +6296,66 @@ async function endEdit(save) {
   if (save) toast(tr("大小已保存"));
 }
 
-// which edges can be dragged depends on the docked edge (the island stays centred on it)
-function editEdges(dock) {
-  return { top: ["e", "w", "s"], bottom: ["e", "w", "n"], left: ["e", "n", "s"], right: ["w", "n", "s"] }[dock] || ["e", "w", "s"];
+// which edges can be dragged depends on the docked edge and anchor along that edge
+function editEdges(dock, anchor) {
+  if (dock === "left" || dock === "right") {
+    const perp = dock === "left" ? ["e"] : ["w"];
+    const par = anchor === "start" ? ["s"] : anchor === "end" ? ["n"] : ["n", "s"];
+    return [...perp, ...par];
+  }
+  const perp = dock === "bottom" ? ["n"] : ["s"];
+  const par = anchor === "start" ? ["e"] : anchor === "end" ? ["w"] : ["e", "w"];
+  return [...par, ...perp];
+}
+
+function editKeysFor(r) {
+  if (editPart === "panel") return { kW: "panelW", kH: "panelH" };
+  return r.vertical ? { kW: "pillH", kH: "pillW" } : { kW: "pillW", kH: "pillH" };
 }
 
 function renderEditUi() {
   const box = $("edit");
   if (!editing || !box) return;
   const r = editRect();
-  const kW = editPart === "panel" ? "panelW" : "pillW";
-  const kH = editPart === "panel" ? "panelH" : "pillH";
-  const handles = editEdges(r.dock).map((e) => {
+  const anchor = sget("shape.anchor", "center");
+  const { kW, kH } = editKeysFor(r);
+  const handles = editEdges(r.dock, anchor).map((e) => {
     const hz = e === "e" || e === "w";
     const x = e === "e" ? r.x + r.w - 5 : e === "w" ? r.x - 5 : r.x + r.w / 2 - 22;
     const y = e === "s" ? r.y + r.h - 5 : e === "n" ? r.y - 5 : r.y + r.h / 2 - 22;
     return `<div class="eh ${hz ? "ew" : "ns"}" data-edge="${e}" style="left:${x}px;top:${y}px"></div>`;
   }).join("");
   const w = Math.round(r.w), h = Math.round(r.h);
-  const ty = editPart === "panel" ? r.y + r.h / 2 - 40 : r.dock === "bottom" ? r.y - 110 : r.y + r.h + 24;
+  let cx = r.x + r.w / 2;
+  let ty;
+  if (editPart === "panel") {
+    ty = r.y + r.h / 2 - 48;
+  } else if (r.dock === "left") {
+    cx = r.x + r.w + 180;
+    ty = r.y + r.h / 2 - 48;
+  } else if (r.dock === "right") {
+    cx = r.x - 180;
+    ty = r.y + r.h / 2 - 48;
+  } else if (r.dock === "bottom") {
+    ty = r.y - 116;
+  } else {
+    ty = r.y + r.h + 24;
+  }
+  const autoLen = editPart === "pill" && !(editSize.pillW > 0);
   box.innerHTML = `${handles}<div class="e-frame" style="left:${r.x}px;top:${r.y}px;width:${r.w}px;height:${r.h}px"></div>
-    <div class="e-bar" style="top:${Math.max(4, ty)}px">
+    <div class="e-bar" style="left:${Math.round(cx)}px;top:${Math.max(8, Math.round(ty))}px">
       <div class="e-row">${segmented("epart", editPart, [["panel", tr("展开面板")], ["pill", tr("收起的胶囊")]])}<span class="mono e-size">${w} × ${h}</span></div>
-      <div class="e-row"><span class="e-hint">${tr("拖动{0}的边缘调整大小{1}", editPart === "panel" ? tr("面板") : tr("胶囊"), editPart === "pill" && !(editSize[kW] > 0) ? tr("（宽度现在是自动的）") : "")}</span></div>
+      <div class="e-row"><span class="e-hint">${tr("拖动{0}的边缘调整大小{1}", editPart === "panel" ? tr("面板") : tr("胶囊"), autoLen ? tr("（宽度现在是自动的）") : "")}</span></div>
       <div class="e-row"><button class="ghost" data-edo="reset">${tr("恢复默认")}</button><button class="ghost" data-edo="cancel">${tr("取消")}</button><button class="primary" data-edo="done">${tr("完成")}</button></div>
     </div>`;
+  const bar = box.querySelector(".e-bar");
+  if (bar) {
+    const bw = bar.offsetWidth || 320, bh = bar.offsetHeight || 104;
+    const clampedX = Math.max(bw / 2 + 8, Math.min(window.innerWidth - bw / 2 - 8, cx));
+    const clampedY = Math.max(8, Math.min(window.innerHeight - bh - 8, ty));
+    bar.style.left = `${Math.round(clampedX)}px`;
+    bar.style.top = `${Math.round(clampedY)}px`;
+  }
   box.dataset.kw = kW;
   box.dataset.kh = kH;
 }
@@ -5194,9 +6366,8 @@ $("edit").addEventListener("pointerdown", (e) => {
   if (!hd) return;
   const r = editRect();
   const edge = hd.dataset.edge;
-  const kW = editPart === "panel" ? "panelW" : "pillW";
-  const kH = editPart === "panel" ? "panelH" : "pillH";
-  drag = { edge, x: e.clientX, y: e.clientY, w: r.w, h: r.h, kW, kH, dock: r.dock };
+  const { kW, kH } = editKeysFor(r);
+  drag = { edge, x: e.clientX, y: e.clientY, w: r.w, h: r.h, kW, kH, dock: r.dock, anchor: sget("shape.anchor", "center") };
   // capture on the layer, not the handle: every move re-renders the handles, and a replaced
   // handle loses the capture (the drag broke off, and the lost pointerup left it "held")
   try { $("edit").setPointerCapture(e.pointerId); } catch { /* ignore */ }
@@ -5211,15 +6382,16 @@ $("edit").addEventListener("pointermove", (e) => {
     return;
   }
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-  const centredX = drag.dock === "top" || drag.dock === "bottom";
-  const centredY = !centredX;
+  const verticalDock = drag.dock === "left" || drag.dock === "right";
+  const mulX = !verticalDock && drag.anchor === "center" ? 2 : 1;
+  const mulY = verticalDock && drag.anchor === "center" ? 2 : 1;
   let w = drag.w, h = drag.h;
-  if (drag.edge === "e") w = drag.w + (centredX ? 2 * dx : dx);
-  if (drag.edge === "w") w = drag.w - (centredX ? 2 * dx : dx);
-  if (drag.edge === "s") h = drag.h + (centredY ? 2 * dy : dy);
-  if (drag.edge === "n") h = drag.h - (centredY ? 2 * dy : dy);
-  const clamp = (k, v) => Math.round(Math.min(SIZE_LIMITS[k][1], Math.max(k === "pillW" ? 120 : SIZE_LIMITS[k][0], v)));
-  if (drag.edge === "e" || drag.edge === "w") editSize[drag.kW] = clamp(drag.kW, w);
+  if (drag.edge === "e") w = drag.w + mulX * dx;
+  if (drag.edge === "w") w = drag.w - mulX * dx;
+  if (drag.edge === "s") h = drag.h + mulY * dy;
+  if (drag.edge === "n") h = drag.h - mulY * dy;
+  const clamp = (k, v) => Math.round(Math.min(SIZE_LIMITS[k][1], Math.max(k === "pillW" ? (verticalDock ? 60 : 120) : SIZE_LIMITS[k][0], v)));
+  if (drag.edge === "e" || drag.edge === "w") editSize[drag.kW] = clamp(drag.kW, drag.kW === "pillH" ? w - 4 : w);
   else editSize[drag.kH] = clamp(drag.kH, h);
   if (editPart === "panel") panelHNow = panelH();
   applySize();
@@ -5267,10 +6439,29 @@ function focusables() {
   return [...$("list").querySelectorAll('.app-head, button:not(:disabled), input, select, [tabindex="0"]')].filter((el) => el.offsetParent);
 }
 
+const ROW_ACTIVATE_SEL = ".app-head, .sp-row, .tile.go, .top-row, .clip-row, .ncard, .node-item, .gx-more";
+
 document.addEventListener("keydown", (e) => {
-  if (!expanded) return;
+  if (!expanded || Sheet.isOpen() || hotkeyRec || editing) return;
   const a = document.activeElement;
-  const typing = a && (a.tagName === "INPUT" || a.tagName === "SELECT");
+  const typing = a && (a.tagName === "INPUT" || a.tagName === "SELECT" || a.tagName === "TEXTAREA");
+  if (((e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "f") || (!typing && !e.ctrlKey && !e.altKey && !e.metaKey && e.key === "/")) && $("menu").hidden && !tour.on) {
+    if (tab === "conns" || tab === "listen") {
+      const s = $("search");
+      if (s && s.offsetParent) { s.focus(); s.select(); e.preventDefault(); return; }
+    } else if (tab === "clip") {
+      const s = document.querySelector("#list .clip-q");
+      if (s && s.offsetParent) { s.focus(); s.select(); e.preventDefault(); return; }
+    }
+  }
+  if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && tab === "conns" && a?.classList.contains("app-head")) {
+    const key = a.parentElement?.dataset.key;
+    if (key && !a.parentElement.classList.contains("gone")) {
+      const isOpen = openApps.has(key);
+      if (e.key === "ArrowRight" && !isOpen) { openApps.add(key); renderList(); e.preventDefault(); return; }
+      if (e.key === "ArrowLeft" && isOpen) { openApps.delete(key); renderList(); e.preventDefault(); return; }
+    }
+  }
   if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.classList.contains("pg")) {
     const pages = visiblePages();
     const i = pages.indexOf(a.dataset.page) + (e.key === "ArrowRight" ? 1 : -1);
@@ -5278,13 +6469,37 @@ document.addEventListener("keydown", (e) => {
     switchPage(id);
     document.querySelector(`.pg[data-page="${id}"]`)?.focus({ preventScroll: true });
     e.preventDefault();
-  } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.classList.contains("tab")) {
-    const tabs = [...document.querySelectorAll(".tab")];
+  } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.classList.contains("tab") && a.dataset.tab) {
+    const tabs = [...document.querySelectorAll(".tab[data-tab]")];
+    if (!tabs.length) return;
     const i = tabs.indexOf(a) + (e.key === "ArrowRight" ? 1 : -1);
     const t = tabs[(i + tabs.length) % tabs.length];
     switchTab(t.dataset.tab);
     document.querySelector(`.tab[data-tab="${t.dataset.tab}"]`)?.focus({ preventScroll: true });
     e.preventDefault();
+  } else if (MANAGER && (e.key === "ArrowUp" || e.key === "ArrowDown") && a?.closest("#tabs")) {
+    const navBtns = [...$("tabs").querySelectorAll("button.tab")];
+    if (!navBtns.length) return;
+    const i = navBtns.indexOf(a);
+    const next = navBtns[(i + (e.key === "ArrowDown" ? 1 : -1) + navBtns.length) % navBtns.length];
+    if (next.dataset.setcat) {
+      setCategory(next.dataset.setcat);
+      $("tabs").querySelector(`[data-setcat="${next.dataset.setcat}"]`)?.focus({ preventScroll: true });
+    } else if (next.dataset.tab) {
+      switchTab(next.dataset.tab);
+      $("tabs").querySelector(`.tab[data-tab="${next.dataset.tab}"]`)?.focus({ preventScroll: true });
+    } else {
+      next.focus({ preventScroll: true });
+    }
+    e.preventDefault();
+  } else if (MANAGER && (e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.closest("#tabs")) {
+    if (e.key === "ArrowLeft" && a.dataset.setcat) {
+      $("tabs").querySelector("[data-setback]")?.focus({ preventScroll: true });
+      e.preventDefault();
+    } else if (e.key === "ArrowRight") {
+      focusables()[0]?.focus({ preventScroll: true });
+      e.preventDefault();
+    }
   } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !typing) {
     const list = focusables();
     if (!list.length) return;
@@ -5296,7 +6511,7 @@ document.addEventListener("keydown", (e) => {
       list[next].scrollIntoView({ block: "nearest" });
     }
     e.preventDefault();
-  } else if ((e.key === "Enter" || e.key === " ") && (a?.classList.contains("app-head") || a?.classList.contains("sp-row"))) {
+  } else if ((e.key === "Enter" || e.key === " ") && a?.matches?.(ROW_ACTIVATE_SEL) && e.target === a) {
     a.click();
     e.preventDefault();
   }
@@ -5325,6 +6540,21 @@ setInterval(() => {
   for (const k in p) p[k] = 0;
 }, 600_000);
 
+let dirtyOnShow = false;
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && dirtyOnShow) {
+    dirtyOnShow = false;
+    if (snap?.slim) {
+      invoke("get_snapshot").then((s) => { if (s) onSnapshot({ payload: s }); }).catch(() => {});
+    }
+    applyMotion();
+    pillLast = "";
+    renderPill();
+    if (expanded) renderPanel();
+  }
+  ensureMuTimer();
+});
+
 let snapErr = 0;
 listen("snapshot", (e) => {
   const t0 = performance.now();
@@ -5335,28 +6565,37 @@ listen("snapshot", (e) => {
   JSPERF.snapMs += performance.now() - t0;
 });
 function onSnapshot(e) {
-  snap = e.payload;
+  snap = hydrateSnap(e.payload);
   exitState = snap.exit;
-  if (!!snap.maximized !== maximized) setMaximized(snap.maximized);
   recordSpeed(snap);
+  if (document.hidden) {
+    dirtyOnShow = true;
+    return;
+  }
+  if (!MANAGER && !!snap.maximized !== maximized) setMaximized(snap.maximized);
   applyMotion();
-  checkFlashes(snap);
+  if (!MANAGER) checkFlashes(snap);
   renderPill();
   renderPanel();
 }
 
 listen("exit", (e) => {
   exitState = e.payload;
+  if (document.hidden) {
+    dirtyOnShow = true;
+    return;
+  }
   renderPill();
   renderPanel();
 });
 
 invoke("get_snapshot").then((s) => {
   if (s) {
-    snap = s;
+    snap = hydrateSnap(s);
     exitState = s.exit;
   }
   renderPill();
+  if (expanded) renderPanel();
 }).catch(() => renderPill());
 
 // ---------- glass backdrop ----------
@@ -5368,7 +6607,7 @@ let glassFrames = 0;
 // Darker tint over bright backgrounds keeps text readable; lighter over dark ones keeps it glassy.
 // px is a piece (w x h) of the window-sized backdrop (W x H), at ox, oy (all in quarter px)
 function adaptTint(px, w, h, ox, oy, W, H) {
-  const r = islandRect(expanded);
+  const r = lastIslandRect || islandRect(expanded);
   const sx = W / (window.innerWidth || 1), sy = H / (window.innerHeight || 1);
   const x0 = Math.max(0, Math.floor(r.x * sx) - ox), x1 = Math.min(w, Math.ceil((r.x + r.w) * sx) - ox);
   const y0 = Math.max(0, Math.floor(r.y * sy) - oy), y1 = Math.min(h, Math.ceil((r.y + r.h) * sy) - oy);
@@ -5376,7 +6615,7 @@ function adaptTint(px, w, h, ox, oy, W, H) {
   for (let y = y0; y < y1; y += 3) {
     for (let x = x0; x < x1; x += 3) {
       const i = (y * w + x) * 4;
-      sum += 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+      sum += (px[i] * 54 + px[i + 1] * 183 + px[i + 2] * 19) >> 8;
       n++;
     }
   }
@@ -5385,7 +6624,11 @@ function adaptTint(px, w, h, ox, oy, W, H) {
   let a = document.documentElement.dataset.theme === "light" ? 0.5 + (1 - luma) * 0.32 : 0.4 + luma * 0.42;
   // opacity setting: 50 = as computed, 100 = opaque, 20 = very clear
   a = glassOpacity >= 50 ? a + (1 - a) * ((glassOpacity - 50) / 50) : a * (glassOpacity / 50);
-  island.style.setProperty("--tint-a", a.toFixed(3));
+  smoothTintA = smoothTintA == null ? a : smoothTintA + (a - smoothTintA) * 0.24;
+  if (Math.abs(smoothTintA - lastTintA) >= 0.008) {
+    lastTintA = smoothTintA;
+    island.style.setProperty("--tint-a", smoothTintA.toFixed(3));
+  }
 }
 
 // Per-pixel brightness limit on the blurred backdrop, so text stays readable where the panel sits
@@ -5420,6 +6663,8 @@ function legible(px) {
 function startGlass() {
   const ch = new T.core.Channel();
   ch.onmessage = (msg) => {
+    const card = nst.on || (tour.on && !fling.active);
+    if (!glassWanted || gameOn || fling.free || (!expanded && !card && shape().style === "line")) return;
     const t0 = performance.now();
     const ab = msg instanceof ArrayBuffer ? msg : msg?.buffer instanceof ArrayBuffer ? msg.buffer : new Uint8Array(msg).buffer;
     const dv = new DataView(ab);
@@ -5453,6 +6698,7 @@ let resizeTimer = null;
 window.addEventListener("resize", () => {
   if (!MANAGER && !editing) applySize();
   reportRect();
+  syncTabFade();
   if (MANAGER) {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => renderList(true), 150); // charts follow the window width

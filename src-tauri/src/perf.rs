@@ -1,36 +1,64 @@
 //! Self-measurement: CPU time per background part and a few counters, one log line every 10 minutes
-//! ("perf: …"), plus the WebView2 processes (the page) and memory. Cheap: a part records its
-//! thread's CPU total (one GetThreadTimes call) when it goes round its loop.
+//! ("perf: …"), plus the WebView2 processes (the page) and memory. Zero-cost on hot loops: each
+//! worker thread duplicates its thread handle once on its first `tick` and is queried every 10 min.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-use windows_sys::Win32::System::Threading::{GetCurrentThread, GetCurrentThreadId, GetProcessTimes, GetThreadTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, FILETIME, HANDLE};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThread, GetExitCodeThread, GetProcessTimes, GetThreadTimes, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::log;
 
-/// thread id -> (part, CPU total in 100 ns)
-static THREADS: Mutex<Option<HashMap<u32, (&'static str, u64)>>> = Mutex::new(None);
+const STILL_ACTIVE_CODE: u32 = 259;
+
+struct RegThread {
+    handle: isize,
+    part: &'static str,
+    prev_cpu: u64,
+}
+
+static THREADS: Mutex<Vec<RegThread>> = Mutex::new(Vec::new());
 /// counter name -> count since the last line
 static COUNTS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
+
+thread_local! {
+    static REGISTERED: Cell<bool> = const { Cell::new(false) };
+}
 
 fn ft(f: &FILETIME) -> u64 {
     ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64
 }
 
-/// The calling thread works for `part`: records its CPU time so far.
+unsafe fn thread_cpu(h: HANDLE) -> Option<u64> {
+    let (mut a, mut b, mut k, mut u) = std::mem::zeroed::<(FILETIME, FILETIME, FILETIME, FILETIME)>();
+    if GetThreadTimes(h, &mut a, &mut b, &mut k, &mut u) == 0 {
+        None
+    } else {
+        Some(ft(&k) + ft(&u))
+    }
+}
+
+/// Registers the calling thread for `part` once via thread-local flag; subsequent calls are a no-op.
 pub fn tick(part: &'static str) {
-    let cpu = unsafe {
-        let (mut a, mut b, mut k, mut u) = std::mem::zeroed::<(FILETIME, FILETIME, FILETIME, FILETIME)>();
-        if GetThreadTimes(GetCurrentThread(), &mut a, &mut b, &mut k, &mut u) == 0 {
+    if REGISTERED.with(|r| r.get()) {
+        return;
+    }
+    REGISTERED.with(|r| r.set(true));
+    unsafe {
+        let mut h: HANDLE = std::ptr::null_mut();
+        let proc_h = GetCurrentProcess();
+        if DuplicateHandle(proc_h, GetCurrentThread(), proc_h, &mut h, 0, 0, DUPLICATE_SAME_ACCESS) == 0 || h.is_null() {
             return;
         }
-        ft(&k) + ft(&u)
-    };
-    let id = unsafe { GetCurrentThreadId() };
-    THREADS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, (part, cpu));
+        let prev_cpu = thread_cpu(h).unwrap_or(0);
+        THREADS.lock().unwrap().push(RegThread { handle: h as isize, part, prev_cpu });
+    }
 }
 
 pub fn count(name: &'static str, n: u64) {
@@ -89,21 +117,36 @@ fn tree() -> Vec<(u32, String)> {
 /// Starts the line every 10 minutes (percentages are averages over that time).
 pub fn start() {
     std::thread::spawn(|| {
-        let mut prev_threads: HashMap<u32, u64> = HashMap::new();
         let mut prev_procs: HashMap<u32, u64> = HashMap::new();
+        for (pid, _) in tree() {
+            if let Some((cpu, _)) = unsafe { proc_cpu_mem(pid) } {
+                prev_procs.insert(pid, cpu);
+            }
+        }
         let mut at = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(600));
-            let wall = at.elapsed().as_secs_f64() * 1e7; // in 100 ns
+            let wall = (at.elapsed().as_secs_f64() * 1e7).max(1.0); // in 100 ns
             at = Instant::now();
             let pct = |d: u64| d as f64 / wall * 100.0;
             // parts of MicaBar's own process
-            let threads = THREADS.lock().unwrap().clone().unwrap_or_default();
-            let mut parts: HashMap<&str, u64> = HashMap::new();
-            for (id, (part, cpu)) in &threads {
-                let d = cpu.saturating_sub(*prev_threads.get(id).unwrap_or(cpu));
-                *parts.entry(part).or_insert(0) += d;
-                prev_threads.insert(*id, *cpu);
+            let mut parts: HashMap<&'static str, u64> = HashMap::new();
+            {
+                let mut threads = THREADS.lock().unwrap();
+                threads.retain_mut(|t| unsafe {
+                    let h = t.handle as HANDLE;
+                    if let Some(cpu) = thread_cpu(h) {
+                        let d = cpu.saturating_sub(t.prev_cpu);
+                        *parts.entry(t.part).or_insert(0) += d;
+                        t.prev_cpu = cpu;
+                    }
+                    let mut code: u32 = 0;
+                    let alive = GetExitCodeThread(h, &mut code) != 0 && code == STILL_ACTIVE_CODE;
+                    if !alive {
+                        CloseHandle(h);
+                    }
+                    alive
+                });
             }
             // processes: MicaBar + the WebView2 tree
             let mut procs: Vec<(String, u64, u64)> = Vec::new();
@@ -120,16 +163,38 @@ pub fn start() {
             let tracked: u64 = parts.values().sum();
             let mut pv: Vec<(&str, u64)> = parts.into_iter().filter(|(_, d)| *d > 0).collect();
             pv.sort_by(|a, b| b.1.cmp(&a.1));
-            let mut line = format!("perf: micabar {:.1}% [", pct(own));
-            line += &pv.iter().map(|(p, d)| format!("{p} {:.1}%", pct(*d))).collect::<Vec<_>>().join(", ");
-            line += &format!(", other {:.1}%]", pct(own.saturating_sub(tracked)));
-            let web: Vec<String> = procs.iter().skip(1).filter(|p| p.2 > 0).map(|(e, d, m)| format!("{} {:.1}%/{}M", e.replace("msedgewebview2", "wv"), pct(*d), m / 1_048_576)).collect();
-            line += &format!(" | mem {}M | {}", procs.first().map(|p| p.2 / 1_048_576).unwrap_or(0), web.join(", "));
-            let counts = COUNTS.lock().unwrap().take().unwrap_or_default();
-            if !counts.is_empty() {
+            let other = pct(own.saturating_sub(tracked));
+            let mut line = if pv.is_empty() {
+                format!("perf: micabar {:.1}% [other {other:.1}%]", pct(own))
+            } else {
+                let parts_str = pv.iter().map(|(p, d)| format!("{p} {:.1}%", pct(*d))).collect::<Vec<_>>().join(", ");
+                format!("perf: micabar {:.1}% [{parts_str}, other {other:.1}%]", pct(own))
+            };
+            let web: Vec<String> = procs
+                .iter()
+                .skip(1)
+                .filter(|p| p.2 > 0)
+                .map(|(e, d, m)| format!("{} {:.1}%/{}M", e.replace("msedgewebview2", "wv"), pct(*d), m / 1_048_576))
+                .collect();
+            line += &format!(" | mem {}M", procs.first().map(|p| p.2 / 1_048_576).unwrap_or(0));
+            if !web.is_empty() {
+                line += &format!(" | {}", web.join(", "));
+            }
+            let mut counts = COUNTS.lock().unwrap().take().unwrap_or_default();
+            let diff_sum = counts.remove("glass diff_sum").unwrap_or(0);
+            let diff_n = counts.remove("glass diff_n").unwrap_or(0);
+            let mut cv_strs: Vec<String> = {
                 let mut cv: Vec<_> = counts.into_iter().collect();
                 cv.sort();
-                line += &format!(" | {}", cv.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
+                cv.into_iter().map(|(k, v)| format!("{k} {v}")).collect()
+            };
+            if diff_n > 0 {
+                let avg_diff = diff_sum as f64 / diff_n as f64 / 100.0;
+                cv_strs.push(format!("glass diff {avg_diff:.1}"));
+                cv_strs.sort();
+            }
+            if !cv_strs.is_empty() {
+                line += &format!(" | {}", cv_strs.join(", "));
             }
             log(line);
         }

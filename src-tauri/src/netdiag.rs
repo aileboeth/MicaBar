@@ -6,11 +6,14 @@
 //! It also keeps an eye on the system proxy: switched off or pointed elsewhere while the proxy
 //! client still runs (another program changed it) is reported with a one-click restore.
 
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::ffi::c_void;
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+use std::os::windows::io::{FromRawSocket, RawSocket};
 use std::os::windows::process::CommandExt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -98,10 +101,38 @@ struct Watch {
 static W: Mutex<Watch> = Mutex::new(Watch { last: None, problem: None, good_proxy: None, proxy_off_since: None, proxy_ignored: false, running: false });
 static INFO: Mutex<Option<InfoFn>> = Mutex::new(None);
 static CLIENT_EXE: Mutex<Option<String>> = Mutex::new(None);
+static WAKE: OnceLock<(Mutex<u8>, Condvar)> = OnceLock::new();
+
+const WAKE_NET: u8 = 1;
+const WAKE_RESUME: u8 = 2;
+
+fn wake_pair() -> &'static (Mutex<u8>, Condvar) {
+    WAKE.get_or_init(|| (Mutex::new(0), Condvar::new()))
+}
+
+/// Signals that an adapter, IP address, route or proxy state just changed so probes run promptly.
+pub fn notify_network_change() {
+    let (lock, cvar) = wake_pair();
+    if let Ok(mut f) = lock.lock() {
+        *f |= WAKE_NET;
+        cvar.notify_one();
+    }
+}
+
+/// Signals that Windows just resumed from sleep / hibernate.
+pub fn notify_resume() {
+    let (lock, cvar) = wake_pair();
+    if let Ok(mut f) = lock.lock() {
+        *f |= WAKE_RESUME;
+        cvar.notify_one();
+    }
+}
 
 fn client_file() -> std::path::PathBuf {
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(base).join("MicaBar").join("proxy-client.txt")
+    let dir = std::path::PathBuf::from(base).join("MicaBar");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("proxy-client.txt")
 }
 
 /// The proxy client's exe as last seen running (kept on disk: after a restart of MicaBar the
@@ -110,7 +141,7 @@ pub fn remember_client(exe: &str) {
     let mut g = CLIENT_EXE.lock().unwrap();
     if g.as_deref() != Some(exe) {
         *g = Some(exe.to_string());
-        let _ = std::fs::write(client_file(), exe);
+        let _ = crate::settings::atomic_write(&client_file(), exe.as_bytes());
     }
 }
 
@@ -161,12 +192,19 @@ fn problem_kind(w: &Watch) -> Option<String> {
 
 // ---------- probes ----------
 
-/// The real uplink: up, not a TUN adapter, with an IPv4 gateway (lowest metric).
+/// The real uplink: up, not a TUN or virtual adapter, with an IPv4 gateway (lowest metric).
 fn uplink() -> Option<(String, Ipv4Addr)> {
     let ads = ipconfig::get_adapters().ok()?;
     let mut best: Option<(u32, String, Ipv4Addr)> = None;
     for a in &ads {
-        if a.oper_status() != ipconfig::OperStatus::IfOperStatusUp || proxy::looks_like_tun(a) {
+        if a.oper_status() != ipconfig::OperStatus::IfOperStatusUp || proxy::looks_like_tun(a) || proxy::is_virtual_nic(a) {
+            continue;
+        }
+        let has_usable_v4 = a.ip_addresses().iter().any(|i| match i {
+            IpAddr::V4(v) => !v.is_loopback() && !v.is_link_local() && !v.is_unspecified(),
+            _ => false,
+        });
+        if !has_usable_v4 {
             continue;
         }
         let Some(gw) = a.gateways().iter().find_map(|g| match g {
@@ -212,22 +250,14 @@ fn adapters_summary() -> String {
 /// One ICMP echo; round trip in ms.
 fn ping(ip: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
     #[repr(C)]
-    struct OptionInfo {
-        ttl: u8,
-        tos: u8,
-        flags: u8,
-        size: u8,
-        data: *mut u8,
-    }
-    #[repr(C)]
-    struct EchoReply {
+    struct IcmpEchoReply32 {
         address: u32,
         status: u32,
         rtt: u32,
         data_size: u16,
         reserved: u16,
-        data: *mut u8,
-        options: OptionInfo,
+        data: u32,
+        options: [u8; 12],
     }
     #[link(name = "iphlpapi")]
     extern "system" {
@@ -241,23 +271,51 @@ fn ping(ip: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
             return None;
         }
         let payload = *b"micabar-diag";
-        let mut buf = vec![0u8; std::mem::size_of::<EchoReply>() + payload.len() + 16];
-        let n = IcmpSendEcho(h, u32::from_ne_bytes(ip.octets()), payload.as_ptr(), payload.len() as u16, std::ptr::null(), buf.as_mut_ptr(), buf.len() as u32, timeout_ms);
+        // u64-aligned buffer large enough for both 32-bit and 64-bit ICMP_ECHO_REPLY + payload
+        let mut buf = vec![0u64; 16];
+        let reply_bytes = (buf.len() * 8) as u32;
+        let n = IcmpSendEcho(
+            h,
+            u32::from_ne_bytes(ip.octets()),
+            payload.as_ptr(),
+            payload.len() as u16,
+            std::ptr::null(),
+            buf.as_mut_ptr() as *mut u8,
+            reply_bytes,
+            timeout_ms,
+        );
         IcmpCloseHandle(h);
         if n == 0 {
             return None;
         }
-        let r = &*(buf.as_ptr() as *const EchoReply);
+        let r = &*(buf.as_ptr() as *const IcmpEchoReply32);
         (r.status == 0).then_some(r.rtt.max(1))
     }
 }
 
+static RESOLVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+struct ResolveGuard;
+impl Drop for ResolveGuard {
+    fn drop(&mut self) {
+        RESOLVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// A fresh DNS lookup (the resolver cache bypassed), through the system's DNS settings.
+/// Capped at 2 concurrent background threads so DNS outages never leak dozens of threads.
 fn resolve(host: &str, timeout: Duration) -> Result<u32, String> {
+    if RESOLVE_WORKERS
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
+        .is_err()
+    {
+        return Err(crate::i18n::t("DNS 服务器没有回应").into());
+    }
     let (tx, rx) = mpsc::channel();
     let t = Instant::now();
     let host = host.to_string();
     std::thread::spawn(move || {
+        let _guard = ResolveGuard;
         let _ = tx.send(crate::dns::query_fresh(&host));
     });
     match rx.recv_timeout(timeout) {
@@ -269,10 +327,155 @@ fn resolve(host: &str, timeout: Duration) -> Result<u32, String> {
     }
 }
 
-/// Sends one HTTP request and returns the status code and the time to the first byte.
-fn http(addr: SocketAddr, req: &str, timeout: Duration) -> Result<(u16, u32), String> {
-    let t = Instant::now();
-    let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| short_err(&e))?;
+fn probe_dns(timeout: Duration) -> Result<u32, String> {
+    let zh = crate::i18n::lang().starts_with("zh");
+    if zh {
+        resolve("www.baidu.com", timeout)
+            .or_else(|_| resolve("www.qq.com", timeout))
+            .or_else(|_| resolve("cloudflare.com", timeout))
+    } else {
+        resolve("cloudflare.com", timeout)
+            .or_else(|_| resolve("www.gstatic.com", timeout))
+            .or_else(|_| resolve("www.baidu.com", timeout))
+    }
+}
+
+fn resolve_socket_timed(host: &str, port: u16, timeout: Duration) -> Result<SocketAddr, String> {
+    if RESOLVE_WORKERS
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
+        .is_err()
+    {
+        return Err(crate::i18n::t("DNS 服务器没有回应").into());
+    }
+    let (tx, rx) = mpsc::channel();
+    let host_owned = host.to_string();
+    std::thread::spawn(move || {
+        let _guard = ResolveGuard;
+        use std::net::ToSocketAddrs;
+        let r = (host_owned.as_str(), port)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut it| it.next());
+        let _ = tx.send(r);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Some(addr)) => Ok(addr),
+        _ => Err(crate::i18n::t("解析 www.gstatic.com 失败").into()),
+    }
+}
+
+fn connect_bound_v4(remote: SocketAddrV4, local_ip: Option<Ipv4Addr>, timeout: Duration) -> io::Result<TcpStream> {
+    let Some(lip) = local_ip else {
+        return TcpStream::connect_timeout(&SocketAddr::V4(remote), timeout);
+    };
+    #[repr(C)]
+    struct SockAddrIn {
+        sin_family: i16,
+        sin_port: u16,
+        sin_addr: [u8; 4],
+        sin_zero: [u8; 8],
+    }
+    #[repr(C)]
+    struct FdSet1 {
+        fd_count: u32,
+        fd_array: [usize; 1],
+    }
+    #[repr(C)]
+    struct TimeVal {
+        tv_sec: i32,
+        tv_usec: i32,
+    }
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn WSAStartup(ver: u16, data: *mut u8) -> i32;
+        fn socket(af: i32, stype: i32, proto: i32) -> usize;
+        fn bind(s: usize, addr: *const c_void, namelen: i32) -> i32;
+        fn connect(s: usize, addr: *const c_void, namelen: i32) -> i32;
+        fn ioctlsocket(s: usize, cmd: i32, argp: *mut u32) -> i32;
+        fn select(nfds: i32, rfds: *mut FdSet1, wfds: *mut FdSet1, efds: *mut FdSet1, timeout: *const TimeVal) -> i32;
+        fn getsockopt(s: usize, level: i32, optname: i32, optval: *mut u8, optlen: *mut i32) -> i32;
+        fn closesocket(s: usize) -> i32;
+        fn WSAGetLastError() -> i32;
+    }
+    static WSA_INIT: Once = Once::new();
+    WSA_INIT.call_once(|| unsafe {
+        let mut wsa = [0u64; 64];
+        let _ = WSAStartup(0x0202, wsa.as_mut_ptr() as *mut u8);
+    });
+
+    const AF_INET_I32: i32 = 2;
+    const SOCK_STREAM_I32: i32 = 1;
+    const IPPROTO_TCP_I32: i32 = 6;
+    const FIONBIO_CMD: i32 = 0x8004_667e_u32 as i32;
+    const WSAEWOULDBLOCK_ERR: i32 = 10035;
+    const SOL_SOCKET_LVL: i32 = 0xffff;
+    const SO_ERROR_OPT: i32 = 0x1007;
+
+    unsafe {
+        let s = socket(AF_INET_I32, SOCK_STREAM_I32, IPPROTO_TCP_I32);
+        if s == !0usize {
+            return Err(io::Error::from_raw_os_error(WSAGetLastError()));
+        }
+        let local_sa = SockAddrIn {
+            sin_family: AF_INET_I32 as i16,
+            sin_port: 0,
+            sin_addr: lip.octets(),
+            sin_zero: [0; 8],
+        };
+        if bind(s, &local_sa as *const _ as *const c_void, std::mem::size_of::<SockAddrIn>() as i32) != 0 {
+            closesocket(s);
+            return TcpStream::connect_timeout(&SocketAddr::V4(remote), timeout);
+        }
+        let mut nonblock = 1u32;
+        let _ = ioctlsocket(s, FIONBIO_CMD, &mut nonblock);
+
+        let rem_sa = SockAddrIn {
+            sin_family: AF_INET_I32 as i16,
+            sin_port: remote.port().to_be(),
+            sin_addr: remote.ip().octets(),
+            sin_zero: [0; 8],
+        };
+        let rc = connect(s, &rem_sa as *const _ as *const c_void, std::mem::size_of::<SockAddrIn>() as i32);
+        if rc != 0 {
+            let err = WSAGetLastError();
+            if err != WSAEWOULDBLOCK_ERR {
+                closesocket(s);
+                return Err(io::Error::from_raw_os_error(err));
+            }
+            let mut wfds = FdSet1 { fd_count: 1, fd_array: [s] };
+            let mut efds = FdSet1 { fd_count: 1, fd_array: [s] };
+            let tv = TimeVal {
+                tv_sec: timeout.as_secs().min(60) as i32,
+                tv_usec: timeout.subsec_micros() as i32,
+            };
+            let sel = select(0, std::ptr::null_mut(), &mut wfds, &mut efds, &tv);
+            if sel <= 0 {
+                let e = if sel == 0 {
+                    io::Error::new(io::ErrorKind::TimedOut, "timed out")
+                } else {
+                    io::Error::from_raw_os_error(WSAGetLastError())
+                };
+                closesocket(s);
+                return Err(e);
+            }
+            let mut so_err: i32 = 0;
+            let mut optlen = std::mem::size_of::<i32>() as i32;
+            if getsockopt(s, SOL_SOCKET_LVL, SO_ERROR_OPT, &mut so_err as *mut i32 as *mut u8, &mut optlen) == 0 && so_err != 0 {
+                closesocket(s);
+                return Err(io::Error::from_raw_os_error(so_err));
+            }
+            if efds.fd_count > 0 && wfds.fd_count == 0 {
+                closesocket(s);
+                return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "connect failed"));
+            }
+        }
+        let mut block = 0u32;
+        let _ = ioctlsocket(s, FIONBIO_CMD, &mut block);
+        Ok(TcpStream::from_raw_socket(s as RawSocket))
+    }
+}
+
+fn http_with_stream(mut s: TcpStream, t: Instant, req: &str, timeout: Duration) -> Result<(u16, u32), String> {
     let left = timeout.saturating_sub(t.elapsed()).max(Duration::from_millis(300));
     let _ = s.set_read_timeout(Some(left));
     let _ = s.set_write_timeout(Some(left));
@@ -287,8 +490,31 @@ fn http(addr: SocketAddr, req: &str, timeout: Duration) -> Result<(u16, u32), St
         }
     }
     let head = String::from_utf8_lossy(&buf[..got]).to_string();
-    let code = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| if got == 0 { crate::i18n::t("连接被对方关掉了").to_string() } else { crate::i18n::t("回应不是 HTTP").to_string() })?;
+    let code = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .ok_or_else(|| {
+            if got == 0 {
+                crate::i18n::t("连接被对方关掉了").to_string()
+            } else {
+                crate::i18n::t("回应不是 HTTP").to_string()
+            }
+        })?;
     Ok((code, t.elapsed().as_millis() as u32))
+}
+
+/// Sends one HTTP request and returns the status code and the time to the first byte.
+fn http(addr: SocketAddr, req: &str, timeout: Duration) -> Result<(u16, u32), String> {
+    let t = Instant::now();
+    let s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| short_err(&e))?;
+    http_with_stream(s, t, req, timeout)
+}
+
+fn http_bound_v4(addr: SocketAddrV4, local_ip: Option<Ipv4Addr>, req: &str, timeout: Duration) -> Result<(u16, u32), String> {
+    let t = Instant::now();
+    let s = connect_bound_v4(addr, local_ip, timeout).map_err(|e| short_err(&e))?;
+    http_with_stream(s, t, req, timeout)
 }
 
 fn short_err(e: &std::io::Error) -> String {
@@ -304,24 +530,38 @@ fn short_err(e: &std::io::Error) -> String {
     }
 }
 
-/// The internet without the proxy: the web APIs of two public DNS services (plain IPs, so DNS
-/// itself is not involved). Either answering is enough.
+/// The internet without the proxy: bound to the physical IPv4 NIC so TUN Global mode is bypassed.
+/// Probes two domestic public DNS HTTP APIs plus 1.1.1.1:80 for overseas / non-CN networks.
 fn direct(timeout: Duration) -> Result<u32, String> {
-    let targets = [
-        ("119.29.29.29:80", "GET /d?dn=qq.com HTTP/1.1\r\nHost: 119.29.29.29\r\nConnection: close\r\n\r\n"),
-        ("223.5.5.5:80", "GET /resolve?name=qq.com HTTP/1.1\r\nHost: 223.5.5.5\r\nConnection: close\r\n\r\n"),
+    let local_v4 = proxy::physical_ipv4().and_then(|(_, ip)| match ip {
+        IpAddr::V4(v4) => Some(v4),
+        _ => None,
+    });
+    let targets: [(SocketAddrV4, &str); 3] = [
+        (
+            SocketAddrV4::new(Ipv4Addr::new(119, 29, 29, 29), 80),
+            "GET /d?dn=qq.com HTTP/1.1\r\nHost: 119.29.29.29\r\nConnection: close\r\n\r\n",
+        ),
+        (
+            SocketAddrV4::new(Ipv4Addr::new(223, 5, 5, 5), 80),
+            "GET /resolve?name=qq.com HTTP/1.1\r\nHost: 223.5.5.5\r\nConnection: close\r\n\r\n",
+        ),
+        (
+            SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 80),
+            "HEAD / HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n",
+        ),
     ];
     let (tx, rx) = mpsc::channel();
     for (a, req) in targets {
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let r = http(a.parse().unwrap(), req, timeout);
+            let r = http_bound_v4(a, local_v4, req, timeout);
             let _ = tx.send(r);
         });
     }
     drop(tx);
     let mut last = Err(crate::i18n::t("超时").to_string());
-    for _ in 0..2 {
+    for _ in 0..targets.len() {
         match rx.recv_timeout(timeout + Duration::from_millis(500)) {
             Ok(Ok((_, ms))) => return Ok(ms),
             Ok(Err(e)) => last = Err(e),
@@ -340,9 +580,10 @@ fn via_proxy(port: Option<u16>, timeout: Duration) -> Result<u32, String> {
             timeout,
         ),
         None => {
-            use std::net::ToSocketAddrs;
-            let a = ("www.gstatic.com", 80).to_socket_addrs().map_err(|_| crate::i18n::t("解析 www.gstatic.com 失败").to_string())?.next().ok_or(crate::i18n::t("解析 www.gstatic.com 失败"))?;
-            http(a, "GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n", timeout)
+            let t0 = Instant::now();
+            let a = resolve_socket_timed("www.gstatic.com", 80, timeout.min(Duration::from_secs(3)))?;
+            let rem = timeout.saturating_sub(t0.elapsed()).max(Duration::from_millis(500));
+            http(a, "GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n", rem)
         }
     }?;
     match r.0 {
@@ -431,7 +672,7 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
     r.steps[2].status = "run";
     r.steps[3].status = "run";
     progress(&r);
-    let dns_t = std::thread::spawn(|| resolve("www.baidu.com", Duration::from_secs(4)).or_else(|_| resolve("www.qq.com", Duration::from_secs(3))));
+    let dns_t = std::thread::spawn(|| probe_dns(Duration::from_secs(3)));
     let net = direct(Duration::from_secs(4));
     let dns = dns_t.join().unwrap_or_else(|_| Err(crate::i18n::t("出错").into()));
     match &dns {
@@ -474,7 +715,17 @@ pub fn diagnose(auto: bool, progress: &dyn Fn(&Report)) -> Report {
             progress(&r);
             let node = inf.node.clone().unwrap_or_default();
             match via_proxy(if inf.tun && inf.local_port.is_none() { None } else { port }, Duration::from_secs(6)) {
-                Ok(ms) => set(&mut r, 5, "ok", node, Some(ms)),
+                Ok(ms) => {
+                    set(&mut r, 5, "ok", node, Some(ms));
+                    // If the proxy node over the internet answered, broadband/uplink is definitely NOT dead
+                    // (direct HTTP port 80 may simply be blocked by an overseas/strict firewall).
+                    if r.steps[3].status == "fail" {
+                        r.steps[3].status = "warn";
+                    }
+                    if r.steps[0].status == "fail" {
+                        set(&mut r, 0, "warn", crate::i18n::t("没认出是哪块网卡，但能连上外网").into(), None);
+                    }
+                }
                 Err(e) => set(&mut r, 5, "fail", if node.is_empty() { e } else { format!("{node} · {e}") }, None),
             }
         } else {
@@ -565,6 +816,7 @@ fn sysproxy_report(good: &str, now_value: Option<&str>, client: &str) -> Report 
 pub fn flush_dns() -> Result<(), String> {
     let out = std::process::Command::new("ipconfig").arg("/flushdns").creation_flags(CREATE_NO_WINDOW).output().map_err(|e| e.to_string())?;
     if out.status.success() {
+        crate::dns::invalidate_cache();
         log("netdiag: dns cache flushed");
         Ok(())
     } else {
@@ -668,19 +920,38 @@ fn finish(mut r: Report) -> Report {
 
 fn watch_loop() {
     let started = Instant::now();
-    let mut next_direct = Instant::now() + Duration::from_secs(20);
-    let mut next_proxy = Instant::now() + Duration::from_secs(30);
+    let mut next_direct = Instant::now() + Duration::from_secs(10);
+    let mut next_proxy = Instant::now() + Duration::from_secs(15);
     // the two probes above avoid the system DNS (plain IPs / the core resolves): a broken DNS
     // server needs its own probe
-    let mut next_dns = Instant::now() + Duration::from_secs(25);
+    let mut next_dns = Instant::now() + Duration::from_secs(12);
     let mut direct_fail = 0u32;
     let mut proxy_fail = 0u32;
     let mut dns_fail = 0u32;
     let mut good_streak = 0u32;
+    let (wake_lock, wake_cvar) = wake_pair();
     loop {
         crate::perf::tick("netdiag");
-        std::thread::sleep(Duration::from_secs(1));
+        let flags = {
+            let g = wake_lock.lock().unwrap();
+            let (mut g, _) = wake_cvar.wait_timeout(g, Duration::from_secs(1)).unwrap();
+            let f = *g;
+            *g = 0;
+            f
+        };
         if !crate::settings::bool_at("diag.on", true) {
+            let cleared = {
+                let mut w = W.lock().unwrap();
+                w.proxy_off_since = None;
+                w.problem.take().is_some()
+            };
+            if cleared {
+                direct_fail = 0;
+                proxy_fail = 0;
+                dns_fail = 0;
+                good_streak = 0;
+                publish();
+            }
             continue;
         }
         let inf = info();
@@ -690,23 +961,47 @@ fn watch_loop() {
 
         // --- quiet probes ---
         let showing = problem_kind(&W.lock().unwrap()).as_deref() == Some("net");
+        let now = Instant::now();
+        if flags & WAKE_RESUME != 0 {
+            // Wake from sleep: discard pre-sleep partial failures; give NIC ~4s grace unless an
+            // outage banner is already showing (in which case re-check quickly to clear it).
+            direct_fail = 0;
+            proxy_fail = 0;
+            dns_fail = 0;
+            good_streak = 0;
+            let delay = Duration::from_millis(if showing { 1500 } else { 4000 });
+            next_direct = now + delay;
+            next_proxy = now + delay + Duration::from_millis(500);
+            next_dns = now + delay + Duration::from_millis(500);
+        } else if flags & WAKE_NET != 0 {
+            let soon = Duration::from_millis(if showing { 800 } else { 1800 });
+            next_direct = next_direct.min(now + soon);
+            next_proxy = next_proxy.min(now + soon);
+            next_dns = next_dns.min(now + soon);
+        }
         let saver = crate::settings::str_at("general.profile", "balanced") == "saver";
         let every = Duration::from_secs(if showing { 5 } else if saver { 20 } else { 10 });
-        let now = Instant::now();
         let mut probed = false;
         let mut failed = false;
+        // Probe proxy node even when `inf.tun` is true so dead nodes in TUN mode are caught!
+        let proxied = inf.detected && (inf.local_port.is_some() || (inf.tun && inf.core_running));
         if now >= next_direct {
             probed = true;
             if direct(Duration::from_secs(3)).is_err() {
-                direct_fail += 1;
-                failed = true;
+                // If proxy traffic works fine, broadband is up (direct port 80 may be firewall-filtered).
+                if proxied && via_proxy(inf.local_port, Duration::from_secs(4)).is_ok() {
+                    direct_fail = 0;
+                    proxy_fail = 0;
+                } else {
+                    direct_fail += 1;
+                    failed = true;
+                }
             } else {
                 direct_fail = 0;
             }
             // a first failure is checked again soon
             next_direct = Instant::now() + if direct_fail == 1 { Duration::from_secs(4) } else { every };
         }
-        let proxied = inf.detected && inf.local_port.is_some() && !inf.tun;
         // the system proxy still points at a local port nobody listens on (the client quit or
         // crashed without clearing it): browsers can't load anything
         let sys_port = if inf.tun || proxied { None } else { inf.system_proxy.as_deref().and_then(proxy::port_from_proxy_server) };
@@ -728,7 +1023,7 @@ fn watch_loop() {
         }
         if Instant::now() >= next_dns {
             probed = true;
-            if resolve("www.baidu.com", Duration::from_secs(3)).is_err() && resolve("www.qq.com", Duration::from_secs(3)).is_err() {
+            if probe_dns(Duration::from_secs(3)).is_err() {
                 dns_fail += 1;
                 failed = true;
             } else {
@@ -736,7 +1031,7 @@ fn watch_loop() {
             }
             next_dns = Instant::now() + if dns_fail == 1 { Duration::from_secs(5) } else if showing { every } else { Duration::from_secs(if saver { 60 } else { 30 }) };
         }
-        if !probed || started.elapsed() < Duration::from_secs(20) {
+        if !probed || started.elapsed() < Duration::from_secs(8) {
             continue;
         }
         if showing {
@@ -756,9 +1051,14 @@ fn watch_loop() {
                 dns_fail = 0;
                 W.lock().unwrap().running = false;
             } else {
-                // the failure counts stay: recovery needs every kind of probe passing again
+                // the failure counts stay: recovery needs every kind of probe passing again;
+                // pull all three timers onto the 5s recovery cadence so none waits 30-60s
                 good_streak = 0;
                 finish(r);
+                let cap = Instant::now() + Duration::from_secs(5);
+                next_direct = next_direct.min(cap);
+                next_proxy = next_proxy.min(cap);
+                next_dns = next_dns.min(cap);
             }
         }
     }
@@ -784,6 +1084,10 @@ fn system_proxy_watch(inf: &Info) {
             if !inf.client_running {
                 w.good_proxy = None;
                 w.proxy_ignored = false;
+            }
+            if problem_kind(&w).as_deref() == Some("sysproxy") {
+                w.problem = None;
+                emit = true;
             }
         } else {
             let port = inf.local_port.unwrap();

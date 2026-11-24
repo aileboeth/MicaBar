@@ -11,9 +11,13 @@
 //! Clash Party caches override.yaml in memory and writes the cache back on its next save, so the
 //! setup closes Clash Party first, writes the files, and starts it again with the same elevation.
 
+use std::ffi::c_void;
+use std::net::IpAddr;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +35,37 @@ fn provider_names() -> impl Iterator<Item = (u8, &'static str)> {
     LEVELS.into_iter().flat_map(|l| TARGETS.into_iter().map(move |t| (l, t)))
 }
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn clean_atom(s: &str) -> Option<String> {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n' | '\0' | ',' | '(' | ')') && !c.is_control())
+        .collect();
+    let t = cleaned.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+fn canon_ip(s: &str) -> Option<IpAddr> {
+    let ip: IpAddr = s.trim().trim_matches(['[', ']']).parse().ok()?;
+    Some(match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    })
+}
+
+fn ip_in_cidr(ip: IpAddr, net_ip: IpAddr, prefix: u8) -> bool {
+    match (ip, net_ip) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix.min(32)) };
+            (u32::from(a) & mask) == (u32::from(b) & mask)
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix.min(128)) };
+            (u128::from(a) & mask) == (u128::from(b) & mask)
+        }
+        _ => false,
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -65,48 +100,139 @@ impl Rule {
         }
     }
 
-    fn ip_cidr(v: &str) -> String {
-        if v.contains(':') {
-            format!("IP-CIDR6,{v}/128,no-resolve")
+    fn ip_cidr(v: &str) -> Option<String> {
+        let v = clean_atom(v)?;
+        let (ip, prefix) = match v.split_once('/') {
+            Some((addr, pre)) => {
+                let ip = canon_ip(addr)?;
+                let len: u8 = pre.trim().parse().ok()?;
+                let max = if ip.is_ipv4() { 32 } else { 128 };
+                if len > max {
+                    return None;
+                }
+                (ip, len)
+            }
+            None => {
+                let ip = canon_ip(&v)?;
+                let len = if ip.is_ipv4() { 32 } else { 128 };
+                (ip, len)
+            }
+        };
+        if ip.is_ipv4() {
+            Some(format!("IP-CIDR,{ip}/{prefix},no-resolve"))
         } else {
-            format!("IP-CIDR,{v}/32,no-resolve")
+            Some(format!("IP-CIDR6,{ip}/{prefix},no-resolve"))
+        }
+    }
+
+    fn proc_clause(p: &str) -> Option<String> {
+        let p = clean_atom(p)?;
+        if p.contains('\\') || p.contains('/') {
+            Some(format!("PROCESS-PATH,{p}"))
+        } else {
+            Some(format!("PROCESS-NAME,{p}"))
         }
     }
 
     /// The mihomo classical rule (without the target).
     pub fn line(&self) -> Option<String> {
-        let p = self.process.as_deref().unwrap_or("");
-        let v = self.value.as_deref().unwrap_or("");
-        Some(match self.kind.as_str() {
-            "process" => format!("PROCESS-NAME,{p}"),
-            "domain" => format!("DOMAIN,{v}"),
-            "suffix" => format!("DOMAIN-SUFFIX,{v}"),
-            "ip" => Self::ip_cidr(v),
-            "process_domain" => format!("AND,((PROCESS-NAME,{p}),(DOMAIN,{v}))"),
-            "process_suffix" => format!("AND,((PROCESS-NAME,{p}),(DOMAIN-SUFFIX,{v}))"),
-            "process_ip" => format!("AND,((PROCESS-NAME,{p}),({}))", Self::ip_cidr(v)),
-            _ => return None,
-        })
+        match self.kind.as_str() {
+            "process" => Self::proc_clause(self.process.as_deref()?),
+            "domain" => {
+                let v = clean_atom(self.value.as_deref()?)?;
+                Some(format!("DOMAIN,{v}"))
+            }
+            "suffix" => {
+                let v = clean_atom(self.value.as_deref()?)?.trim_start_matches('.').to_string();
+                (!v.is_empty()).then(|| format!("DOMAIN-SUFFIX,{v}"))
+            }
+            "ip" => Self::ip_cidr(self.value.as_deref()?),
+            "process_domain" => {
+                let pr = Self::proc_clause(self.process.as_deref()?)?;
+                let v = clean_atom(self.value.as_deref()?)?;
+                Some(format!("AND,(({pr}),(DOMAIN,{v}))"))
+            }
+            "process_suffix" => {
+                let pr = Self::proc_clause(self.process.as_deref()?)?;
+                let v = clean_atom(self.value.as_deref()?)?.trim_start_matches('.').to_string();
+                (!v.is_empty()).then(|| format!("AND,(({pr}),(DOMAIN-SUFFIX,{v}))"))
+            }
+            "process_ip" => {
+                let pr = Self::proc_clause(self.process.as_deref()?)?;
+                let ip = Self::ip_cidr(self.value.as_deref()?)?;
+                Some(format!("AND,(({pr}),({ip}))"))
+            }
+            _ => None,
+        }
     }
 
     /// Whether an active mihomo connection is covered by this rule (to close it after a change).
     fn matches(&self, c: &mihomo::MConn) -> bool {
         let m = &c.metadata;
-        let proc_ok = |p: &Option<String>| p.as_ref().map(|p| m.process.eq_ignore_ascii_case(p)).unwrap_or(true);
-        let host = if m.host.is_empty() { &m.sniff_host } else { &m.host };
-        let v = self.value.clone().unwrap_or_default().to_lowercase();
-        let h = host.to_lowercase();
-        let dom = h == v;
-        let suf = h == v || h.ends_with(&format!(".{v}"));
-        let ip = m.destination_ip == v;
+        let proc_ok = match self.process.as_deref().and_then(clean_atom) {
+            Some(p) => {
+                if p.contains('\\') || p.contains('/') {
+                    let norm_p = p.replace('/', "\\");
+                    let norm_mp = m.process_path.replace('/', "\\");
+                    norm_mp.eq_ignore_ascii_case(&norm_p)
+                } else if !m.process.is_empty() {
+                    m.process.eq_ignore_ascii_case(&p)
+                } else {
+                    m.process_path
+                        .rsplit(['\\', '/'])
+                        .next()
+                        .map(|base| base.eq_ignore_ascii_case(&p))
+                        .unwrap_or(false)
+                }
+            }
+            None => false,
+        };
+
+        let v = self
+            .value
+            .as_deref()
+            .and_then(clean_atom)
+            .unwrap_or_default()
+            .trim_end_matches('.')
+            .to_lowercase();
+        let v_suf = v.trim_start_matches('.');
+
+        let host_is_ip = canon_ip(&m.host).is_some();
+        let h_primary = if m.host.is_empty() || host_is_ip { &m.sniff_host } else { &m.host };
+        let h1 = h_primary.trim().trim_end_matches('.').to_lowercase();
+        let h2 = m.sniff_host.trim().trim_end_matches('.').to_lowercase();
+
+        let dom = !v.is_empty() && (h1 == v || (!h2.is_empty() && h2 == v));
+        let suf_match = |h: &str| !h.is_empty() && (h == v_suf || h.ends_with(&format!(".{v_suf}")));
+        let suf = !v_suf.is_empty() && (suf_match(&h1) || suf_match(&h2));
+
+        let ip = match canon_ip(&m.destination_ip) {
+            Some(dst_ip) => match crate::guard::parse_cidr(&v) {
+                Some((net_ip, prefix)) => {
+                    let net_canon = match net_ip {
+                        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+                        v4 => v4,
+                    };
+                    let adj_prefix = if net_ip.is_ipv6() && net_canon.is_ipv4() {
+                        prefix.saturating_sub(96)
+                    } else {
+                        prefix
+                    };
+                    ip_in_cidr(dst_ip, net_canon, adj_prefix)
+                }
+                None => false,
+            },
+            None => false,
+        };
+
         match self.kind.as_str() {
-            "process" => proc_ok(&self.process),
+            "process" => proc_ok,
             "domain" => dom,
             "suffix" => suf,
             "ip" => ip,
-            "process_domain" => proc_ok(&self.process) && dom,
-            "process_suffix" => proc_ok(&self.process) && suf,
-            "process_ip" => proc_ok(&self.process) && ip,
+            "process_domain" => proc_ok && dom,
+            "process_suffix" => proc_ok && suf,
+            "process_ip" => proc_ok && ip,
             _ => false,
         }
     }
@@ -137,9 +263,9 @@ pub fn load_rules() -> Vec<Rule> {
         .unwrap_or_default()
 }
 
-fn save_rules(rules: &[Rule]) -> Result<(), String> {
+pub fn save_rules(rules: &[Rule]) -> Result<(), String> {
     let t = serde_json::to_string_pretty(rules).map_err(|e| e.to_string())?;
-    std::fs::write(state_dir().join("rules.json"), t).map_err(|e| e.to_string())
+    crate::settings::atomic_write(&state_dir().join("rules.json"), t.as_bytes()).map_err(|e| e.to_string())
 }
 
 // ---------- Clash Party discovery ----------
@@ -177,16 +303,53 @@ fn is_elevated(pid: u32) -> bool {
     }
 }
 
+fn dir_freshness(d: &Path) -> Option<SystemTime> {
+    [
+        d.join("work").join("config.yaml"),
+        d.join("override.yaml"),
+        d.join("config.yaml"),
+    ]
+    .into_iter()
+    .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+    .max()
+}
+
 fn data_dir_for(exe: Option<&str>) -> PathBuf {
     if let Some(exe) = exe {
         if let Some(dir) = Path::new(exe).parent() {
-            if dir.join("PORTABLE").exists() {
-                return dir.join("data");
+            let portable_data = dir.join("data");
+            if dir.join("PORTABLE").exists()
+                || portable_data.join("override.yaml").exists()
+                || portable_data.join("config.yaml").exists()
+                || portable_data.join("work").join("config.yaml").exists()
+            {
+                return portable_data;
             }
         }
     }
-    let appdata = std::env::var("APPDATA").unwrap_or_default();
-    PathBuf::from(appdata).join("mihomo-party")
+    let appdata = PathBuf::from(std::env::var("APPDATA").unwrap_or_default());
+    let clash_dir = appdata.join("clash-party");
+    let mihomo_dir = appdata.join("mihomo-party");
+    let exe_prefers_clash = exe
+        .map(|e| e.to_ascii_lowercase().contains("clash"))
+        .unwrap_or(true);
+    let ordered = if exe_prefers_clash {
+        [&clash_dir, &mihomo_dir]
+    } else {
+        [&mihomo_dir, &clash_dir]
+    };
+    let mut best: Option<(&PathBuf, SystemTime)> = None;
+    for cand in ordered {
+        if let Some(mtime) = dir_freshness(cand) {
+            if best.as_ref().map(|(_, bm)| mtime > *bm).unwrap_or(true) {
+                best = Some((cand, mtime));
+            }
+        }
+    }
+    if let Some((chosen, _)) = best {
+        return chosen.clone();
+    }
+    ordered[0].clone()
 }
 
 pub fn find_clash_party(procs: &[(u32, String)]) -> Option<ClashParty> {
@@ -196,9 +359,89 @@ pub fn find_clash_party(procs: &[(u32, String)]) -> Option<ClashParty> {
     Some(ClashParty { data_dir: data_dir_for(Some(&exe)), exe, pids, elevated })
 }
 
+fn process_command_line_nt(pid: u32) -> Option<String> {
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(
+            process_handle: *mut c_void,
+            process_information_class: u32,
+            process_information: *mut c_void,
+            process_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = -0x3fff_fffc; // 0xC0000004
+    const STATUS_BUFFER_TOO_SMALL: i32 = -0x3fff_ffdd; // 0xC0000023
+    const STATUS_BUFFER_OVERFLOW: i32 = -0x7fff_fffb; // 0x80000005
+
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut buf = vec![0u64; 512]; // 4096 bytes, 8-byte aligned
+        let mut ret_len = 0u32;
+        let mut status = NtQueryInformationProcess(
+            h,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            buf.as_mut_ptr() as *mut c_void,
+            (buf.len() * 8) as u32,
+            &mut ret_len,
+        );
+        if matches!(status, STATUS_INFO_LENGTH_MISMATCH | STATUS_BUFFER_TOO_SMALL | STATUS_BUFFER_OVERFLOW)
+            && ret_len > 0
+            && ret_len <= 1_048_576
+        {
+            buf = vec![0u64; (ret_len as usize + 16) / 8 + 1];
+            status = NtQueryInformationProcess(
+                h,
+                PROCESS_COMMAND_LINE_INFORMATION,
+                buf.as_mut_ptr() as *mut c_void,
+                (buf.len() * 8) as u32,
+                &mut ret_len,
+            );
+        }
+        CloseHandle(h);
+        if status < 0 {
+            return None;
+        }
+        let total_bytes = buf.len() * 8;
+        if total_bytes < std::mem::size_of::<UnicodeString>() {
+            return None;
+        }
+        let us = &*(buf.as_ptr() as *const UnicodeString);
+        if us.length == 0 || us.buffer.is_null() {
+            return None;
+        }
+        let bptr = us.buffer as usize;
+        let start = buf.as_ptr() as usize;
+        let end = start.checked_add(total_bytes)?;
+        let byte_len = (us.length as usize) & !1usize;
+        if bptr % 2 != 0 || bptr < start || bptr.checked_add(byte_len)? > end {
+            return None;
+        }
+        let slice = std::slice::from_raw_parts(us.buffer, byte_len / 2);
+        Some(String::from_utf16_lossy(slice))
+    }
+}
+
 /// The core's home directory (its `-d` argument), where provider files must live
 /// (mihomo only accepts provider paths inside its home dir).
 pub fn core_home(core_pid: u32) -> Option<PathBuf> {
+    if let Some(cmd) = process_command_line_nt(core_pid) {
+        if let Some(p) = parse_home(&cmd) {
+            return Some(p);
+        }
+    }
     let out = std::process::Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -234,12 +477,63 @@ fn target_policy(t: &str) -> &str {
 /// First port of the per-group inbounds (127.0.0.1:47800 + index).
 pub const LISTEN_BASE: u16 = 47800;
 
-/// Per-group inbounds of the running config: (group name, port), read from the generated
-/// config file (the override names them micabar-g<i>).
-pub fn group_listeners(config_file: &Path) -> Vec<(String, u16)> {
-    let Ok(text) = std::fs::read_to_string(config_file) else { return Vec::new() };
-    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { return Vec::new() };
-    doc.get("listeners")
+#[derive(Clone, Default)]
+struct ParsedConfig {
+    listeners: Vec<(String, u16)>,
+    match_group: Option<String>,
+    rule_groups: Vec<String>,
+    guard_active: bool,
+}
+
+type ParsedCacheEntry = (PathBuf, SystemTime, u64, ParsedConfig);
+
+fn parsed_cfg_cache() -> &'static Mutex<Option<ParsedCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Option<ParsedCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn split_top_level_commas(rule: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (idx, ch) in rule.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = (depth - 1).max(0),
+            ',' if depth == 0 => {
+                parts.push(rule[start..idx].trim());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(rule[start..].trim());
+    parts
+}
+
+fn parse_running_config(config_file: &Path) -> ParsedConfig {
+    let Ok(meta) = std::fs::metadata(config_file) else {
+        return ParsedConfig::default();
+    };
+    let Ok(mtime) = meta.modified() else {
+        return ParsedConfig::default();
+    };
+    let len = meta.len();
+    if let Ok(guard) = parsed_cfg_cache().lock() {
+        if let Some((cp, cm, clen, cached)) = guard.as_ref() {
+            if cp == config_file && *cm == mtime && *clen == len {
+                return cached.clone();
+            }
+        }
+    }
+    let Ok(text) = std::fs::read_to_string(config_file) else {
+        return ParsedConfig::default();
+    };
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+        return ParsedConfig::default();
+    };
+    let listeners = doc
+        .get("listeners")
         .and_then(|l| l.as_sequence())
         .map(|s| {
             s.iter()
@@ -251,42 +545,70 @@ pub fn group_listeners(config_file: &Path) -> Vec<(String, u16)> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let mut match_group = None;
+    let mut rule_groups: Vec<String> = Vec::new();
+    let mut guard_active = false;
+    if let Some(seq) = doc.get("rules").and_then(|r| r.as_sequence()) {
+        for r in seq {
+            let Some(s) = r.as_str() else { continue };
+            if s.contains("micabar-guard-domain") {
+                guard_active = true;
+            }
+            let parts = split_top_level_commas(s);
+            let is_match = parts.first().map(|p| p.eq_ignore_ascii_case("MATCH")).unwrap_or(false);
+            if is_match {
+                if let Some(g) = parts.get(1).copied().filter(|g| !g.is_empty()) {
+                    match_group = Some(g.to_string());
+                }
+            }
+            let target = if is_match {
+                parts.get(1).copied()
+            } else {
+                parts
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|p| !matches!(*p, "no-resolve" | "src" | "dst") && !p.is_empty())
+            };
+            let Some(t) = target else { continue };
+            if matches!(t, "DIRECT" | "REJECT" | "REJECT-DROP" | "PASS" | "COMPATIBLE") || t.ends_with(')') {
+                continue;
+            }
+            if !rule_groups.iter().any(|g| g == t) {
+                rule_groups.push(t.to_string());
+            }
+        }
+    }
+
+    let parsed = ParsedConfig { listeners, match_group, rule_groups, guard_active };
+    if let Ok(mut guard) = parsed_cfg_cache().lock() {
+        *guard = Some((config_file.to_path_buf(), mtime, len, parsed.clone()));
+    }
+    parsed
+}
+
+/// Per-group inbounds of the running config: (group name, port), read from the generated
+/// config file (the override names them micabar-g<i>).
+pub fn group_listeners(config_file: &Path) -> Vec<(String, u16)> {
+    parse_running_config(config_file).listeners
 }
 
 /// The subscription's fallback group (target of the MATCH rule) in the running config.
 pub fn match_group(config_file: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(config_file).ok()?;
-    let doc: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
-    doc.get("rules")?.as_sequence()?.iter().rev().find_map(|r| {
-        let s = r.as_str()?;
-        s.strip_prefix("MATCH,").map(|g| g.split(',').next().unwrap_or(g).trim().to_string())
-    })
+    parse_running_config(config_file).match_group
 }
 
 /// Targets of the running config's rules, in rule order, each once ("DOMAIN-SUFFIX,x,G",
 /// "RULE-SET,x,G,no-resolve", "AND,((…),(…)),G", "MATCH,G"); built-in policies are left out.
 pub fn rule_groups(config_file: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(config_file) else { return Vec::new() };
-    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else { return Vec::new() };
-    let mut out: Vec<String> = Vec::new();
-    for r in doc.get("rules").and_then(|r| r.as_sequence()).into_iter().flatten() {
-        let Some(s) = r.as_str() else { continue };
-        let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-        let target = if parts.first() == Some(&"MATCH") {
-            parts.get(1).copied()
-        } else {
-            parts.iter().rev().copied().find(|p| !matches!(*p, "no-resolve" | "src" | "dst") && !p.is_empty())
-        };
-        let Some(t) = target else { continue };
-        if matches!(t, "DIRECT" | "REJECT" | "REJECT-DROP" | "PASS" | "COMPATIBLE") || t.ends_with(')') {
-            continue;
-        }
-        if !out.iter().any(|g| g == t) {
-            out.push(t.to_string());
-        }
-    }
-    out
+    parse_running_config(config_file).rule_groups
+}
+
+/// Whether the running config's `rules` list actually includes the MicaBar leak-guard rule-sets.
+pub fn guard_rules_active(config_file: &Path) -> bool {
+    parse_running_config(config_file).guard_active
 }
 
 pub const GUARD_PROVIDERS: [(&str, &str, &str); 3] = [
@@ -297,16 +619,15 @@ pub const GUARD_PROVIDERS: [(&str, &str, &str); 3] = [
 
 /// Clash Party JavaScript override. Besides MicaBar's own rules (prepended, by specificity) it
 /// inserts the leak-guard rule sets after the subscription's last proxy-group rule, right before
-/// the next rule that would send traffic DIRECT (literally DIRECT, or a group whose default
-/// choice is DIRECT). Service rules keep their groups; guard domains that would otherwise fall
-/// through to the broad direct rules are sent to the MicaBar group instead.
+/// the next rule that would send traffic DIRECT (or before the first destination DIRECT rule /
+/// MATCH rule when DIRECT rules precede proxy rules), so `force_proxy` works across all layouts.
 pub fn override_js() -> String {
     let own: Vec<String> = provider_names()
         .map(|(l, t)| format!("[\"micabar-{l}-{t}\", \"{l}-{t}\", \"{}\"]", target_policy(t)))
         .collect();
     let guard: Vec<String> = GUARD_PROVIDERS.iter().map(|(n, b, f)| format!("[\"{n}\", \"{b}\", \"{f}\"]")).collect();
     format!(
-        r#"// MicaBar 出口控制 + 泄漏守卫：由 MicaBar 自动添加。删除这个覆写即可停用。
+        r#"// MicaBar 出口控制 + 泄漏守卫 (v2)：由 MicaBar 自动添加。删除这个覆写即可停用。
 function main(config) {{
   const G = "{GROUP}";
   const own = [{own}];
@@ -338,27 +659,36 @@ function main(config) {{
     return parts[parts.length - 1];
   }};
   const rest = (config.rules || []).filter((r) => !String(r).includes("micabar-"));
-  // insert after the last rule that routes to a proxy group, before the next direct rule, so
-  // every service rule of the subscription keeps its group and only the broad direct rules
-  // (cn_domain, GEOIP CN, a direct MATCH...) are guarded
-  // only destination rules count (protocol / port / process / inbound rules such as
-  // NETWORK,UDP or DST-PORT don't decide where a domain goes)
   const notProxy = new Set(["REJECT", "REJECT-DROP", "PASS"]);
   const destTypes = new Set(["RULE-SET", "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX",
     "DOMAIN-WILDCARD", "GEOSITE", "GEOIP", "IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "IP-ASN", "AND", "OR", "NOT"]);
+  const ruleType = (r) => String(r).split(",")[0].trim().toUpperCase();
+  const isPrivateRule = (r) => /^GEOIP,\s*(LAN|PRIVATE)\b/i.test(String(r).trim());
   let lastProxy = -1;
   rest.forEach((r, i) => {{
-    const type = String(r).split(",")[0].trim().toUpperCase();
+    const type = ruleType(r);
     const p = policy(r);
     if (destTypes.has(type) && !directish.has(p) && !notProxy.has(p)) lastProxy = i;
   }});
-  const at = rest.findIndex((r, i) => i > lastProxy && directish.has(policy(r)));
-  if (at >= 0) {{
-    rest.splice(at, 0,
-      "RULE-SET,micabar-guard-domain," + G,
-      "RULE-SET,micabar-guard-kw," + G,
-      "RULE-SET,micabar-guard-ip," + G + ",no-resolve");
+  let at = rest.findIndex((r, i) => {{
+    const type = ruleType(r);
+    return i > lastProxy && (destTypes.has(type) || type === "MATCH") && directish.has(policy(r));
+  }});
+  if (at < 0) {{
+    // Subscriptions that put CN/DIRECT rules before proxy rules, or end with MATCH,Proxy
+    at = rest.findIndex((r) => destTypes.has(ruleType(r)) && !isPrivateRule(r) && directish.has(policy(r)));
   }}
+  if (at < 0) {{
+    at = rest.findIndex((r) => destTypes.has(ruleType(r)) && directish.has(policy(r)));
+  }}
+  if (at < 0) {{
+    at = rest.findIndex((r) => ruleType(r) === "MATCH");
+  }}
+  if (at < 0) at = rest.length;
+  rest.splice(at, 0,
+    "RULE-SET,micabar-guard-domain," + G,
+    "RULE-SET,micabar-guard-kw," + G,
+    "RULE-SET,micabar-guard-ip," + G + ",no-resolve");
   config.rules = own.map(([name, , target]) => "RULE-SET," + name + "," + target).concat(rest);
   // one loopback-only inbound per proxy group: traffic entering it skips the rules and goes
   // straight to that group, so MicaBar can measure every group's exit IP
@@ -424,12 +754,13 @@ fn write_override(data_dir: &Path, install: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
         items.push(item);
         std::fs::create_dir_all(data_dir.join("override")).map_err(|e| e.to_string())?;
-        std::fs::write(&file, override_js()).map_err(|e| crate::tr!("写入覆写失败: {0}", e))?;
+        crate::settings::atomic_write(&file, override_js().as_bytes()).map_err(|e| crate::tr!("写入覆写失败: {0}", e))?;
     } else {
         let _ = std::fs::remove_file(&file);
     }
+    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let text = serde_yaml::to_string(&list).map_err(|e| e.to_string())?;
-    std::fs::write(data_dir.join("override.yaml"), text).map_err(|e| crate::tr!("写入 override.yaml 失败: {0}", e))
+    crate::settings::atomic_write(&data_dir.join("override.yaml"), text.as_bytes()).map_err(|e| crate::tr!("写入 override.yaml 失败: {0}", e))
 }
 
 fn backup(data_dir: &Path) -> Option<PathBuf> {
@@ -443,13 +774,54 @@ fn backup(data_dir: &Path) -> Option<PathBuf> {
     std::fs::copy(&src, &dst).ok().map(|_| dst)
 }
 
-fn kill(pid: u32) {
+#[link(name = "kernel32")]
+extern "system" {
+    fn WaitForSingleObject(h: *mut c_void, ms: u32) -> u32;
+    fn GetLastError() -> u32;
+}
+
+const SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
+const ERROR_ACCESS_DENIED_CODE: u32 = 5;
+
+fn open_terminable(pids: &[u32]) -> Result<Vec<*mut c_void>, String> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE};
+    let mut handles = Vec::with_capacity(pids.len());
     unsafe {
-        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if !h.is_null() {
-            TerminateProcess(h, 1);
+        for &pid in pids {
+            let h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE_RIGHT, 0, pid);
+            if h.is_null() {
+                let err = GetLastError();
+                if err == ERROR_ACCESS_DENIED_CODE {
+                    for prev in handles {
+                        CloseHandle(prev);
+                    }
+                    return Err(std::io::Error::from_raw_os_error(err as i32).to_string());
+                }
+                // Process already exited (ERROR_INVALID_PARAMETER = 87)
+            } else {
+                handles.push(h);
+            }
+        }
+    }
+    Ok(handles)
+}
+
+fn terminate_and_wait(handles: Vec<*mut c_void>, deadline: Instant) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::TerminateProcess;
+    unsafe {
+        for &h in &handles {
+            let _ = TerminateProcess(h, 1);
+        }
+        for h in handles {
+            let rem = deadline
+                .checked_duration_since(Instant::now())
+                .map(|d| d.as_millis().min(3000) as u32)
+                .unwrap_or(0);
+            if rem > 0 {
+                let _ = WaitForSingleObject(h, rem);
+            }
             CloseHandle(h);
         }
     }
@@ -458,25 +830,38 @@ fn kill(pid: u32) {
 /// Stops Clash Party with its core and starts it again (same elevation).
 pub fn restart_party(cp: &ClashParty, core_pids: &[u32]) -> Result<(), String> {
     log(format!("control: restarting {}", cp.exe));
-    stop_party(cp, core_pids);
+    stop_party(cp, core_pids)?;
     start_party(cp)
 }
 
-fn stop_party(cp: &ClashParty, core_pids: &[u32]) {
-    for p in &cp.pids {
-        kill(*p);
-    }
-    std::thread::sleep(Duration::from_millis(600));
-    // the core is a child of the app; make sure the old one is gone too
+fn stop_party(cp: &ClashParty, core_pids: &[u32]) -> Result<(), String> {
     let dir = Path::new(&cp.exe).parent().map(|d| d.to_string_lossy().to_lowercase()).unwrap_or_default();
-    for p in core_pids {
-        if procinfo::image_path(*p).map(|x| x.to_lowercase().starts_with(&dir)).unwrap_or(false) {
-            kill(*p);
+    let child_cores: Vec<u32> = core_pids
+        .iter()
+        .copied()
+        .filter(|p| !dir.is_empty() && procinfo::image_path(*p).map(|x| x.to_lowercase().starts_with(&dir)).unwrap_or(false))
+        .collect();
+
+    // Verify we have permission to terminate BEFORE touching processes or override.yaml.
+    let party_handles = open_terminable(&cp.pids)?;
+    let core_handles = match open_terminable(&child_cores) {
+        Ok(h) => h,
+        Err(e) => {
+            unsafe {
+                for h in party_handles {
+                    windows_sys::Win32::Foundation::CloseHandle(h);
+                }
+            }
+            return Err(e);
         }
-    }
-    std::thread::sleep(Duration::from_millis(400));
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    terminate_and_wait(party_handles, deadline);
+    terminate_and_wait(core_handles, deadline);
     // the killed app couldn't remove its tray icon: clear the leftover
     crate::system::sweep_tray();
+    Ok(())
 }
 
 fn start_party(cp: &ClashParty) -> Result<(), String> {
@@ -497,9 +882,14 @@ fn wait_providers(timeout: Duration) -> Result<(Controller, Option<String>), Str
         std::thread::sleep(Duration::from_millis(700));
         let cfg = mihomo::read_config();
         if let Some((ctl, _)) = mihomo::discover(&cfg) {
+            let guard_ok = cfg
+                .file
+                .as_deref()
+                .map(|f| guard_rules_active(Path::new(f)))
+                .unwrap_or(true);
             match providers_loaded(&ctl, cfg.secret.as_deref()) {
-                Ok(true) => return Ok((ctl, cfg.secret)),
-                Ok(false) => last = crate::i18n::t("内核已启动，但没有加载 MicaBar 规则集").into(),
+                Ok(true) if guard_ok => return Ok((ctl, cfg.secret)),
+                Ok(_) => last = crate::i18n::t("内核已启动，但没有加载 MicaBar 规则集").into(),
                 Err(e) => last = e,
             }
         }
@@ -537,13 +927,19 @@ pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], 
         // rule files of the app's earlier name
         let _ = std::fs::remove_dir_all(h.join("netisland"));
     }
-    stop_party(&cp, core_pids);
+    stop_party(&cp, core_pids)?;
     if let Err(e) = write_override(&cp.data_dir, install) {
         restore(&cp, bak.as_deref());
         let _ = start_party(&cp);
         return Err(e);
     }
-    start_party(&cp)?;
+    if let Err(e) = start_party(&cp) {
+        restore(&cp, bak.as_deref());
+        if install {
+            let _ = std::fs::remove_file(cp.data_dir.join("override").join(format!("{OVERRIDE_ID}.js")));
+        }
+        return Err(e);
+    }
     if !install {
         log("control: override removed");
         return Ok(None);
@@ -557,7 +953,7 @@ pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], 
             log(format!("control: activation failed ({e}); rolling back"));
             let cp2 = find_clash_party(&procinfo::list_processes()).unwrap_or(cp);
             let cores: Vec<u32> = crate::proxy::client_name(&procinfo::list_processes()).1;
-            stop_party(&cp2, &cores);
+            let _ = stop_party(&cp2, &cores);
             restore(&cp2, bak.as_deref());
             let _ = std::fs::remove_file(cp2.data_dir.join("override").join(format!("{OVERRIDE_ID}.js")));
             let _ = start_party(&cp2);
@@ -567,8 +963,18 @@ pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], 
 }
 
 fn restore(cp: &ClashParty, bak: Option<&Path>) {
-    if let Some(b) = bak {
-        let _ = std::fs::copy(b, cp.data_dir.join("override.yaml"));
+    let dst = cp.data_dir.join("override.yaml");
+    match bak {
+        Some(b) => {
+            if let Ok(bytes) = std::fs::read(b) {
+                let _ = crate::settings::atomic_write(&dst, &bytes);
+            } else {
+                let _ = std::fs::copy(b, dst);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(dst);
+        }
     }
 }
 
@@ -582,6 +988,7 @@ pub fn write_provider_files(home: &Path, rules: &[Rule]) -> Result<(), String> {
             .iter()
             .filter(|r| r.target == t && r.level() == lv)
             .filter_map(|r| r.line())
+            .filter(|l| !l.contains('\r') && !l.contains('\n'))
             .map(|l| format!("  - '{}'\n", l.replace('\'', "''")))
             .collect();
         let s = if lines.is_empty() {
@@ -589,7 +996,8 @@ pub fn write_provider_files(home: &Path, rules: &[Rule]) -> Result<(), String> {
         } else {
             format!("# 由 MicaBar 生成，请在 MicaBar 里修改\npayload:\n{}", lines.concat())
         };
-        std::fs::write(dir.join(format!("{lv}-{t}.yaml")), s).map_err(|e| crate::tr!("写入规则失败: {0}", e))?;
+        crate::settings::atomic_write(&dir.join(format!("{lv}-{t}.yaml")), s.as_bytes())
+            .map_err(|e| crate::tr!("写入规则失败: {0}", e))?;
     }
     // files of the first version (one provider per target), no longer referenced
     for t in TARGETS {
@@ -605,7 +1013,7 @@ pub fn ensure_guard_files(home: &Path) -> Result<(), String> {
     for (_, _, f) in GUARD_PROVIDERS {
         let p = dir.join(format!("{f}.yaml"));
         if !p.exists() {
-            std::fs::write(&p, "payload: []\n").map_err(|e| e.to_string())?;
+            crate::settings::atomic_write(&p, b"payload: []\n").map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -638,12 +1046,18 @@ pub fn close_matching(ctl: &Controller, secret: Option<&str>, rule: &Rule) -> us
     n
 }
 
+static RULE_SEQ: AtomicU64 = AtomicU64::new(1);
+
 pub fn upsert(rules: &mut Vec<Rule>, kind: &str, process: Option<String>, value: Option<String>, target: &str) -> Rule {
-    let probe = Rule { id: String::new(), kind: kind.into(), process, value, target: target.into(), created: crate::now_ms() };
+    let process = process.as_deref().and_then(clean_atom);
+    let value = value.as_deref().and_then(clean_atom);
+    let now = crate::now_ms();
+    let probe = Rule { id: String::new(), kind: kind.into(), process, value, target: target.into(), created: now };
     rules.retain(|r| r.key() != probe.key());
     let mut r = probe;
-    r.id = format!("{:x}", crate::now_ms() ^ (rules.len() as u64) << 40);
-    if target != "default" {
+    let seq = RULE_SEQ.fetch_add(1, Ordering::Relaxed);
+    r.id = format!("{now:x}{:04x}", seq & 0xffff);
+    if target != "default" && r.line().is_some() {
         rules.push(r.clone());
     }
     r
