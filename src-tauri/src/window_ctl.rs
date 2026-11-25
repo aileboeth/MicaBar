@@ -221,12 +221,12 @@ fn foreground_is_maximized(own: isize) -> bool {
         if fg.is_null() || own == 0 || fg as isize == own {
             return false;
         }
-        if IsZoomed(fg) == 0 || IsWindowVisible(fg) == 0 || cloaked(fg) {
+        if IsZoomed(fg) == 0 || IsIconic(fg) != 0 || IsWindowVisible(fg) == 0 || cloaked(fg) {
             return false;
         }
         let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
         let own_mon = MonitorFromWindow(own as HWND, MONITOR_DEFAULTTONEAREST);
-        mon == own_mon
+        !mon.is_null() && mon == own_mon
     }
 }
 

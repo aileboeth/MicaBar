@@ -259,12 +259,24 @@ function iconHtml(app) {
 
 // ---------- island geometry ----------
 
+// #island.line sets #pill { display: none !important }, which makes scrollWidth / scrollHeight
+// read as 0. Temporarily lift .line around measurement so direct callers never see 0 -> 120px.
+function measurePill(fn) {
+  const wasLine = island.classList.contains("line");
+  if (wasLine) island.classList.remove("line");
+  try {
+    return fn();
+  } finally {
+    if (wasLine) island.classList.add("line");
+  }
+}
+
 function pillWidth() {
   // fixed width from settings, else the natural width of the content (up to the max width)
   const fixed = sz("pillW");
   if (fixed > 0) return Math.min(window.innerWidth - 16, Math.max(120, fixed));
   pill.style.width = "";
-  const w = pill.scrollWidth;
+  const w = measurePill(() => pill.scrollWidth);
   return Math.max(120, Math.min(window.innerWidth - 16, sz("pillMaxW"), w));
 }
 
@@ -329,7 +341,7 @@ const chartW = () => {
 let maximized = false; // a maximized window is in front (setting: shrink to a line)
 // The first time per run that a maximized window turns the pill into the line, the pill says so
 // for a few seconds first (it looked like a bug: "I picked the capsule and it became a line").
-const maxHint = { shown: false, until: 0 };
+const maxHint = { shown: false, until: 0, timer: 0 };
 // first-run tour (see "first-run tour" below); declared up here because the sizing code reads it
 const tour = { on: false, step: 0, h: 0 };
 const TOUR_W = 384;
@@ -342,9 +354,34 @@ function setMaximized(v) {
     maxHint.shown = true;
     maxHint.until = Date.now() + 5000;
     fireFlash("maxline", tr("前台窗口最大化了，岛缩成指示条（设置 → 收起外观里可以关）"), "info");
-    setTimeout(() => { pillLast = ""; renderPill(); applySize(); }, 5100);
+    renderPill();
+    clearTimeout(maxHint.timer);
+    maxHint.timer = setTimeout(() => {
+      maxHint.timer = 0;
+      maxHint.until = 0;
+      pillLast = "";
+      renderPill();
+      applySize();
+    }, 5100);
+  } else if (!v) {
+    clearTimeout(maxHint.timer);
+    maxHint.timer = 0;
+    if (maxHint.until) maxHint.until = 0;
+    if (flash.msg?.kind === "maxline") {
+      flash.msg = null;
+      flash.until = 0;
+      clearTimeout(flash.timer);
+      flash.timer = 0;
+      pillLast = "";
+      renderPill();
+    }
   }
   applySize();
+  if (!v && fold.deferred) {
+    fold.deferred = false;
+    pillLast = "";
+    renderPill();
+  }
 }
 
 // Effective collapsed shape and docked edge.
@@ -379,7 +416,7 @@ function islandRect(open) {
   } else if (vertical) {
     w = sz("pillH") + 4;
     const fixedV = sz("pillW");
-    h = fixedV > 0 ? Math.max(60, Math.min(H - 16, fixedV)) : Math.max(60, Math.min(H - 16, pill.scrollHeight));
+    h = fixedV > 0 ? Math.max(60, Math.min(H - 16, fixedV)) : Math.max(60, Math.min(H - 16, measurePill(() => pill.scrollHeight)));
   } else {
     w = pillWidth();
     h = sz("pillH");
@@ -440,16 +477,25 @@ let lastIslandRect = null;
 function applySize() {
   if (MANAGER) return;
   document.documentElement.style.setProperty("--pill-h", sz("pillH") + "px");
+  const { style, dock, vertical } = shape();
+  const card = nst.on || (tour.on && !fling.active);
+  const fixedW = !vertical && sz("pillW") > 0;
+  if (!fixedW) {
+    pill.style.width = "";
+    pill.style.justifyContent = "";
+  }
+  // Toggle shape/dock classes BEFORE islandRect() measures pill.scrollWidth / pill.scrollHeight
+  // (#island.line hides #pill with display:none, which would measure as 0 -> 120px).
+  island.classList.toggle("notch", style === "notch");
+  island.classList.toggle("line", style === "line" && !expanded && !card);
+  island.classList.toggle("vertical", vertical && !expanded && !card);
+  for (const d of ["top", "bottom", "left", "right"]) island.classList.toggle("dock-" + d, dock === d);
   const r = islandRect(expanded);
   lastIslandRect = r;
-  const fixedW = !r.vertical && sz("pillW") > 0;
-  pill.style.width = fixedW ? r.w + "px" : "";
-  pill.style.justifyContent = fixedW ? "center" : "";
-  island.classList.toggle("notch", r.style === "notch");
-  const card = nst.on || (tour.on && !fling.active);
-  island.classList.toggle("line", r.style === "line" && !expanded && !card);
-  island.classList.toggle("vertical", r.vertical && !expanded && !card);
-  for (const d of ["top", "bottom", "left", "right"]) island.classList.toggle("dock-" + d, r.dock === d);
+  if (fixedW) {
+    pill.style.width = r.w + "px";
+    pill.style.justifyContent = "center";
+  }
   island.style.setProperty("--ix", r.x + "px");
   island.style.setProperty("--iy", r.y + "px");
   island.style.width = r.w + "px";
@@ -1127,16 +1173,17 @@ function agentsSectionHtml() {
 
 // ---------- threshold flashes (5 s message in the pill) ----------
 
-const flash = { msg: null, until: 0, cool: {}, prevExit: null, prevProxyOn: null, latAt: 0, latOk: true, latMs: null, hist: [] };
+const flash = { msg: null, until: 0, timer: 0, cool: {}, prevExit: null, prevProxyOn: null, latAt: 0, latOk: true, latMs: null, hist: [] };
 
 function fireFlash(kind, text, level) {
   const now = Date.now();
   if ((flash.cool[kind] || 0) > now) return;
   flash.cool[kind] = now + 60_000;
-  flash.msg = { text, level };
+  flash.msg = { kind, text, level };
   flash.until = now + 5000;
   invoke("log_js", { msg: `flash ${kind}: ${text}` }).catch(() => {});
-  setTimeout(renderPill, 5100);
+  clearTimeout(flash.timer);
+  flash.timer = setTimeout(() => { flash.timer = 0; renderPill(); }, 5100);
 }
 
 function checkFlashes(s) {
@@ -1186,7 +1233,7 @@ const normPillHtml = (s) => s
   .replace(/(data-ag="[^"]*" title=")[^"]*(")/g, "$1$2")
   .replace(/(<span class="(?:ag-t|dg-t) mono">)([^<]*)(<\/span>)/g, (_, a, m, b) => a + m.replace(/\d/g, "#") + b)
   .replace(/(<span class="ck-(?:hm|sec)">)([^<]*)(<\/span>)/g, (_, a, m, b) => a + m.replace(/\d/g, "#") + b)
-  .replace(/(<span[^>]*data-sv="(?:up|down)"[^>]*>)([^<]*)(<\/span>)/g, "$1#$3")
+  .replace(/(<span class="sv)(?: zero)?(" data-sv="(?:up|down)">)([^<]*)(<\/span>)/g, "$1$2#$4")
   .replace(/(<span[^>]*data-pn="(?:conns|lat|cpu|mem)"[^>]*>)([^<]*)(<\/span>)/g, "$1#$3");
 
 function renderPill() {
@@ -1238,6 +1285,7 @@ function renderPill() {
     if (!expanded) applySize();
   } else {
     // update live timers & clock digits in-place without destroying pill DOM or triggering reflow
+    let needSize = false;
     const agEl = pill.querySelector(".ag-t");
     if (agEl && agents.length) {
       const v = elapsed(Date.now() - agentLead().started);
@@ -1260,20 +1308,39 @@ function renderPill() {
       const secEl = pill.querySelector(".ck-sec");
       if (secEl && secEl.textContent !== c.sec) secEl.textContent = c.sec;
     }
-    const setPillAll = (sel, v) => pill.querySelectorAll(sel).forEach((el) => { if (el.textContent !== v) el.textContent = v; });
-    setPillAll('[data-sv="up"]', shortRate(snap?.up));
-    setPillAll('[data-sv="down"]', shortRate(snap?.down));
-    setPillAll('[data-pn="conns"]', String(snap ? snap.connCount : 0));
-    if (snap?.latency?.ms != null) setPillAll('[data-pn="lat"]', String(Math.min(snap.latency.ms, 9999)));
-    if (snap?.sys?.cpu != null) setPillAll('[data-pn="cpu"]', `${Math.round(snap.sys.cpu)}%`);
-    if (snap?.sys?.memTotal) setPillAll('[data-pn="mem"]', `${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%`);
+    const setPillSv = (sel, b) => {
+      const v = shortRate(b), z = !b || b < 1;
+      pill.querySelectorAll(sel).forEach((el) => {
+        const prevLen = el.textContent.length;
+        if (el.textContent !== v) el.textContent = v;
+        if (el.classList.contains("zero") !== z) {
+          el.classList.toggle("zero", z);
+          needSize = true;
+        } else if (!z && Math.max(4, prevLen) !== Math.max(4, v.length)) {
+          needSize = true;
+        }
+      });
+    };
+    const setPillPn = (sel, v, minCh = 0) => pill.querySelectorAll(sel).forEach((el) => {
+      if (el.textContent === v) return;
+      const prevLen = el.textContent.length;
+      el.textContent = v;
+      if (minCh && Math.max(minCh, prevLen) !== Math.max(minCh, v.length)) needSize = true;
+    });
+    setPillSv('[data-sv="up"]', snap?.up);
+    setPillSv('[data-sv="down"]', snap?.down);
+    setPillPn('[data-pn="conns"]', String(snap ? snap.connCount : 0), 3);
+    if (snap?.latency?.ms != null) setPillPn('[data-pn="lat"]', String(Math.min(snap.latency.ms, 9999)), 4);
+    if (snap?.sys?.cpu != null) setPillPn('[data-pn="cpu"]', `${Math.round(snap.sys.cpu)}%`, 4);
+    if (snap?.sys?.memTotal) setPillPn('[data-pn="mem"]', `${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%`, 4);
+    if (needSize && !expanded) applySize();
   }
   updateViz();
 }
 
 const pillSpan = (it) => `<span class="pill-item${it.html.startsWith('<span class="rot-card') ? " rot-slot" : ""}" data-pi="${esc(it.id)}">${it.html}</span>`;
 const PILL_SEP = `<span class="pill-sep"></span>`;
-const fold = { sig: "", keep: 0, slotW: 0 };
+const fold = { sig: "", keep: 0, slotW: 0, deferred: false };
 
 // Items sit side by side in their order; the ones at the end that don't fit the width take turns
 // in one rotating slot (as wide as the widest of them, so the pill doesn't jump).
@@ -1286,14 +1353,21 @@ function foldPill(dot, items) {
   // item (speeds, percentages) reuse the last decision
   const sig = `${limit}|${items.map((i) => i.id).join(",")}|${Math.round(all.length / 40)}`;
   if (sig !== fold.sig) {
+    if (island.classList.contains("line") && shape().style === "line") {
+      fold.sig = "";
+      fold.deferred = true;
+      return all;
+    }
+    fold.deferred = false;
     fold.sig = sig;
     pill.style.width = "";
     pill.innerHTML = `<span class="${dot}"></span>${all}`;
     pillLast = "";
-    const els = [...pill.querySelectorAll(":scope > .pill-item")];
-    const widths = els.map((e) => e.getBoundingClientRect().width);
+    const { widths, total } = measurePill(() => {
+      const els = [...pill.querySelectorAll(":scope > .pill-item")];
+      return { widths: els.map((e) => e.getBoundingClientRect().width), total: pill.scrollWidth };
+    });
     const gap = 8, sepW = 1 + 2 * gap;
-    let total = pill.scrollWidth;
     let keep = items.length;
     let slotW = 0;
     if (total > limit) {
@@ -6530,7 +6604,7 @@ listen("game", (e) => {
   gameOn = !!e.payload;
   island.classList.toggle("game", gameOn);
   if (nst.on) renderNote(); // privacy: hide / show the text
-  if (sget("shape.lineWhenMaximized", false)) { pillLast = ""; renderPill(); applySize(); } // to / from the indicator bar
+  if (sget("shape.lineWhenMaximized", false)) { applySize(); pillLast = ""; renderPill(); } // to / from the indicator bar
 });
 // cursor resting on the collapsed (click-through) pill: let the window below show through
 listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded));
