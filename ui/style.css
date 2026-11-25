@@ -493,16 +493,28 @@ button.danger { background: rgba(248, 113, 113, 0.18); color: var(--red); }
 .node-bar { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; font-size: 12px; color: var(--dim); }
 .node-now { color: var(--violet); font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-list {
-  max-height: 170px; overflow-y: auto; margin: 0 0 8px; padding: 4px;
+  max-height: 220px; overflow-y: auto; margin: 0 0 8px; padding: 4px;
   background: var(--card); border-radius: 12px;
 }
+body[data-mode="manager"] .node-list { max-height: 320px; }
+.node-sec {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 8px 3px; font-size: 11px; font-weight: 600; color: var(--dimmer);
+  letter-spacing: 0.02em; user-select: none;
+}
+.node-sec:not(:first-child) { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--ov2); }
+.node-sec-cnt { font-size: 10.5px; font-weight: 400; opacity: 0.85; }
 .node-item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 8px;
   font-size: 12.5px; cursor: pointer; white-space: nowrap;
 }
-.node-item .node-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.node-item .node-main { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1; overflow: hidden; }
+.node-item .node-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.node-item.is-group .node-name { flex: 0 0 auto; max-width: 65%; font-weight: 500; }
+.node-item .node-sub { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--dimmer); }
 .node-item:hover { background: var(--card-2); }
 .node-item.now { color: var(--violet); }
+.node-item.now .node-sub { color: color-mix(in srgb, var(--violet) 72%, var(--dim)); }
 .node-item.switching, .node-now.switching { opacity: 0.72; }
 button.is-busy { opacity: 0.75; cursor: progress; }
 .delay { flex: none; font-family: "Cascadia Mono", Consolas, monospace; font-size: 11.5px; color: var(--dimmer); font-variant-numeric: tabular-nums; }

@@ -627,7 +627,7 @@ pub fn override_js() -> String {
         .collect();
     let guard: Vec<String> = GUARD_PROVIDERS.iter().map(|(n, b, f)| format!("[\"{n}\", \"{b}\", \"{f}\"]")).collect();
     format!(
-        r#"// MicaBar 出口控制 + 泄漏守卫 (v2)：由 MicaBar 自动添加。删除这个覆写即可停用。
+        r#"// MicaBar 出口控制 + 泄漏守卫 (v3)：由 MicaBar 自动添加。删除这个覆写即可停用。
 function main(config) {{
   const G = "{GROUP}";
   const own = [{own}];
@@ -639,12 +639,42 @@ function main(config) {{
   for (const [name, behavior, file] of guard) {{
     providers[name] = {{ type: "file", behavior: behavior, format: "yaml", path: "./micabar/" + file + ".yaml" }};
   }}
-  const groups = config["proxy-groups"] = config["proxy-groups"] || [];
-  if (!groups.some((g) => g && g.name === G)) groups.unshift({{ name: G, type: "select", "include-all": true }});
+  const rawGroups = Array.isArray(config["proxy-groups"]) ? config["proxy-groups"] : [];
+  const kinds = new Set(["select", "url-test", "fallback", "load-balance", "smart"]);
   const directish = new Set(["DIRECT"]);
-  for (const g of groups) {{
-    if (g && Array.isArray(g.proxies) && g.proxies[0] === "DIRECT") directish.add(g.name);
+  const rejectish = new Set(["REJECT", "REJECT-DROP", "PASS"]);
+  for (const g of rawGroups) {{
+    if (!g || g.name === G || !Array.isArray(g.proxies) || !g.proxies.length) continue;
+    if (directish.has(g.proxies[0])) directish.add(g.name);
+    else if (rejectish.has(g.proxies[0])) rejectish.add(g.name);
   }}
+  const existingGroups = rawGroups.filter((g) =>
+    g && g.name && g.name !== G &&
+    kinds.has(String(g.type).toLowerCase()) &&
+    !directish.has(g.name) && !rejectish.has(g.name) &&
+    !(Array.isArray(g.proxies) && g.proxies.includes(G))
+  );
+  const existingNames = new Set(existingGroups.map((g) => g.name));
+  const groupRefs = [];
+  const addRef = (n) => {{ if (existingNames.has(n) && !groupRefs.includes(n)) groupRefs.push(n); }};
+  const mainSel = existingGroups.find((g) => String(g.type).toLowerCase() === "select");
+  if (mainSel) {{
+    addRef(mainSel.name);
+    if (Array.isArray(mainSel.proxies)) {{
+      for (const p of mainSel.proxies) addRef(p);
+    }}
+  }}
+  const isService = (g) => !!(mainSel && Array.isArray(g.proxies) && g.proxies[0] === mainSel.name);
+  for (const g of existingGroups) if (!isService(g)) addRef(g.name);
+  for (const g of existingGroups) if (isService(g)) addRef(g.name);
+  const mbGroup = {{
+    name: G,
+    type: "select",
+    ...(groupRefs.length ? {{ proxies: groupRefs }} : {{}}),
+    "include-all": true,
+    "exclude-filter": "(?i)^(DIRECT|REJECT)$"
+  }};
+  const groups = config["proxy-groups"] = [mbGroup, ...rawGroups.filter((g) => !(g && g.name === G))];
   // policy of a rule line: last top-level field, skipping options such as no-resolve / src
   const policy = (rule) => {{
     const parts = [];
@@ -659,7 +689,6 @@ function main(config) {{
     return parts[parts.length - 1];
   }};
   const rest = (config.rules || []).filter((r) => !String(r).includes("micabar-"));
-  const notProxy = new Set(["REJECT", "REJECT-DROP", "PASS"]);
   const destTypes = new Set(["RULE-SET", "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX",
     "DOMAIN-WILDCARD", "GEOSITE", "GEOIP", "IP-CIDR", "IP-CIDR6", "IP-SUFFIX", "IP-ASN", "AND", "OR", "NOT"]);
   const ruleType = (r) => String(r).split(",")[0].trim().toUpperCase();
@@ -668,7 +697,7 @@ function main(config) {{
   rest.forEach((r, i) => {{
     const type = ruleType(r);
     const p = policy(r);
-    if (destTypes.has(type) && !directish.has(p) && !notProxy.has(p)) lastProxy = i;
+    if (destTypes.has(type) && !directish.has(p) && !rejectish.has(p)) lastProxy = i;
   }});
   let at = rest.findIndex((r, i) => {{
     const type = ruleType(r);
@@ -692,11 +721,13 @@ function main(config) {{
   config.rules = own.map(([name, , target]) => "RULE-SET," + name + "," + target).concat(rest);
   // one loopback-only inbound per proxy group: traffic entering it skips the rules and goes
   // straight to that group, so MicaBar can measure every group's exit IP
-  const kinds = new Set(["select", "url-test", "fallback", "load-balance", "smart"]);
   const listeners = (config.listeners || []).filter((l) => !String(l && l.name).startsWith("micabar-g"));
-  groups.filter((g) => g && kinds.has(String(g.type).toLowerCase())).slice(0, 80).forEach((g, i) => {{
-    listeners.push({{ name: "micabar-g" + i, type: "mixed", listen: "127.0.0.1", port: {listen_base} + i, proxy: g.name, udp: false }});
-  }});
+  groups
+    .filter((g) => g && kinds.has(String(g.type).toLowerCase()) && (g.name === G || (!directish.has(g.name) && !rejectish.has(g.name))))
+    .slice(0, 80)
+    .forEach((g, i) => {{
+      listeners.push({{ name: "micabar-g" + i, type: "mixed", listen: "127.0.0.1", port: {listen_base} + i, proxy: g.name, udp: false }});
+    }});
   config.listeners = listeners;
   return config;
 }}
@@ -782,6 +813,48 @@ extern "system" {
 
 const SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
 const ERROR_ACCESS_DENIED_CODE: u32 = 5;
+const WAIT_OBJECT_0_CODE: u32 = 0;
+
+fn close_handles(handles: Vec<*mut c_void>) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    unsafe {
+        for h in handles {
+            CloseHandle(h);
+        }
+    }
+}
+
+fn all_handles_exited(handles: &[*mut c_void]) -> bool {
+    unsafe { handles.iter().all(|&h| WaitForSingleObject(h, 0) == WAIT_OBJECT_0_CODE) }
+}
+
+fn post_close_windows(pids: &[u32]) -> usize {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowThreadProcessId, PostMessageW, GW_OWNER, WM_CLOSE,
+    };
+    if pids.is_empty() {
+        return 0;
+    }
+    struct Ctx<'a> {
+        pids: &'a [u32],
+        posted: usize,
+    }
+    unsafe extern "system" fn cb(h: HWND, lp: LPARAM) -> BOOL {
+        let ctx = &mut *(lp as *mut Ctx<'_>);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, &mut pid);
+        if pid != 0 && ctx.pids.contains(&pid) && GetWindow(h, GW_OWNER).is_null() {
+            if PostMessageW(h, WM_CLOSE, 0, 0) != 0 {
+                ctx.posted += 1;
+            }
+        }
+        1
+    }
+    let mut ctx = Ctx { pids, posted: 0 };
+    unsafe { EnumWindows(Some(cb), &mut ctx as *mut Ctx<'_> as LPARAM) };
+    ctx.posted
+}
 
 fn open_terminable(pids: &[u32]) -> Result<Vec<*mut c_void>, String> {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -807,14 +880,24 @@ fn open_terminable(pids: &[u32]) -> Result<Vec<*mut c_void>, String> {
     Ok(handles)
 }
 
-fn terminate_and_wait(handles: Vec<*mut c_void>, deadline: Instant) {
+/// Terminates only handles that have not yet exited on their own, then waits and closes all handles.
+fn terminate_remaining_and_wait(handles: Vec<*mut c_void>, deadline: Instant) -> usize {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::TerminateProcess;
+    let mut forced = 0usize;
     unsafe {
-        for &h in &handles {
-            let _ = TerminateProcess(h, 1);
-        }
+        let mut pending = Vec::new();
         for h in handles {
+            if WaitForSingleObject(h, 0) == WAIT_OBJECT_0_CODE {
+                CloseHandle(h);
+            } else {
+                if TerminateProcess(h, 1) != 0 {
+                    forced += 1;
+                }
+                pending.push(h);
+            }
+        }
+        for h in pending {
             let rem = deadline
                 .checked_duration_since(Instant::now())
                 .map(|d| d.as_millis().min(3000) as u32)
@@ -825,16 +908,18 @@ fn terminate_and_wait(handles: Vec<*mut c_void>, deadline: Instant) {
             CloseHandle(h);
         }
     }
+    forced
 }
 
 /// Stops Clash Party with its core and starts it again (same elevation).
 pub fn restart_party(cp: &ClashParty, core_pids: &[u32]) -> Result<(), String> {
     log(format!("control: restarting {}", cp.exe));
-    stop_party(cp, core_pids)?;
+    let cfg = mihomo::read_config();
+    stop_party(cp, core_pids, Some(&cfg))?;
     start_party(cp)
 }
 
-fn stop_party(cp: &ClashParty, core_pids: &[u32]) -> Result<(), String> {
+fn stop_party(cp: &ClashParty, core_pids: &[u32], cfg: Option<&CoreConfig>) -> Result<(), String> {
     let dir = Path::new(&cp.exe).parent().map(|d| d.to_string_lossy().to_lowercase()).unwrap_or_default();
     let child_cores: Vec<u32> = core_pids
         .iter()
@@ -842,25 +927,74 @@ fn stop_party(cp: &ClashParty, core_pids: &[u32]) -> Result<(), String> {
         .filter(|p| !dir.is_empty() && procinfo::image_path(*p).map(|x| x.to_lowercase().starts_with(&dir)).unwrap_or(false))
         .collect();
 
-    // Verify we have permission to terminate BEFORE touching processes or override.yaml.
+    // Verify we have permission to terminate BEFORE touching TUN, processes, or override.yaml.
     let party_handles = open_terminable(&cp.pids)?;
     let core_handles = match open_terminable(&child_cores) {
         Ok(h) => h,
         Err(e) => {
-            unsafe {
-                for h in party_handles {
-                    windows_sys::Win32::Foundation::CloseHandle(h);
-                }
-            }
+            close_handles(party_handles);
             return Err(e);
         }
     };
 
+    // Step A: Close Wintun cleanly in-memory via mihomo's controller without altering saved mihomo.yaml.
+    let owned_cfg;
+    let cfg_ref = match cfg {
+        Some(c) => c,
+        None => {
+            owned_cfg = mihomo::read_config();
+            &owned_cfg
+        }
+    };
+    if let Some((ctl, _)) = mihomo::discover(cfg_ref) {
+        let res = mihomo::request(
+            &ctl,
+            "PATCH",
+            "/configs",
+            Some(r#"{"tun":{"enable":false}}"#),
+            cfg_ref.secret.as_deref(),
+        );
+        log(format!(
+            "control: graceful tun close via {}: {}",
+            ctl.describe(),
+            res.as_ref().map(|_| "ok").unwrap_or_else(|e| e.as_str())
+        ));
+        let tun_t0 = Instant::now();
+        while tun_t0.elapsed() < Duration::from_millis(2400) {
+            if crate::proxy::tun_adapter().is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(120));
+        }
+    }
+
+    // Step B: Ask Clash Party windows to close gracefully before falling back to TerminateProcess.
+    let posted = post_close_windows(&cp.pids);
+    if posted > 0 {
+        let graceful_t0 = Instant::now();
+        while graceful_t0.elapsed() < Duration::from_millis(1200) {
+            if all_handles_exited(&party_handles) && all_handles_exited(&core_handles) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(60));
+        }
+    }
+
     let deadline = Instant::now() + Duration::from_secs(3);
-    terminate_and_wait(party_handles, deadline);
-    terminate_and_wait(core_handles, deadline);
-    // the killed app couldn't remove its tray icon: clear the leftover
+    let forced_party = terminate_remaining_and_wait(party_handles, deadline);
+    let forced_core = terminate_remaining_and_wait(core_handles, deadline);
+    log(format!(
+        "control: stopped party (wm_close={posted}, forced_party={forced_party}, forced_core={forced_core})"
+    ));
+    // clear any leftover tray icon if processes had to be terminated
     crate::system::sweep_tray();
+
+    // Step C: NDIS / Wintun settle delay so Windows NetBT fully releases the Mihomo adapter before respawn.
+    std::thread::sleep(Duration::from_millis(600));
+    let settle_t0 = Instant::now();
+    while crate::proxy::tun_adapter().is_some() && settle_t0.elapsed() < Duration::from_millis(1500) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     Ok(())
 }
 
@@ -927,7 +1061,7 @@ pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], 
         // rule files of the app's earlier name
         let _ = std::fs::remove_dir_all(h.join("netisland"));
     }
-    stop_party(&cp, core_pids)?;
+    stop_party(&cp, core_pids, Some(cfg))?;
     if let Err(e) = write_override(&cp.data_dir, install) {
         restore(&cp, bak.as_deref());
         let _ = start_party(&cp);
@@ -951,9 +1085,11 @@ pub fn set_installed(install: bool, procs: &[(u32, String)], core_pids: &[u32], 
         }
         Err(e) => {
             log(format!("control: activation failed ({e}); rolling back"));
-            let cp2 = find_clash_party(&procinfo::list_processes()).unwrap_or(cp);
-            let cores: Vec<u32> = crate::proxy::client_name(&procinfo::list_processes()).1;
-            let _ = stop_party(&cp2, &cores);
+            let procs2 = procinfo::list_processes();
+            let cp2 = find_clash_party(&procs2).unwrap_or(cp);
+            let cores: Vec<u32> = crate::proxy::client_name(&procs2).1;
+            let cfg2 = mihomo::read_config();
+            let _ = stop_party(&cp2, &cores, Some(&cfg2));
             restore(&cp2, bak.as_deref());
             let _ = std::fs::remove_file(cp2.data_dir.join("override").join(format!("{OVERRIDE_ID}.js")));
             let _ = start_party(&cp2);
@@ -1076,6 +1212,8 @@ pub struct NodeInfo {
     pub name: String,
     pub kind: String,
     pub delay: Option<u32>,
+    pub is_group: bool,
+    pub now: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -1085,9 +1223,24 @@ pub struct Nodes {
     pub nodes: Vec<NodeInfo>,
 }
 
-pub fn nodes(ctl: &Controller, secret: Option<&str>) -> Result<Nodes, String> {
-    let body = mihomo::get(ctl, "/proxies", secret)?;
-    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+fn is_group_kind(kind: &str) -> bool {
+    matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "selector" | "select" | "urltest" | "url-test" | "fallback" | "loadbalance" | "load-balance" | "smart"
+    )
+}
+
+fn proxy_last_delay(p: &serde_json::Value) -> Option<u32> {
+    p.get("history")
+        .and_then(|h| h.as_array())
+        .and_then(|h| h.last())
+        .and_then(|h| h.get("delay"))
+        .and_then(|d| d.as_u64())
+        .filter(|d| *d > 0)
+        .map(|d| d as u32)
+}
+
+fn parse_nodes_value(v: &serde_json::Value) -> Result<Nodes, String> {
     let proxies = v.get("proxies").ok_or("no proxies")?;
     let g = proxies.get(GROUP).ok_or(crate::i18n::t("内核里没有 MicaBar 分组"))?;
     let now = g.get("now").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -1101,18 +1254,39 @@ pub fn nodes(ctl: &Controller, secret: Option<&str>) -> Result<Nodes, String> {
         .map(|name| {
             let p = proxies.get(&name);
             let kind = p.and_then(|p| p.get("type")).and_then(|t| t.as_str()).unwrap_or("").to_string();
-            let delay = p
-                .and_then(|p| p.get("history"))
-                .and_then(|h| h.as_array())
-                .and_then(|h| h.last())
-                .and_then(|h| h.get("delay"))
-                .and_then(|d| d.as_u64())
-                .filter(|d| *d > 0)
-                .map(|d| d as u32);
-            NodeInfo { name, kind, delay }
+            let is_group = is_group_kind(&kind);
+            let group_now = p
+                .and_then(|p| p.get("now"))
+                .and_then(|n| n.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let mut delay = p.and_then(proxy_last_delay);
+            if delay.is_none() && is_group {
+                if let Some(mut cur) = p {
+                    for _ in 0..4 {
+                        let Some(next_name) = cur.get("now").and_then(|n| n.as_str()).filter(|s| !s.is_empty()) else {
+                            break;
+                        };
+                        let Some(next) = proxies.get(next_name) else {
+                            break;
+                        };
+                        cur = next;
+                        if let Some(d) = proxy_last_delay(cur) {
+                            delay = Some(d);
+                        }
+                    }
+                }
+            }
+            NodeInfo { name, kind, delay, is_group, now: group_now }
         })
         .collect();
     Ok(Nodes { now, nodes })
+}
+
+pub fn nodes(ctl: &Controller, secret: Option<&str>) -> Result<Nodes, String> {
+    let body = mihomo::get(ctl, "/proxies", secret)?;
+    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    parse_nodes_value(&v)
 }
 
 pub fn test_delays(ctl: &Controller, secret: Option<&str>) -> Result<(), String> {
@@ -1130,4 +1304,91 @@ pub fn select(ctl: &Controller, secret: Option<&str>, name: &str) -> Result<(), 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nodes_resolves_group_kind_now_and_leaf_delay() {
+        let payload = serde_json::json!({
+            "proxies": {
+                "MicaBar": {
+                    "type": "Selector",
+                    "now": "🚀 代理设置",
+                    "all": ["🚀 代理设置", "🇭🇰 香港", "♻️ 循环组A", "🇺🇸 01"],
+                    "history": []
+                },
+                "🚀 代理设置": {
+                    "type": "Selector",
+                    "now": "🌍 所有节点",
+                    "history": []
+                },
+                "🌍 所有节点": {
+                    "type": "Selector",
+                    "now": "♻️ 自动选择",
+                    "history": []
+                },
+                "♻️ 自动选择": {
+                    "type": "URLTest",
+                    "now": "🇭🇰 01",
+                    "history": [{ "delay": 95 }]
+                },
+                "🇭🇰 香港": {
+                    "type": "Selector",
+                    "now": "🇭🇰 01",
+                    "history": []
+                },
+                "🇭🇰 01": {
+                    "type": "Shadowsocks",
+                    "history": [{ "delay": 42 }]
+                },
+                "🇺🇸 01": {
+                    "type": "Trojan",
+                    "history": [{ "delay": 168 }]
+                },
+                "♻️ 循环组A": {
+                    "type": "Fallback",
+                    "now": "♻️ 循环组B",
+                    "history": []
+                },
+                "♻️ 循环组B": {
+                    "type": "LoadBalance",
+                    "now": "♻️ 循环组A",
+                    "history": []
+                }
+            }
+        });
+        let parsed = parse_nodes_value(&payload).expect("parse_nodes_value");
+        assert_eq!(parsed.now.as_deref(), Some("🚀 代理设置"));
+        assert_eq!(parsed.nodes.len(), 4);
+
+        let main_g = &parsed.nodes[0];
+        assert!(main_g.is_group);
+        assert_eq!(main_g.now.as_deref(), Some("🌍 所有节点"));
+        assert_eq!(main_g.delay, Some(42));
+
+        let hk_g = &parsed.nodes[1];
+        assert!(hk_g.is_group);
+        assert_eq!(hk_g.now.as_deref(), Some("🇭🇰 01"));
+        assert_eq!(hk_g.delay, Some(42));
+
+        let cyc_g = &parsed.nodes[2];
+        assert!(cyc_g.is_group);
+        assert_eq!(cyc_g.delay, None);
+
+        let leaf = &parsed.nodes[3];
+        assert!(!leaf.is_group);
+        assert_eq!(leaf.now, None);
+        assert_eq!(leaf.delay, Some(168));
+    }
+
+    #[test]
+    fn override_js_includes_group_refs_and_exclude_filter() {
+        let js = override_js();
+        assert!(js.contains(r#""exclude-filter": "(?i)^(DIRECT|REJECT)$""#));
+        assert!(js.contains("groupRefs"));
+        assert!(js.contains("rejectish"));
+    }
 }

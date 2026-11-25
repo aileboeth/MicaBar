@@ -2325,12 +2325,22 @@ function rulesTabHtml() {
   if (c.status !== "active") return `<div class="rules-setup">${setupPrompt()}</div>`;
   const testing = busyActions.has("test");
   const loadingNodes = busyActions.has("nodes");
-  const nodeList = nodesCache
-    ? `<div class="node-list">${nodesCache.nodes.map((n) => {
-        const d = n.delay ? `<span class="delay ${n.delay < 200 ? "good" : n.delay < 500 ? "mid" : "bad"}">${n.delay} ms</span>` : `<span class="delay">${testing ? "…" : "—"}</span>`;
-        return `<div class="node-item ${n.name === nodesCache.now ? "now" : ""}${switchingNode === n.name ? " switching" : ""}" data-node="${esc(n.name)}" tabindex="0" title="${esc(noFlags(n.name))}"><span class="node-name">${decorate(n.name)}</span>${d}</div>`;
-      }).join("")}</div>`
-    : "";
+  let nodeList = "";
+  if (nodesCache) {
+    const renderNodeItem = (n) => {
+      const d = n.delay ? `<span class="delay ${n.delay < 200 ? "good" : n.delay < 500 ? "mid" : "bad"}">${n.delay} ms</span>` : `<span class="delay">${testing ? "…" : "—"}</span>`;
+      const sub = n.isGroup && n.now ? `<span class="node-sub">→ ${decorate(n.now)}</span>` : "";
+      const tip = n.isGroup && n.now ? `${noFlags(n.name)} → ${noFlags(n.now)}` : noFlags(n.name);
+      return `<div class="node-item${n.isGroup ? " is-group" : ""}${n.name === nodesCache.now ? " now" : ""}${switchingNode === n.name ? " switching" : ""}" data-node="${esc(n.name)}" tabindex="0" title="${esc(tip)}"><span class="node-main"><span class="node-name">${decorate(n.name)}</span>${sub}</span>${d}</div>`;
+    };
+    const groupItems = nodesCache.nodes.filter((n) => n.isGroup);
+    const leafItems = nodesCache.nodes.filter((n) => !n.isGroup);
+    const secHead = (label, cnt) => `<div class="node-sec"><span>${label}</span><span class="node-sec-cnt mono">${cnt}</span></div>`;
+    const inner = groupItems.length && leafItems.length
+      ? `${secHead(tr("分组"), groupItems.length)}${groupItems.map(renderNodeItem).join("")}${secHead(tr("节点"), leafItems.length)}${leafItems.map(renderNodeItem).join("")}`
+      : nodesCache.nodes.map(renderNodeItem).join("");
+    nodeList = `<div class="node-list">${inner}</div>`;
+  }
   const rules = c.rules.length
     ? c.rules.slice().reverse().map((r) => `<div class="rule"><span class="rule-t t-${r.target}">${TARGET_LABEL[r.target]}</span><span class="rule-d">${ruleText(r)}</span><button class="rule-x" data-rm="${esc(r.id)}" title="${esc(tr("删除"))}">✕</button></div>`).join("")
     : `<div class="empty">${tr("还没有出口规则。在「连接」页点程序右边的「出口」或连接右边的「⋯」来添加。")}</div>`;
@@ -4582,7 +4592,7 @@ function tabDataKey() {
       return `notes|${sget("notify.on", true)}|${!!notifyInfo?.quiet}|${notesVer}|${Math.floor(Date.now() / 30_000)}|${[...ncOpen].join(",")}`;
     case "rules": {
       const c = ctrl();
-      const ns = nodesCache ? `${nodesCache.now}:${nodesCache.nodes.map((n) => `${n.name}=${n.delay || 0}`).join(",")}` : "closed";
+      const ns = nodesCache ? `${nodesCache.now}:${nodesCache.nodes.map((n) => `${n.name}=${n.delay || 0}:${n.isGroup ? 1 : 0}:${n.now || ""}`).join(",")}` : "closed";
       return `rules|${c.status}|${c.message || ""}|${c.node || ""}|${switchingNode || ""}|${busy}|${ctlOff()}|${confirmDisable}|${c.rules.map((r) => `${r.id}:${r.target}:${r.kind}:${r.process || ""}:${r.value || ""}`).join(",")}|${ns}`;
     }
     case "guard": {
