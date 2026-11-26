@@ -9,16 +9,20 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
-use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DWMWA_TRANSITIONS_FORCEDISABLED,
+};
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_LBUTTON, VK_MBUTTON, VK_MENU, VK_RBUTTON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowLongW, GetWindowRect, IsIconic, IsWindow,
-    IsWindowVisible, IsZoomed, PeekMessageW, SetForegroundWindow, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
-    MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, WM_HOTKEY, WS_CAPTION, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    IsWindowVisible, IsZoomed, PeekMessageW, SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow,
+    GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_HOTKEY, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
 };
 
 use crate::log;
@@ -72,6 +76,9 @@ pub struct WinState {
     pub open_req: AtomicBool,
     /// Display topology / DPI / power state changed: reposition immediately on next 15ms tick.
     pub reposition_req: AtomicBool,
+    /// Mirrors the island window's current mouse click-through state so post-`show()` main-thread
+    /// resyncs restore the latest `WS_EX_TRANSPARENT | WS_EX_LAYERED` bits.
+    pub ignoring: AtomicBool,
     pub hwnd: AtomicIsize,
 }
 
@@ -153,6 +160,11 @@ fn target_monitor() -> Option<Mon> {
 
 /// Puts the window against the docked edge of the chosen monitor (bottom: above the taskbar).
 pub fn place_window(w: &WebviewWindow) {
+    if let Ok(h) = w.hwnd() {
+        if unsafe { IsIconic(h.0 as HWND) } != 0 {
+            return;
+        }
+    }
     let Some(m) = target_monitor() else { return };
     let Ok(size) = w.outer_size() else { return };
     let (ww, wh) = (size.width as i32, size.height as i32);
@@ -324,6 +336,145 @@ fn key_state(vk: u16) -> (bool, bool) {
     (s & 0x8000 != 0, s & 1 != 0)
 }
 
+fn island_style_bits(style: u32) -> u32 {
+    style & !(WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
+}
+
+fn island_ex_style_bits(ex_style: u32) -> u32 {
+    (ex_style | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW
+}
+
+fn click_through_ex_style_bits(ex_style: u32, ignore: bool) -> u32 {
+    let base = island_ex_style_bits(ex_style);
+    if ignore {
+        base | WS_EX_TRANSPARENT | WS_EX_LAYERED
+    } else {
+        base & !(WS_EX_TRANSPARENT | WS_EX_LAYERED)
+    }
+}
+
+/// Disables DWM open/close/minimize transition animations so the island never plays a fly/shrink
+/// animation. Call before the first `show()`.
+pub fn disable_dwm_transitions(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    let on: i32 = 1;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd as HWND,
+            DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+            &on as *const i32 as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+fn configure_island_window_inner(hwnd: isize, force_shell_refresh: bool) {
+    if hwnd == 0 {
+        return;
+    }
+    disable_dwm_transitions(hwnd);
+    unsafe {
+        let h = hwnd as HWND;
+        let old_style = GetWindowLongW(h, GWL_STYLE) as u32;
+        let new_style = island_style_bits(old_style);
+        let old_ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+        let new_ex = island_ex_style_bits(old_ex);
+        let style_changed = new_style != old_style;
+        let ex_changed = new_ex != old_ex;
+        if !style_changed && !ex_changed {
+            return;
+        }
+        let was_visible = force_shell_refresh && IsWindowVisible(h) != 0;
+        if was_visible {
+            ShowWindow(h, SW_HIDE);
+        }
+        if style_changed {
+            SetWindowLongW(h, GWL_STYLE, new_style as i32);
+        }
+        if ex_changed {
+            SetWindowLongW(h, GWL_EXSTYLE, new_ex as i32);
+        }
+        SetWindowPos(
+            h,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        if was_visible {
+            ShowWindow(h, SW_SHOWNOACTIVATE);
+            raise_topmost(hwnd);
+        }
+    }
+}
+
+/// Configures the island as a non-minimizable tool window (without `WS_EX_NOACTIVATE` so keyboard
+/// focus in `#search` and `Ctrl+Alt+N` keep working) and disables DWM transitions.
+pub fn configure_island_window(hwnd: isize) {
+    configure_island_window_inner(hwnd, false);
+}
+
+/// Startup variant called right after the initial `w.show()` (before WebView paints): performs a
+/// fast `SW_HIDE` -> style update -> `SW_SHOWNOACTIVATE` cycle with DWM transitions disabled so
+/// Explorer / Alt+Tab registers `WS_EX_TOOLWINDOW` (and drops `WS_EX_APPWINDOW`) from frame 0.
+pub fn configure_island_window_initial(hwnd: isize) {
+    configure_island_window_inner(hwnd, true);
+}
+
+/// Toggles mouse click-through directly on `GWL_EXSTYLE` instead of `tao`'s
+/// `set_ignore_cursor_events`, whose `WindowFlags::apply_diff` overwrites `GWL_EXSTYLE` (wiping
+/// `WS_EX_TOOLWINDOW` and restoring `WS_EX_APPWINDOW`) and calls `ShowWindow(SW_SHOW)`.
+fn set_click_through(hwnd: isize, ignore: bool) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let h = hwnd as HWND;
+        let old = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+        let new = click_through_ex_style_bits(old, ignore);
+        if new != old {
+            SetWindowLongW(h, GWL_EXSTYLE, new as i32);
+        }
+    }
+}
+
+/// Queues style + click-through + topmost restoration on the main thread right after `w.show()`,
+/// executing FIFO after `tao`'s `WindowMessage::Show` (`apply_diff`).
+fn resync_island_after_show(app: &AppHandle, own: isize, ws: &Arc<WinState>) {
+    if own == 0 {
+        return;
+    }
+    let ws = ws.clone();
+    let _ = app.run_on_main_thread(move || {
+        configure_island_window(own);
+        set_click_through(own, ws.ignoring.load(Ordering::SeqCst));
+        if !ws.hidden.load(Ordering::SeqCst) {
+            raise_topmost(own);
+        }
+    });
+}
+
+fn is_desktop_class_utf16(cls: &[u16]) -> bool {
+    const PROGMAN: [u16; 7] = [b'P' as u16, b'r' as u16, b'o' as u16, b'g' as u16, b'm' as u16, b'a' as u16, b'n' as u16];
+    const WORKERW: [u16; 7] = [b'W' as u16, b'o' as u16, b'r' as u16, b'k' as u16, b'e' as u16, b'r' as u16, b'W' as u16];
+    cls == PROGMAN || cls == WORKERW
+}
+
+fn is_desktop_window(hwnd: isize) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe {
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(hwnd as HWND, cls.as_mut_ptr(), cls.len() as i32);
+        n > 0 && is_desktop_class_utf16(&cls[..n as usize])
+    }
+}
+
 fn raise_topmost(hwnd: isize) {
     unsafe {
         SetWindowPos(
@@ -430,6 +581,9 @@ struct Hover {
     press_inside: bool,
     btn_prev: bool,
     prev_fg: isize,
+    last_fg: isize,
+    fg_desktop: bool,
+    was_iconic: bool,
     ignoring: bool,
     peek: bool,
 }
@@ -438,7 +592,8 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
     let Some(w) = app.get_webview_window("main") else { return };
     let own = w.hwnd().map(|h| h.0 as isize).unwrap_or(0);
     ws.hwnd.store(own, Ordering::SeqCst);
-    let _ = w.set_ignore_cursor_events(true);
+    ws.ignoring.store(true, Ordering::SeqCst);
+    set_click_through(own, true);
     let mut h = Hover {
         dwell: None,
         leave: None,
@@ -448,6 +603,9 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         press_inside: false,
         btn_prev: false,
         prev_fg: 0,
+        last_fg: 0,
+        fg_desktop: false,
+        was_iconic: false,
         ignoring: true,
         peek: false,
     };
@@ -495,6 +653,37 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         if n % 4 == 0 {
             crate::perf::tick("hover");
         }
+        // Safety net: if anything still minimizes the island, restore without activating.
+        if own != 0 && !ws.hidden.load(Ordering::SeqCst) && unsafe { IsIconic(own as HWND) } != 0 {
+            if !h.was_iconic {
+                h.was_iconic = true;
+                log("island minimized unexpectedly; restoring");
+            }
+            unsafe {
+                ShowWindow(own as HWND, SW_SHOWNOACTIVATE);
+            }
+            configure_island_window(own);
+            set_click_through(own, h.ignoring);
+            place_window(&w);
+            raise_topmost(own);
+        } else {
+            h.was_iconic = false;
+        }
+        // Edge trigger: when foreground switches to the desktop (e.g. Win+D), immediately re-pin topmost.
+        let fg = unsafe { GetForegroundWindow() } as isize;
+        if fg != h.last_fg {
+            h.last_fg = fg;
+            let is_desktop = is_desktop_window(fg);
+            if is_desktop
+                && !h.fg_desktop
+                && own != 0
+                && !ws.hidden.load(Ordering::SeqCst)
+                && (!ws.game.load(Ordering::SeqCst) || ws.expanded.load(Ordering::SeqCst))
+            {
+                raise_topmost(own);
+            }
+            h.fg_desktop = is_desktop;
+        }
         let hot = crate::settings::hot();
         // placement: every 2 s, every 0.3 s when following the cursor across monitors, or immediately on display/resume
         let follow = n % 20 == 0 && !ws.expanded.load(Ordering::SeqCst) && hot.monitor_cursor;
@@ -505,11 +694,17 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
                 raise_topmost(own);
             }
         }
-        if n % 66 == 0
-            && !ws.hidden.load(Ordering::SeqCst)
-            && (!ws.game.load(Ordering::SeqCst) || ws.expanded.load(Ordering::SeqCst))
-        {
-            raise_topmost(own);
+        if n % 66 == 0 && own != 0 && !ws.hidden.load(Ordering::SeqCst) {
+            let ex = unsafe { GetWindowLongW(own as HWND, GWL_EXSTYLE) } as u32;
+            let ct_mask = WS_EX_TRANSPARENT | WS_EX_LAYERED;
+            let ct_ok = if h.ignoring { (ex & ct_mask) == ct_mask } else { (ex & ct_mask) == 0 };
+            if (ex & WS_EX_TOOLWINDOW) == 0 || (ex & WS_EX_APPWINDOW) != 0 || !ct_ok {
+                configure_island_window(own);
+                set_click_through(own, h.ignoring);
+            }
+            if !ws.game.load(Ordering::SeqCst) || ws.expanded.load(Ordering::SeqCst) {
+                raise_topmost(own);
+            }
         }
         if n % 33 == 0 {
             let raw_fs = foreground_is_fullscreen(own);
@@ -527,7 +722,12 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             // fullscreen behaviour: keep the pill, or hide the island completely (unless open)
             let hide = fs && hot.fullscreen_hide && !ws.expanded.load(Ordering::SeqCst);
             if ws.hidden.swap(hide, Ordering::SeqCst) != hide {
-                let _ = if hide { w.hide() } else { w.show() };
+                if hide {
+                    let _ = w.hide();
+                } else {
+                    let _ = w.show();
+                    resync_island_after_show(&app, own, &ws);
+                }
             }
             let max = !fs && foreground_is_maximized(own);
             if ws.maximized.swap(max, Ordering::SeqCst) != max {
@@ -552,7 +752,8 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             ws.collapse_req.store(false, Ordering::SeqCst);
             if h.ignoring {
                 h.ignoring = false;
-                let _ = w.set_ignore_cursor_events(false);
+                ws.ignoring.store(false, Ordering::SeqCst);
+                set_click_through(own, false);
             }
             drain_buttons(&mut h);
             continue;
@@ -565,7 +766,8 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             ws.click_req.store(false, Ordering::SeqCst);
             if h.ignoring {
                 h.ignoring = false;
-                let _ = w.set_ignore_cursor_events(false);
+                ws.ignoring.store(false, Ordering::SeqCst);
+                set_click_through(own, false);
             }
             drain_buttons(&mut h);
             continue;
@@ -596,7 +798,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             } else {
                 if ws.hidden.swap(false, Ordering::SeqCst) {
                     let _ = w.show();
-                    raise_topmost(own);
+                    resync_island_after_show(&app, own, &ws);
                 }
                 set_expanded(&mut h, true, "hotkey");
                 h.pinned = true;
@@ -610,7 +812,7 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             if !expanded {
                 if ws.hidden.swap(false, Ordering::SeqCst) {
                     let _ = w.show();
-                    raise_topmost(own);
+                    resync_island_after_show(&app, own, &ws);
                 }
                 set_expanded(&mut h, true, "tour");
                 h.pinned = true;
@@ -691,7 +893,57 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         }
         if capture == h.ignoring {
             h.ignoring = !capture;
-            let _ = w.set_ignore_cursor_events(h.ignoring);
+            ws.ignoring.store(h.ignoring, Ordering::SeqCst);
+            set_click_through(own, h.ignoring);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOPMOST};
+
+    #[test]
+    fn island_styles_strip_min_max_and_set_toolwindow_without_noactivate() {
+        let style = WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        let cleaned = island_style_bits(style);
+        assert_eq!(cleaned & WS_MINIMIZEBOX, 0);
+        assert_eq!(cleaned & WS_MAXIMIZEBOX, 0);
+        assert_ne!(cleaned & WS_CAPTION, 0);
+
+        let ex = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+        let cleaned_ex = island_ex_style_bits(ex);
+        assert_ne!(cleaned_ex & WS_EX_TOOLWINDOW, 0);
+        assert_eq!(cleaned_ex & WS_EX_APPWINDOW, 0);
+        assert_ne!(cleaned_ex & WS_EX_TOPMOST, 0);
+        assert_eq!(cleaned_ex & WS_EX_NOACTIVATE, 0);
+    }
+
+    #[test]
+    fn click_through_preserves_toolwindow_and_toggles_transparent_layered() {
+        let base = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+        let ig = click_through_ex_style_bits(base, true);
+        assert_ne!(ig & WS_EX_TOOLWINDOW, 0);
+        assert_eq!(ig & WS_EX_APPWINDOW, 0);
+        assert_ne!(ig & WS_EX_TRANSPARENT, 0);
+        assert_ne!(ig & WS_EX_LAYERED, 0);
+        assert_eq!(ig & WS_EX_NOACTIVATE, 0);
+
+        let solid = click_through_ex_style_bits(ig, false);
+        assert_ne!(solid & WS_EX_TOOLWINDOW, 0);
+        assert_eq!(solid & WS_EX_APPWINDOW, 0);
+        assert_eq!(solid & WS_EX_TRANSPARENT, 0);
+        assert_eq!(solid & WS_EX_LAYERED, 0);
+        assert_ne!(solid & WS_EX_TOPMOST, 0);
+    }
+
+    #[test]
+    fn desktop_class_detection_matches_progman_and_workerw() {
+        let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        assert!(is_desktop_class_utf16(&wide("Progman")));
+        assert!(is_desktop_class_utf16(&wide("WorkerW")));
+        assert!(!is_desktop_class_utf16(&wide("Shell_TrayWnd")));
+        assert!(!is_desktop_class_utf16(&wide("Chrome_WidgetWin_1")));
     }
 }

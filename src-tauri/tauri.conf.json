@@ -19,6 +19,8 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
+        "minimizable": false,
+        "maximizable": false,
         "shadow": false,
         "focus": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion",

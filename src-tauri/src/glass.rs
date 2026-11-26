@@ -563,6 +563,15 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
+        if unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(hwnd as _) != 0
+                || windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd as _) == 0
+        } || (wr.right - wr.left) < 16
+            || (wr.bottom - wr.top) < 16
+        {
+            std::thread::sleep(Duration::from_millis(150));
+            continue;
+        }
         let region = RECT { left: wr.left, top: wr.top, right: wr.right, bottom: wr.bottom };
         let (cx, cy) = ((wr.left + wr.right) / 2, (wr.top + wr.bottom) / 2);
 

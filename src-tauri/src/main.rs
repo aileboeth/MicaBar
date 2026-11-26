@@ -3599,10 +3599,15 @@ fn main() {
             });
 
             if let Some(w) = app.get_webview_window("main") {
+                let hwnd = w.hwnd().ok().map(|h| h.0 as isize);
+                if let Some(h) = hwnd {
+                    window_ctl::disable_dwm_transitions(h);
+                }
                 window_ctl::place_window(&w);
                 let _ = w.show();
-                if let Ok(hwnd) = w.hwnd() {
-                    let ok = glass::exclude_from_dda(hwnd.0 as isize);
+                if let Some(h) = hwnd {
+                    window_ctl::configure_island_window_initial(h);
+                    let ok = glass::exclude_from_dda(h);
                     log(format!("exclude window from desktop duplication: {ok}"));
                 }
                 log(format!(
