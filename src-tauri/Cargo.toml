@@ -25,6 +25,7 @@ png = "0.17"
 base64 = "0.22"
 winreg = "0.55"
 ipconfig = "0.3"
+webview2-com = "0.39"
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Graphics_Direct3D",

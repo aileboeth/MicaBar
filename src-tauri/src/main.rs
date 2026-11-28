@@ -365,7 +365,7 @@ fn collector_wake() -> &'static (Mutex<bool>, Condvar) {
     COLLECTOR_WAKE.get_or_init(|| (Mutex::new(false), Condvar::new()))
 }
 
-fn wake_collector() {
+pub(crate) fn wake_collector() {
     let (lock, cvar) = collector_wake();
     if let Ok(mut dirty) = lock.lock() {
         *dirty = true;
@@ -392,10 +392,17 @@ pub(crate) fn on_system_resume(why: &str) {
     NET_DIRTY.store(true, Ordering::SeqCst);
     SYSTEM_RESUMED.store(true, Ordering::SeqCst);
     dns::invalidate_cache();
-    glass::notify_display_or_resume();
+    let in_game = GLOBAL_SHARED
+        .get()
+        .map(|sh| sh.ws.game.load(Ordering::SeqCst))
+        .unwrap_or(false);
+    if !in_game {
+        glass::notify_display_or_resume();
+    }
     netdiag::notify_resume();
     if let Some(sh) = GLOBAL_SHARED.get() {
         sh.ws.reposition_req.store(true, Ordering::SeqCst);
+        window_ctl::schedule_mem_pulse(&sh.ws, 1500);
         if let Ok(mut link) = sh.mihomo.lock() {
             link.last_try = None;
         }
@@ -406,9 +413,14 @@ pub(crate) fn on_system_resume(why: &str) {
 
 /// Called on `WM_DISPLAYCHANGE` / `WM_DPICHANGED`.
 pub(crate) fn on_display_change() {
-    glass::notify_display_or_resume();
     if let Some(sh) = GLOBAL_SHARED.get() {
-        sh.ws.reposition_req.store(true, Ordering::SeqCst);
+        if !sh.ws.game.load(Ordering::SeqCst) {
+            glass::notify_display_or_resume();
+        }
+        window_ctl::schedule_reposition(&sh.ws, 200);
+        window_ctl::schedule_mem_pulse(&sh.ws, 1500);
+    } else {
+        glass::notify_display_or_resume();
     }
 }
 
@@ -429,6 +441,20 @@ fn cmp_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 // ---------- collector ----------
+
+fn is_clock_jump(wall_ms: u64, mono_ms: u64) -> bool {
+    wall_ms > mono_ms.saturating_add(15_000) || mono_ms > 45_000
+}
+
+fn collector_period(profile: u8, game_idle: bool) -> Duration {
+    if game_idle {
+        Duration::from_millis(4000)
+    } else if profile == 0 {
+        Duration::from_millis(2000)
+    } else {
+        Duration::from_millis(1000)
+    }
+}
 
 struct Collector {
     procs: procinfo::ProcCache,
@@ -538,7 +564,7 @@ impl Collector {
         let wall_ms = now_wall.saturating_sub(self.prev_tick_wall_ms);
         self.prev_tick_mono = Instant::now();
         self.prev_tick_wall_ms = now_wall;
-        if wall_ms > mono_ms.saturating_add(15_000) || mono_ms > 15_000 {
+        if is_clock_jump(wall_ms, mono_ms) {
             on_system_resume("clock jump");
         }
         let resumed = SYSTEM_RESUMED.swap(false, Ordering::SeqCst);
@@ -1682,9 +1708,20 @@ async fn get_icon(path: String) -> Option<String> {
 
 /// Collapsed pill and expanded panel rectangles, physical px relative to the window.
 #[tauri::command]
-fn set_hit_rects(state: tauri::State<'_, Arc<Shared>>, pill: [f64; 4], panel: [f64; 4]) {
+fn set_hit_rects(
+    state: tauri::State<'_, Arc<Shared>>,
+    pill: [f64; 4],
+    panel: [f64; 4],
+    glass_active: Option<bool>,
+) {
     *state.ws.pill.lock().unwrap() = Rect { x: pill[0], y: pill[1], w: pill[2], h: pill[3] };
     *state.ws.panel.lock().unwrap() = Rect { x: panel[0], y: panel[1], w: panel[2], h: panel[3] };
+    if let Some(active) = glass_active {
+        let was_inactive = state.ws.glass_inactive.swap(!active, Ordering::SeqCst);
+        if was_inactive && active {
+            glass::request_frame();
+        }
+    }
 }
 
 // ---------- exit control commands ----------
@@ -3166,6 +3203,7 @@ fn grab_start(app: AppHandle, state: tauri::State<'_, Arc<Shared>>) {
     state.ws.grab.store(true, Ordering::SeqCst);
     state.ws.free.store(false, Ordering::SeqCst);
     state.ws.expanded.store(false, Ordering::SeqCst);
+    window_ctl::set_mem_normal(&app, &state.ws);
     if let Some(w) = app.get_webview_window("main") {
         window_ctl::span_edge(&w);
     }
@@ -3197,6 +3235,9 @@ fn grab_end(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, anchor: String
     state.ws.grab.store(false, Ordering::SeqCst);
     state.ws.free.store(false, Ordering::SeqCst);
     state.ws.disarm.store(true, Ordering::SeqCst);
+    if !state.ws.expanded.load(Ordering::SeqCst) && !state.ws.edit.load(Ordering::SeqCst) {
+        window_ctl::schedule_mem_low(&state.ws, 2000, false);
+    }
     log(format!(
         "island flung to {} {}",
         s.pointer("/shape/dock").and_then(|v| v.as_str()).unwrap_or(""),
@@ -3210,7 +3251,10 @@ fn grab_end(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, anchor: String
 fn layout_edit(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, on: bool) {
     state.ws.edit.store(on, Ordering::SeqCst);
     if on {
+        window_ctl::set_mem_normal(&app, &state.ws);
         state.ws.collapse_req.store(true, Ordering::SeqCst);
+    } else if !state.ws.expanded.load(Ordering::SeqCst) && !state.ws.grab.load(Ordering::SeqCst) {
+        window_ctl::schedule_mem_low(&state.ws, 2000, false);
     }
     let _ = app.emit_to("main", "layout-edit", on);
     log(format!("layout edit {}", if on { "on" } else { "off" }));
@@ -3260,14 +3304,26 @@ fn get_snapshot(state: tauri::State<'_, Arc<Shared>>) -> Option<Arc<Snapshot>> {
 
 /// The page asks for a window size in physical pixels (its CSS size × devicePixelRatio).
 #[tauri::command]
-fn fit_window(app: AppHandle, w: u32, h: u32) {
+fn fit_window(app: AppHandle, state: tauri::State<'_, Arc<Shared>>, w: u32, h: u32) {
+    if w == 0 || h == 0 {
+        return;
+    }
     let Some(win) = app.get_webview_window("main") else { return };
+    if let Ok(hwnd) = win.hwnd() {
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(hwnd.0 as _) } != 0 {
+            return;
+        }
+    }
     let cur = win.outer_size().ok();
-    if cur.map(|s| s.width != w || s.height != h).unwrap_or(true) {
+    let resized = cur.map(|s| s.width != w || s.height != h).unwrap_or(true);
+    if resized {
         log(format!("fit_window {w}x{h} (was {cur:?})"));
         let _ = win.set_size(tauri::PhysicalSize::new(w, h));
     }
     window_ctl::place_window(&win);
+    if resized {
+        window_ctl::schedule_mem_pulse(&state.ws, 1500);
+    }
 }
 
 #[tauri::command]
@@ -3444,6 +3500,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(shared.clone())
+        .manage(shared.ws.clone())
         .invoke_handler(tauri::generate_handler![
             get_icon,
             set_hit_rects,
@@ -3549,6 +3606,7 @@ fn main() {
                 "settings" => open_manager_window(app, "settings"),
                 "layout" => {
                     sh_tray.ws.edit.store(true, Ordering::SeqCst);
+                    window_ctl::set_mem_normal(app, &sh_tray.ws);
                     sh_tray.ws.collapse_req.store(true, Ordering::SeqCst);
                     let _ = app.emit_to("main", "layout-edit", true);
                 }
@@ -3585,7 +3643,7 @@ fn main() {
             ai_loop(handle.clone(), shared.clone());
             notify::start(handle.clone());
             clipboard::start(handle.clone());
-            perf::start();
+            perf::start(handle.clone(), shared.ws.clone(), shared.glass.clone());
             let sh = shared.clone();
             netdiag::start(Arc::new(move || diag_info(&sh)));
             let sh = shared.clone();
@@ -3658,10 +3716,13 @@ fn main() {
                         .get_webview_window("manager")
                         .map(|w| !w.is_minimized().unwrap_or(false))
                         .unwrap_or(false);
-                    let need_full = sh.ws.expanded.load(Ordering::SeqCst) || mgr_visible;
+                    let expanded = sh.ws.expanded.load(Ordering::SeqCst);
+                    let in_game = sh.ws.game.load(Ordering::SeqCst);
+                    let hidden = sh.ws.hidden.load(Ordering::SeqCst);
+                    let need_full = expanded || mgr_visible;
                     if need_full {
                         let _ = h.emit("snapshot", &*snap);
-                    } else {
+                    } else if !hidden {
                         let slim = slim_snapshot(&snap);
                         let _ = h.emit("snapshot", &slim);
                     }
@@ -3671,7 +3732,8 @@ fn main() {
                         attach_ready_etw(&mut etw_pending, &mut col, true);
                     }
                     let spent = t.elapsed();
-                    let period = Duration::from_millis(if settings::hot().profile == 0 { 2000 } else { 1000 });
+                    let game_idle = in_game && !expanded && !mgr_visible;
+                    let period = collector_period(settings::hot().profile, game_idle);
                     let wait = period.saturating_sub(spent);
                     if !wait.is_zero() {
                         let mut dirty = wake_lock.lock().unwrap();
@@ -3866,4 +3928,31 @@ fn main() {
 
 async fn tokio_sleep(d: Duration) {
     tokio::time::sleep(d).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_jump_avoids_mid_game_false_positives() {
+        assert!(!is_clock_jump(1_000, 1_000));
+        assert!(!is_clock_jump(4_000, 4_000));
+        assert!(!is_clock_jump(20_000, 20_000));
+        assert!(!is_clock_jump(45_000, 45_000));
+        // Real monotonic stall > 45s (hibernate/VM pause)
+        assert!(is_clock_jump(46_000, 46_000));
+        // Real wall-clock jump > mono + 15s (S3/S4 sleep where Instant paused)
+        assert!(is_clock_jump(20_000, 1_000));
+    }
+
+    #[test]
+    fn collector_period_throttles_during_idle_games() {
+        assert_eq!(collector_period(0, false), Duration::from_millis(2000));
+        assert_eq!(collector_period(1, false), Duration::from_millis(1000));
+        assert_eq!(collector_period(2, false), Duration::from_millis(1000));
+        assert_eq!(collector_period(0, true), Duration::from_millis(4000));
+        assert_eq!(collector_period(1, true), Duration::from_millis(4000));
+        assert_eq!(collector_period(2, true), Duration::from_millis(4000));
+    }
 }

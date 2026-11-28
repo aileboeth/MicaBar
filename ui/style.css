@@ -151,14 +151,14 @@ html, body {
 }
 
 /* ---------- glass ---------- */
-/* The canvas holds the blurred screen behind the whole window; it is fixed to the window
-   (not to the island), and the island's rounded box clips it. */
+/* The canvas holds the blurred screen crop behind the island; --gx/--gy/--gw/--gh align the
+   crop to the window, and the island's rounded box clips it. */
 #glass {
   position: absolute;
-  left: calc(-1 * var(--ix));
-  top: calc(-1 * var(--iy));
-  width: 100vw;
-  height: 100vh;
+  left: calc(var(--gx, 0px) - var(--ix));
+  top: calc(var(--gy, 0px) - var(--iy));
+  width: var(--gw, 100vw);
+  height: var(--gh, 100vh);
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.3s ease;
@@ -946,6 +946,7 @@ body[data-mode="manager"] #gear { display: none; }
 
 /* grab & fling: the position follows the pointer / physics frame by frame (no easing) */
 #island.flinging { transition: width 0.28s var(--spring), height 0.28s var(--spring), border-radius 0.28s var(--spring) !important; opacity: 1 !important; }
+#island.no-transition, #island.no-transition #glass, #island.no-transition #panel, #island.no-transition #pill { transition: none !important; }
 #island.grabbed { box-shadow: 0 16px 38px var(--shadow); scale: 1.05; }
 #island.grabbed:not(.glass) { box-shadow: inset 0 0 0 1px var(--rim), 0 16px 38px var(--shadow); }
 #island.bump-x { animation: bump-x 0.17s ease-out; }

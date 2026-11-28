@@ -49,15 +49,28 @@ pub fn set_channel(slot: &FrameChannel, ch: Option<Channel<InvokeResponseBody>>)
     }
 }
 
-/// Minimum time between frames, by resource profile (saver 5 fps, balanced 15, smooth 30): the
-/// backdrop is heavily blurred, more frames only cost CPU / GPU (measured 2026-11-22: 30 fps of a
-/// window-sized frame took ~60% of a core across MicaBar and WebView2).
-fn frame_interval() -> Duration {
-    Duration::from_millis(match crate::settings::hot().profile {
-        0 => 200,
-        2 => 33,
-        _ => 66,
+/// Minimum time between frames, by resource profile and expansion state:
+/// expanded panel: saver 4 fps (250ms), balanced 10 fps (100ms), smooth 20 fps (50ms);
+/// collapsed 44px heavily-blurred pill: saver 2.5 fps (400ms), balanced 5 fps (200ms), smooth 10 fps (100ms).
+fn frame_interval_for(profile: u8, expanded: bool) -> Duration {
+    Duration::from_millis(match (profile, expanded) {
+        (0, true) => 250,
+        (2, true) => 50,
+        (_, true) => 100,
+        (0, false) => 400,
+        (2, false) => 100,
+        (_, false) => 200,
     })
+}
+
+fn frame_interval(expanded: bool) -> Duration {
+    frame_interval_for(crate::settings::hot().profile, expanded)
+}
+
+/// Skip threshold on `diff100`: 1.0/255 when expanded, 2.5/255 when collapsed (tiny live-wallpaper
+/// ripples behind a 60px gaussian blur are invisible).
+fn diff_threshold(expanded: bool) -> u64 {
+    if expanded { 100 } else { 250 }
 }
 
 /// Physical px around the island that are captured too: the blur (3 box passes of BLUR_RADIUS
@@ -528,10 +541,18 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
             pending_force = true;
         }
 
-        let paused = ws.game.load(Ordering::SeqCst)
-            || ws.hidden.load(Ordering::SeqCst)
-            || ws.free.load(Ordering::SeqCst)
-            || !has_chan;
+        let hot = crate::settings::hot();
+        let game = ws.game.load(Ordering::SeqCst);
+        let hidden = ws.hidden.load(Ordering::SeqCst);
+        let free = ws.free.load(Ordering::SeqCst);
+        let line_paused = !ws.expanded.load(Ordering::SeqCst)
+            && !ws.noting.load(Ordering::SeqCst)
+            && !ws.tour.load(Ordering::SeqCst)
+            && !ws.edit.load(Ordering::SeqCst)
+            && (ws.glass_inactive.load(Ordering::SeqCst)
+                || hot.shape_style_line
+                || (hot.line_when_maximized && ws.maximized.load(Ordering::SeqCst)));
+        let paused = game || hidden || free || line_paused || !has_chan;
         let hwnd = ws.hwnd.load(Ordering::SeqCst);
         if paused || hwnd == 0 {
             cap = None;
@@ -547,7 +568,8 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
             } else {
                 last_raw.clear();
             }
-            std::thread::sleep(Duration::from_millis(300));
+            let sleep_ms = if line_paused && has_chan && !game && !hidden && !free { 100 } else { 300 };
+            std::thread::sleep(Duration::from_millis(sleep_ms));
             continue;
         }
         was_paused = false;
@@ -632,7 +654,7 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
         // Pace BEFORE AcquireNextFrame in ~15ms slices so expand/collapse/force stay instant (<15ms)
         // while 60–144Hz low-diff animations never cause 60–144Hz GPU readbacks.
         if !immediate && c.cached.is_some() {
-            let interval = frame_interval();
+            let interval = frame_interval(expanded);
             let anchor = match (last_checked, last_sent) {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
@@ -661,7 +683,7 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
                     u64::MAX
                 };
                 last_region = Some(region);
-                if d < 100 {
+                if d < diff_threshold(expanded) {
                     crate::perf::count("glass same", 1);
                     continue;
                 }
@@ -711,5 +733,24 @@ pub fn glass_loop(ws: Arc<WinState>, chan: FrameChannel) {
                 fail_until = Some(Instant::now() + Duration::from_millis(500));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_frame_interval_and_diff_threshold() {
+        assert_eq!(frame_interval_for(0, true), Duration::from_millis(250));
+        assert_eq!(frame_interval_for(1, true), Duration::from_millis(100));
+        assert_eq!(frame_interval_for(2, true), Duration::from_millis(50));
+
+        assert_eq!(frame_interval_for(0, false), Duration::from_millis(400));
+        assert_eq!(frame_interval_for(1, false), Duration::from_millis(200));
+        assert_eq!(frame_interval_for(2, false), Duration::from_millis(100));
+
+        assert_eq!(diff_threshold(true), 100);
+        assert_eq!(diff_threshold(false), 250);
     }
 }

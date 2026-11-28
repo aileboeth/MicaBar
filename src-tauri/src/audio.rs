@@ -10,11 +10,21 @@ use windows::Win32::System::Com::*;
 
 pub const BANDS: usize = 12;
 const N: usize = 2048;
+const VIZ_MIN_DELTA: f32 = 0.006;
 
 static WANTED: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-/// Turns the reader on or off; `emit` gets the bands (0..1) about 25 times a second while on.
+fn should_emit_viz(out: &[f32; BANDS], last_sent: &[f32; BANDS], has_sent: bool) -> bool {
+    if !has_sent {
+        return true;
+    }
+    out.iter()
+        .zip(last_sent.iter())
+        .any(|(&a, &b)| (a - b).abs() >= VIZ_MIN_DELTA)
+}
+
+/// Turns the reader on or off; `emit` gets the bands (0..1) about 20 times a second while on.
 pub fn set_wanted(on: bool, emit: impl Fn([f32; BANDS]) + Send + 'static) {
     WANTED.store(on, Ordering::SeqCst);
     if on && !STARTED.swap(true, Ordering::SeqCst) {
@@ -142,6 +152,8 @@ fn capture(emit: &impl Fn([f32; BANDS])) -> windows::core::Result<()> {
         let mut pos = 0usize;
         let mut peak = [1e-6f32; BANDS];
         let mut out = [0.0f32; BANDS];
+        let mut last_sent = [0.0f32; BANDS];
+        let mut has_sent = false;
         let mut zero_sent = false;
         let mut last_emit = Instant::now();
         let mut last_data = Instant::now();
@@ -198,7 +210,7 @@ fn capture(emit: &impl Fn([f32; BANDS])) -> windows::core::Result<()> {
                 }
                 n = cap.GetNextPacketSize()?;
             }
-            if last_emit.elapsed() >= Duration::from_millis(40) {
+            if last_emit.elapsed() >= Duration::from_millis(50) {
                 last_emit = Instant::now();
                 crate::perf::tick("music bars");
                 // nothing played for a moment: loopback delivers no packets at all
@@ -225,16 +237,23 @@ fn capture(emit: &impl Fn([f32; BANDS])) -> windows::core::Result<()> {
                             }
                         }
                         if any_visible {
-                            emit(out);
-                            crate::perf::count("bar frames", 1);
+                            if should_emit_viz(&out, &last_sent, has_sent) {
+                                emit(out);
+                                last_sent = out;
+                                has_sent = true;
+                                crate::perf::count("bar frames", 1);
+                            }
                         } else {
                             out = [0.0; BANDS];
                             emit(out);
+                            last_sent = out;
+                            has_sent = true;
                             crate::perf::count("bar frames", 1);
                             zero_sent = true;
                         }
                     }
                 } else {
+                    let from_silence = zero_sent;
                     zero_sent = false;
                     for b in 0..BANDS {
                         let [c0, c1, c2] = coeffs[b];
@@ -246,8 +265,12 @@ fn capture(emit: &impl Fn([f32; BANDS])) -> windows::core::Result<()> {
                         // fast up, slower down
                         out[b] = if target > out[b] { target } else { out[b] * 0.78 + target * 0.22 };
                     }
-                    emit(out);
-                    crate::perf::count("bar frames", 1);
+                    if from_silence || should_emit_viz(&out, &last_sent, has_sent) {
+                        emit(out);
+                        last_sent = out;
+                        has_sent = true;
+                        crate::perf::count("bar frames", 1);
+                    }
                 }
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -256,4 +279,21 @@ fn capture(emit: &impl Fn([f32; BANDS])) -> windows::core::Result<()> {
         emit([0.0; BANDS]);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viz_delta_filter_skips_tiny_changes_and_emits_first_or_significant() {
+        let base = [0.2f32; BANDS];
+        assert!(should_emit_viz(&base, &[0.0; BANDS], false));
+        let mut tiny = base;
+        tiny[3] += 0.005;
+        assert!(!should_emit_viz(&tiny, &base, true));
+        let mut big = base;
+        big[7] -= 0.007;
+        assert!(should_emit_viz(&big, &base, true));
+    }
 }

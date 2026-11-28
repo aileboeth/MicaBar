@@ -3,8 +3,8 @@
 //! pass-through mode, click-through, topmost, fullscreen (game) and maximized detection, and the
 //! configurable hotkey.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
@@ -22,10 +22,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, IsZoomed, PeekMessageW, SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow,
     GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
     SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_HOTKEY, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
 };
 
 use crate::log;
+
+/// Monotonic milliseconds since first call (starts at 1 so `0` cleanly means "unset").
+pub fn mono_ms() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
 
 /// Rectangles in physical pixels relative to the window's top-left corner.
 #[derive(Clone, Copy, Default, Debug)]
@@ -74,12 +80,124 @@ pub struct WinState {
     pub tour: AtomicBool,
     /// The page asks the island to open (the tour's "start" / "continue").
     pub open_req: AtomicBool,
-    /// Display topology / DPI / power state changed: reposition immediately on next 15ms tick.
+    /// Power resume / immediate reposition request on next 15ms tick.
     pub reposition_req: AtomicBool,
+    /// Coalesced display/DPI reposition deadline in `mono_ms()` (`0` = none).
+    pub reposition_at_ms: AtomicU64,
+    /// Mirrors whether the frontend currently renders the glass canvas (`true` = inactive / `.line` / solid).
+    pub glass_inactive: AtomicBool,
+    /// Monotonic deadline (`mono_ms()`) to drop/pulse WebView2 memory target to `LOW` (`0` = none).
+    pub mem_low_at_ms: AtomicU64,
+    /// Tracks whether the island WebView2 memory target is currently set to `LOW`.
+    pub mem_is_low: AtomicBool,
+    /// When `mem_low_at_ms` expires, pulse `NORMAL -> LOW` so Chromium fires a memory-pressure purge.
+    pub mem_pulse_pending: AtomicBool,
     /// Mirrors the island window's current mouse click-through state so post-`show()` main-thread
     /// resyncs restore the latest `WS_EX_TRANSPARENT | WS_EX_LAYERED` bits.
     pub ignoring: AtomicBool,
     pub hwnd: AtomicIsize,
+}
+
+/// Sets WebView2's native memory usage target level (`ICoreWebView2_19::SetMemoryUsageTargetLevel`).
+/// Gracefully no-ops if the installed WebView2 Runtime does not expose `ICoreWebView2_19`.
+pub fn set_webview_memory_low(w: &WebviewWindow, low: bool) {
+    let _ = w.with_webview(move |wv| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+        };
+        use windows::core::Interface;
+        unsafe {
+            if let Ok(core) = wv.controller().CoreWebView2() {
+                if let Ok(wv19) = core.cast::<ICoreWebView2_19>() {
+                    let level = if low {
+                        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+                    } else {
+                        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+                    };
+                    let _ = wv19.SetMemoryUsageTargetLevel(level);
+                }
+            }
+        }
+    });
+}
+
+/// Pulses `NORMAL -> LOW` on `"main"` while collapsed and idle so Chromium actively fires its
+/// memory-pressure purge even if the target level was already `LOW`.
+pub fn pulse_webview_memory_low(app: &AppHandle) {
+    let ws = app.try_state::<Arc<WinState>>().map(|s| s.inner().clone());
+    if let Some(ref ws) = ws {
+        if ws.expanded.load(Ordering::SeqCst)
+            || ws.edit.load(Ordering::SeqCst)
+            || ws.grab.load(Ordering::SeqCst)
+        {
+            return;
+        }
+    }
+    let Some(w) = app.get_webview_window("main") else { return };
+    let _ = w.with_webview(move |wv| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+        };
+        use windows::core::Interface;
+        if let Some(ref ws) = ws {
+            if ws.expanded.load(Ordering::SeqCst)
+                || ws.edit.load(Ordering::SeqCst)
+                || ws.grab.load(Ordering::SeqCst)
+            {
+                return;
+            }
+        }
+        unsafe {
+            if let Ok(core) = wv.controller().CoreWebView2() {
+                if let Ok(wv19) = core.cast::<ICoreWebView2_19>() {
+                    let _ = wv19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL);
+                    let _ = wv19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
+                }
+            }
+        }
+        if let Some(ref ws) = ws {
+            ws.mem_is_low.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
+/// Cancels any scheduled `LOW` deadline and restores `"main"` to `NORMAL` immediately.
+pub fn set_mem_normal(app: &AppHandle, ws: &WinState) {
+    ws.mem_low_at_ms.store(0, Ordering::SeqCst);
+    ws.mem_pulse_pending.store(false, Ordering::SeqCst);
+    if ws.mem_is_low.swap(false, Ordering::SeqCst) {
+        if let Some(w) = app.get_webview_window("main") {
+            set_webview_memory_low(&w, false);
+        }
+    }
+}
+
+/// Schedules `"main"` to enter `LOW` (or pulse `NORMAL -> LOW` when `pulse` is true) after `delay_ms`.
+pub fn schedule_mem_low(ws: &WinState, delay_ms: u64, pulse: bool) {
+    if pulse {
+        ws.mem_pulse_pending.store(true, Ordering::SeqCst);
+    }
+    let deadline = mono_ms().saturating_add(delay_ms);
+    ws.mem_low_at_ms.fetch_max(deadline, Ordering::SeqCst);
+}
+
+/// Schedules a `NORMAL -> LOW` memory purge pulse after `delay_ms` if the island is collapsed & idle.
+pub fn schedule_mem_pulse(ws: &WinState, delay_ms: u64) {
+    if ws.expanded.load(Ordering::SeqCst)
+        || ws.edit.load(Ordering::SeqCst)
+        || ws.grab.load(Ordering::SeqCst)
+    {
+        return;
+    }
+    schedule_mem_low(ws, delay_ms, true);
+}
+
+/// Coalesces display / DPI reposition bursts so `place_window` runs once after `delay_ms`.
+pub fn schedule_reposition(ws: &WinState, delay_ms: u64) {
+    ws.reposition_at_ms
+        .store(mono_ms().saturating_add(delay_ms), Ordering::SeqCst);
 }
 
 const LEAVE: Duration = Duration::from_millis(350);
@@ -242,6 +360,12 @@ fn foreground_is_maximized(own: isize) -> bool {
     }
 }
 
+/// Maximized desktop apps (including frameless Electron/Qt windows without `WS_CAPTION`) still
+/// carry `IsZoomed` plus at least one resizable/caption/maximize style bit, unlike fullscreen games.
+fn is_maximized_desktop_style(zoomed: bool, style: u32) -> bool {
+    zoomed && (style & (WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX)) != 0
+}
+
 /// True when the foreground window (on the island's own monitor, not shell/overlay/maximized)
 /// covers its whole monitor.
 fn foreground_is_fullscreen(own: isize) -> bool {
@@ -284,7 +408,7 @@ fn foreground_is_fullscreen(own: isize) -> bool {
         {
             return false;
         }
-        if IsZoomed(fg) != 0 && (style & (WS_CAPTION as u32)) != 0 {
+        if is_maximized_desktop_style(IsZoomed(fg) != 0, style) {
             return false;
         }
         let mut r: RECT = std::mem::zeroed();
@@ -611,6 +735,8 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
     };
     let mut n: u64 = 0;
     let mut fs_streak: u8 = 0;
+    // Drop WebView2 memory target to LOW 5s after boot once initial paint settles.
+    schedule_mem_low(&ws, 5000, false);
 
     let set_expanded = |h: &mut Hover, open: bool, why: &str| {
         if ws.expanded.swap(open, Ordering::SeqCst) == open {
@@ -618,6 +744,12 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         }
         log(format!("island {} ({why})", if open { "open" } else { "close" }));
         if open {
+            ws.mem_low_at_ms.store(0, Ordering::SeqCst);
+            ws.mem_pulse_pending.store(false, Ordering::SeqCst);
+            if ws.mem_is_low.swap(false, Ordering::SeqCst) {
+                set_webview_memory_low(&w, false);
+            }
+            crate::wake_collector();
             h.prev_fg = unsafe { GetForegroundWindow() } as isize;
             if why == "hotkey" {
                 // keyboard use: take focus so Tab / arrows / Enter / Esc work right away
@@ -636,6 +768,9 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             }
             h.pinned = false;
             h.armed = false;
+            if !ws.edit.load(Ordering::SeqCst) && !ws.grab.load(Ordering::SeqCst) {
+                schedule_mem_low(&ws, 2000, false);
+            }
         }
         h.dwell = None;
         h.leave = None;
@@ -685,9 +820,13 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             h.fg_desktop = is_desktop;
         }
         let hot = crate::settings::hot();
-        // placement: every 2 s, every 0.3 s when following the cursor across monitors, or immediately on display/resume
+        // placement: every 2 s, every 0.3 s when following the cursor across monitors, or on resume / coalesced display change
         let follow = n % 20 == 0 && !ws.expanded.load(Ordering::SeqCst) && hot.monitor_cursor;
-        let force_pos = ws.reposition_req.swap(false, Ordering::SeqCst);
+        let due_pos = ws.reposition_at_ms.load(Ordering::SeqCst);
+        let delayed_pos = due_pos != 0
+            && mono_ms() >= due_pos
+            && ws.reposition_at_ms.compare_exchange(due_pos, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok();
+        let force_pos = ws.reposition_req.swap(false, Ordering::SeqCst) || delayed_pos;
         if (n % 130 == 0 || follow || force_pos) && !ws.grab.load(Ordering::SeqCst) {
             place_window(&w);
             if force_pos && !ws.hidden.load(Ordering::SeqCst) {
@@ -718,6 +857,19 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             if ws.game.swap(fs, Ordering::SeqCst) != fs {
                 log(format!("fullscreen foreground: {fs} ({})", describe_foreground()));
                 let _ = app.emit("game", fs);
+                if fs {
+                    if !ws.expanded.load(Ordering::SeqCst)
+                        && !ws.edit.load(Ordering::SeqCst)
+                        && !ws.grab.load(Ordering::SeqCst)
+                    {
+                        ws.mem_low_at_ms.store(0, Ordering::SeqCst);
+                        ws.mem_pulse_pending.store(false, Ordering::SeqCst);
+                        ws.mem_is_low.store(true, Ordering::SeqCst);
+                        set_webview_memory_low(&w, true);
+                    }
+                } else {
+                    crate::wake_collector();
+                }
             }
             // fullscreen behaviour: keep the pill, or hide the island completely (unless open)
             let hide = fs && hot.fullscreen_hide && !ws.expanded.load(Ordering::SeqCst);
@@ -727,11 +879,29 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
                 } else {
                     let _ = w.show();
                     resync_island_after_show(&app, own, &ws);
+                    crate::wake_collector();
                 }
             }
             let max = !fs && foreground_is_maximized(own);
             if ws.maximized.swap(max, Ordering::SeqCst) != max {
                 let _ = app.emit("maximized", max);
+            }
+        }
+        let mem_due = ws.mem_low_at_ms.load(Ordering::SeqCst);
+        if mem_due != 0
+            && mono_ms() >= mem_due
+            && ws.mem_low_at_ms.compare_exchange(mem_due, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        {
+            let do_pulse = ws.mem_pulse_pending.swap(false, Ordering::SeqCst);
+            if !ws.expanded.load(Ordering::SeqCst)
+                && !ws.edit.load(Ordering::SeqCst)
+                && !ws.grab.load(Ordering::SeqCst)
+            {
+                if do_pulse {
+                    pulse_webview_memory_low(&app);
+                } else if !ws.mem_is_low.swap(true, Ordering::SeqCst) {
+                    set_webview_memory_low(&w, true);
+                }
             }
         }
         let dwell = Duration::from_millis(hot.hover_delay_ms);
@@ -747,6 +917,11 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
         }
         if ws.grab.load(Ordering::SeqCst) {
             // grabbed: the page follows the pointer; nothing opens or closes meanwhile
+            ws.mem_low_at_ms.store(0, Ordering::SeqCst);
+            ws.mem_pulse_pending.store(false, Ordering::SeqCst);
+            if ws.mem_is_low.swap(false, Ordering::SeqCst) {
+                set_webview_memory_low(&w, false);
+            }
             ws.hotkey.store(false, Ordering::SeqCst);
             ws.click_req.store(false, Ordering::SeqCst);
             ws.collapse_req.store(false, Ordering::SeqCst);
@@ -759,6 +934,11 @@ pub fn hover_loop(app: AppHandle, ws: Arc<WinState>) {
             continue;
         }
         if ws.edit.load(Ordering::SeqCst) {
+            ws.mem_low_at_ms.store(0, Ordering::SeqCst);
+            ws.mem_pulse_pending.store(false, Ordering::SeqCst);
+            if ws.mem_is_low.swap(false, Ordering::SeqCst) {
+                set_webview_memory_low(&w, false);
+            }
             if ws.collapse_req.swap(false, Ordering::SeqCst) && ws.expanded.load(Ordering::SeqCst) {
                 set_expanded(&mut h, false, "layout edit");
             }
@@ -945,5 +1125,43 @@ mod tests {
         assert!(is_desktop_class_utf16(&wide("WorkerW")));
         assert!(!is_desktop_class_utf16(&wide("Shell_TrayWnd")));
         assert!(!is_desktop_class_utf16(&wide("Chrome_WidgetWin_1")));
+    }
+
+    #[test]
+    fn maximized_desktop_style_catches_frameless_apps_but_not_fullscreen_games() {
+        // Classic captioned maximized app
+        assert!(is_maximized_desktop_style(true, WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX));
+        // Frameless maximized Electron/Qt app (no WS_CAPTION, still resizable or has maximize box)
+        assert!(is_maximized_desktop_style(true, WS_THICKFRAME));
+        assert!(is_maximized_desktop_style(true, WS_MAXIMIZEBOX));
+        // Real borderless fullscreen game: not zoomed, or zoomed popup without caption/frame/maxbox
+        assert!(!is_maximized_desktop_style(false, WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX));
+        assert!(!is_maximized_desktop_style(true, 0));
+    }
+
+    #[test]
+    fn mem_and_reposition_scheduling_helpers() {
+        let ws = WinState::default();
+        assert_eq!(ws.mem_low_at_ms.load(Ordering::SeqCst), 0);
+        schedule_mem_low(&ws, 2000, false);
+        let t1 = ws.mem_low_at_ms.load(Ordering::SeqCst);
+        assert!(t1 > 0);
+        assert!(!ws.mem_pulse_pending.load(Ordering::SeqCst));
+
+        // Shorter pulse keeps later deadline via fetch_max, while flagging pulse.
+        schedule_mem_pulse(&ws, 100);
+        assert_eq!(ws.mem_low_at_ms.load(Ordering::SeqCst), t1);
+        assert!(ws.mem_pulse_pending.load(Ordering::SeqCst));
+
+        // When expanded, schedule_mem_pulse is a no-op.
+        ws.mem_low_at_ms.store(0, Ordering::SeqCst);
+        ws.mem_pulse_pending.store(false, Ordering::SeqCst);
+        ws.expanded.store(true, Ordering::SeqCst);
+        schedule_mem_pulse(&ws, 1500);
+        assert_eq!(ws.mem_low_at_ms.load(Ordering::SeqCst), 0);
+        assert!(!ws.mem_pulse_pending.load(Ordering::SeqCst));
+
+        schedule_reposition(&ws, 200);
+        assert!(ws.reposition_at_ms.load(Ordering::SeqCst) > 0);
     }
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HotSettings {
     pub hover_delay_ms: u64,
     pub click_mode: bool,
@@ -20,6 +20,8 @@ pub struct HotSettings {
     pub profile: u8,
     pub fullscreen_hide: bool,
     pub monitor_cursor: bool,
+    pub line_when_maximized: bool,
+    pub shape_style_line: bool,
 }
 
 static HOT: AtomicU64 = AtomicU64::new(0);
@@ -30,7 +32,7 @@ struct StoreState {
     ver: u64,
 }
 
-fn sync_hot(v: &Value) {
+fn pack_hot(v: &Value) -> u64 {
     let hover_delay_ms = v
         .pointer("/interaction/hoverDelay")
         .and_then(|x| x.as_f64())
@@ -46,23 +48,24 @@ fn sync_hot(v: &Value) {
     };
     let fullscreen_hide = v.pointer("/interaction/fullscreen").and_then(|x| x.as_str()) == Some("hide");
     let monitor_cursor = v.pointer("/general/monitor").and_then(|x| x.as_str()) == Some("cursor");
-    let packed = (1u64 << 63)
+    let line_when_maximized = v
+        .pointer("/shape/lineWhenMaximized")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let shape_style_line = v.pointer("/shape/style").and_then(|x| x.as_str()) == Some("line");
+    (1u64 << 63)
         | (hover_delay_ms & 0xffff_ffff)
         | ((click_mode as u64) << 32)
         | ((passthrough as u64) << 33)
         | ((peek as u64) << 34)
         | (((profile as u64) & 0b11) << 35)
         | ((fullscreen_hide as u64) << 37)
-        | ((monitor_cursor as u64) << 38);
-    HOT.store(packed, Ordering::Release);
+        | ((monitor_cursor as u64) << 38)
+        | ((line_when_maximized as u64) << 39)
+        | ((shape_style_line as u64) << 40)
 }
 
-pub fn hot() -> HotSettings {
-    let mut raw = HOT.load(Ordering::Acquire);
-    if raw & (1u64 << 63) == 0 {
-        let _ = store();
-        raw = HOT.load(Ordering::Acquire);
-    }
+fn unpack_hot(raw: u64) -> HotSettings {
     HotSettings {
         hover_delay_ms: raw & 0xffff_ffff,
         click_mode: (raw >> 32) & 1 != 0,
@@ -71,7 +74,22 @@ pub fn hot() -> HotSettings {
         profile: ((raw >> 35) & 0b11) as u8,
         fullscreen_hide: (raw >> 37) & 1 != 0,
         monitor_cursor: (raw >> 38) & 1 != 0,
+        line_when_maximized: (raw >> 39) & 1 != 0,
+        shape_style_line: (raw >> 40) & 1 != 0,
     }
+}
+
+fn sync_hot(v: &Value) {
+    HOT.store(pack_hot(v), Ordering::Release);
+}
+
+pub fn hot() -> HotSettings {
+    let mut raw = HOT.load(Ordering::Acquire);
+    if raw & (1u64 << 63) == 0 {
+        let _ = store();
+        raw = HOT.load(Ordering::Acquire);
+    }
+    unpack_hot(raw)
 }
 
 /// Atomically writes `bytes` to `path` via a synced sibling `.tmp` file, retrying `rename` on
@@ -579,4 +597,49 @@ pub fn item_on(list_path: &str, id: &str) -> bool {
     v.as_array()
         .map(|a| a.iter().any(|i| i.get("id").and_then(|x| x.as_str()) == Some(id) && i.get("on").and_then(|x| x.as_bool()).unwrap_or(false)))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hot_settings_pack_and_unpack_all_bits() {
+        let d = defaults();
+        let h = unpack_hot(pack_hot(&d));
+        assert_eq!(h.hover_delay_ms, 500);
+        assert!(!h.click_mode);
+        assert!(!h.passthrough);
+        assert!(h.peek);
+        assert_eq!(h.profile, 1);
+        assert!(!h.fullscreen_hide);
+        assert!(!h.monitor_cursor);
+        assert!(!h.line_when_maximized);
+        assert!(!h.shape_style_line);
+
+        let mut custom = d.clone();
+        custom["interaction"]["hoverDelay"] = json!(1250);
+        custom["interaction"]["expand"] = json!("click");
+        custom["interaction"]["passthrough"] = json!(true);
+        custom["interaction"]["peek"] = json!(false);
+        custom["interaction"]["fullscreen"] = json!("hide");
+        custom["general"]["profile"] = json!("smooth");
+        custom["general"]["monitor"] = json!("cursor");
+        custom["shape"]["lineWhenMaximized"] = json!(true);
+        custom["shape"]["style"] = json!("line");
+
+        let raw = pack_hot(&custom);
+        assert_ne!(raw & (1u64 << 39), 0);
+        assert_ne!(raw & (1u64 << 40), 0);
+        let h2 = unpack_hot(raw);
+        assert_eq!(h2.hover_delay_ms, 1250);
+        assert!(h2.click_mode);
+        assert!(h2.passthrough);
+        assert!(!h2.peek);
+        assert_eq!(h2.profile, 2);
+        assert!(h2.fullscreen_hide);
+        assert!(h2.monitor_cursor);
+        assert!(h2.line_when_maximized);
+        assert!(h2.shape_style_line);
+    }
 }

@@ -22,6 +22,7 @@ html:not(.no-anim) #island:not(.peek):not(.flinging):not(.dragging) {
 html:not(.no-anim) #island:not(.expanded) #panel { filter: blur(8px); transform: scale(0.965); }
 html:not(.no-anim) #island #panel { transition: opacity 0.22s ease, filter 0.42s ease, transform 0.58s var(--ease-fluid); }
 html:not(.no-anim) #island.expanded #panel { transition-delay: 0.07s, 0s, 0s; }
+html #island.collapsed.panel-gone #panel { visibility: hidden; filter: none; content-visibility: hidden; transition: none; }
 #island.dock-top #panel { transform-origin: 50% 0; }
 #island.dock-bottom #panel { transform-origin: 50% 100%; }
 #island.dock-left #panel { transform-origin: 0 50%; }

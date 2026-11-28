@@ -285,6 +285,7 @@ function pillWidth() {
 // grows to the largest allowed panel so the handles can be dragged that far.
 let fitted = "";
 let watchedDpr = 0;
+let fitDprTimer = 0;
 function fitWindow() {
   if (MANAGER) return;
   const dpr = window.devicePixelRatio || 1;
@@ -300,8 +301,18 @@ function fitWindow() {
   fitted = key;
   invoke("fit_window", { w: Math.round(w * dpr), h: Math.round(h * dpr) }).catch(() => {});
   if (watchedDpr !== dpr) {
+    clearTimeout(fitDprTimer);
+    fitDprTimer = 0;
     watchedDpr = dpr;
-    matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", () => { watchedDpr = 0; fitted = ""; fitWindow(); }, { once: true });
+    matchMedia(`(resolution: ${dpr}dppx)`).addEventListener("change", () => {
+      clearTimeout(fitDprTimer);
+      fitDprTimer = setTimeout(() => {
+        fitDprTimer = 0;
+        watchedDpr = 0;
+        fitted = "";
+        fitWindow();
+      }, 280);
+    }, { once: true });
   }
 }
 
@@ -362,6 +373,7 @@ function setMaximized(v) {
       pillLast = "";
       renderPill();
       applySize();
+      updateViz();
     }, 5100);
   } else if (!v) {
     clearTimeout(maxHint.timer);
@@ -382,6 +394,7 @@ function setMaximized(v) {
     pillLast = "";
     renderPill();
   }
+  updateViz();
 }
 
 // Effective collapsed shape and docked edge.
@@ -467,15 +480,22 @@ function reportRect() {
   // the thin line gets a bigger hover zone than it looks
   const pillR = phys(c, c.style === "line" ? 10 : 4);
   const panelR = phys(p, 4);
-  const key = [...pillR, ...panelR].map((v) => Math.round(v)).join(",");
+  const card = nst.on || (tour.on && !fling.active);
+  const glassActive = !!(glassWanted && !gameOn && !fling.free && (expanded || card || c.style !== "line"));
+  const key = [...pillR, ...panelR].map((v) => Math.round(v)).join(",") + "|" + (glassActive ? 1 : 0);
   if (key === lastHitKey) return;
   lastHitKey = key;
-  invoke("set_hit_rects", { pill: pillR, panel: panelR }).catch(() => {});
+  invoke("set_hit_rects", { pill: pillR, panel: panelR, glassActive }).catch(() => {});
 }
 
+let pillSizeTimer = 0;
 let lastIslandRect = null;
 function applySize() {
   if (MANAGER) return;
+  if (pillSizeTimer) {
+    clearTimeout(pillSizeTimer);
+    pillSizeTimer = 0;
+  }
   document.documentElement.style.setProperty("--pill-h", sz("pillH") + "px");
   const { style, dock, vertical } = shape();
   const card = nst.on || (tour.on && !fling.active);
@@ -508,6 +528,26 @@ function applySize() {
   if (editing) renderEditUi();
 }
 
+let panelGoneTimer = 0;
+function revealPanel() {
+  clearTimeout(panelGoneTimer);
+  panelGoneTimer = 0;
+  if (island.classList.contains("panel-gone")) {
+    const hadNoTrans = island.classList.contains("no-transition");
+    if (!hadNoTrans) island.classList.add("no-transition");
+    island.classList.remove("panel-gone");
+    void island.offsetWidth;
+    if (!hadNoTrans) island.classList.remove("no-transition");
+  }
+}
+function schedulePanelGone(ms = 500) {
+  clearTimeout(panelGoneTimer);
+  panelGoneTimer = setTimeout(() => {
+    panelGoneTimer = 0;
+    if (!expanded) island.classList.add("panel-gone");
+  }, ms);
+}
+
 function expand() {
   if (expanded) return;
   hideNotes(); // they stay on the notes page
@@ -518,6 +558,7 @@ function expand() {
   }
   expanded = true;
   if (snap?.slim) invoke("get_snapshot").then((s) => { if (s) onSnapshot({ payload: s }); }).catch(() => {});
+  revealPanel();
   island.classList.remove("peek");
   island.classList.add("expanded");
   island.classList.remove("collapsed");
@@ -554,6 +595,7 @@ function collapse() {
   confirmDisable = false;
   island.classList.remove("expanded");
   island.classList.add("collapsed");
+  schedulePanelGone();
   island.scrollTop = 0;
   island.scrollLeft = 0;
   $("search").blur();
@@ -687,8 +729,9 @@ let vizOn = null;
 // bars are wanted while a song plays and some bars are on screen (pill or music page)
 function updateViz() {
   const playing = sget("media.on", true) && media?.playing;
-  const onPill = !MANAGER && !expanded && !!pill.querySelector(".mviz");
-  const onPage = tab === "music" && (MANAGER ? !document.hidden : expanded) && !!document.querySelector("#music .mviz");
+  const pillVisible = !MANAGER && !expanded && !gameOn && !document.hidden && !island.classList.contains("line") && !nst.on && !tour.on;
+  const onPill = pillVisible && !!pill.querySelector(".mviz");
+  const onPage = tab === "music" && !document.hidden && (MANAGER || expanded) && !!document.querySelector("#music .mviz");
   const want = !!(playing && (onPill || onPage));
   if (want === vizOn) return;
   vizOn = want;
@@ -696,6 +739,7 @@ function updateViz() {
   if (!want) document.querySelectorAll(".mviz i").forEach((b) => (b.style.transform = ""));
 }
 listen("viz", (e) => {
+  if (document.hidden || (!MANAGER && (gameOn || (!expanded && island.classList.contains("line"))))) return;
   JSPERF.viz++;
   const b = e.payload || [];
   document.querySelectorAll(".mviz").forEach((el) => {
@@ -1333,7 +1377,16 @@ function renderPill() {
     if (snap?.latency?.ms != null) setPillPn('[data-pn="lat"]', String(Math.min(snap.latency.ms, 9999)), 4);
     if (snap?.sys?.cpu != null) setPillPn('[data-pn="cpu"]', `${Math.round(snap.sys.cpu)}%`, 4);
     if (snap?.sys?.memTotal) setPillPn('[data-pn="mem"]', `${Math.round((snap.sys.memUsed / snap.sys.memTotal) * 100)}%`, 4);
-    if (needSize && !expanded) applySize();
+    if (needSize && !expanded) {
+      clearTimeout(pillSizeTimer);
+      pillSizeTimer = setTimeout(() => {
+        pillSizeTimer = 0;
+        if (expanded || nst.on || (tour.on && !fling.active)) return;
+        const s = shape();
+        if (s.style === "line") return;
+        if (s.vertical || Math.abs(pillWidth() - (lastIslandRect?.w || 0)) >= 4) applySize();
+      }, 350);
+    }
   }
   updateViz();
 }
@@ -1556,6 +1609,7 @@ function showNote(id) {
   void island.offsetWidth;
   island.classList.add("n-pop");
   renderNote();
+  updateViz();
   armNoteTimer();
 }
 
@@ -1610,6 +1664,7 @@ function hideNotes() {
   invoke("note_mode", { on: false }).catch(() => {});
   setTimeout(() => { if (!nst.on) $("note").innerHTML = ""; }, 450);
   if (!expanded) applySize();
+  updateViz();
 }
 
 // the edges of the cards behind the front one, just outside the island (top / bottom dock)
@@ -5630,7 +5685,11 @@ function applyGlass() {
     invoke("glass_off").catch(() => {});
     island.classList.remove("glass");
     glassFrames = 0;
+    glassCanvas.width = 0;
+    glassCanvas.height = 0;
+    lastGlassGeom = "";
   }
+  reportRect();
 }
 
 let pageRestored = MANAGER;
@@ -5671,6 +5730,7 @@ function applySettings(s) {
   if (tab === "settings") renderList(true);
   else renderPanel();
   applySize();
+  updateViz();
 }
 
 listen("settings", (e) => applySettings(e.payload));
@@ -5900,6 +5960,7 @@ function startTour() {
   invoke("log_js", { msg: "tour start" }).catch(() => {});
   renderTour();
   applySize();
+  updateViz();
 }
 
 function endTour() {
@@ -5911,6 +5972,7 @@ function endTour() {
   pillLast = "";
   renderPill();
   applySize();
+  updateViz();
 }
 
 // first start: once the settings are in, if the tour was never finished or skipped
@@ -6039,6 +6101,7 @@ function startGrab(e) {
   ensureMuTimer();
   island.classList.remove("expanded", "peek", "touring");
   island.classList.add("collapsed", "grabbed", "flinging");
+  if (!island.classList.contains("panel-gone")) schedulePanelGone();
   pillLast = "";
   renderPill();
   const r = islandRect(false);
@@ -6083,6 +6146,7 @@ function abortGrab() {
   fitted = "";
   fitWindow();
   applySize();
+  if (!expanded && !island.classList.contains("panel-gone")) schedulePanelGone();
 }
 
 // Is the pointer on a scrollbar of the pressed element or one of its scrolling parents?
@@ -6314,6 +6378,7 @@ function endFling() {
   fitted = "";
   fitWindow();
   applySize();
+  if (!expanded && !island.classList.contains("panel-gone")) schedulePanelGone();
   tourAfterGrab();
 }
 
@@ -6328,7 +6393,8 @@ function editRect() {
 function showEditPart() {
   if (editPart === "panel") {
     expanded = true;
-  if (snap?.slim) invoke("get_snapshot").then((s) => { if (s) onSnapshot({ payload: s }); }).catch(() => {});
+    if (snap?.slim) invoke("get_snapshot").then((s) => { if (s) onSnapshot({ payload: s }); }).catch(() => {});
+    revealPanel();
     island.classList.add("expanded");
     island.classList.remove("collapsed");
     panelHNow = panelH();
@@ -6338,10 +6404,12 @@ function showEditPart() {
     closeMenu();
     island.classList.remove("expanded");
     island.classList.add("collapsed");
+    schedulePanelGone();
     pillLast = "";
     renderPill();
   }
   applySize();
+  updateViz();
 }
 
 function startEdit() {
@@ -6372,6 +6440,7 @@ async function endEdit(save) {
   expanded = false;
   island.classList.remove("expanded");
   island.classList.add("collapsed");
+  schedulePanelGone();
   fitted = "";
   fitWindow();
   pillLast = "";
@@ -6605,6 +6674,8 @@ listen("game", (e) => {
   island.classList.toggle("game", gameOn);
   if (nst.on) renderNote(); // privacy: hide / show the text
   if (sget("shape.lineWhenMaximized", false)) { applySize(); pillLast = ""; renderPill(); } // to / from the indicator bar
+  reportRect();
+  updateViz();
 });
 // cursor resting on the collapsed (click-through) pill: let the window below show through
 listen("peek", (e) => island.classList.toggle("peek", !!e.payload && !expanded));
@@ -6687,6 +6758,7 @@ invoke("get_snapshot").then((s) => {
 const glassCanvas = $("glass");
 const gctx = glassCanvas.getContext("2d", { alpha: false });
 let glassFrames = 0;
+let lastGlassGeom = "";
 
 // Darker tint over bright backgrounds keeps text readable; lighter over dark ones keeps it glassy.
 // px is a piece (w x h) of the window-sized backdrop (W x H), at ox, oy (all in quarter px)
@@ -6753,16 +6825,24 @@ function startGlass() {
     const ab = msg instanceof ArrayBuffer ? msg : msg?.buffer instanceof ArrayBuffer ? msg.buffer : new Uint8Array(msg).buffer;
     const dv = new DataView(ab);
     // header: the piece's size, where it sits, the whole window (quarter px); only the island's
-    // part of the window is sent, the canvas keeps the window's size
+    // part of the window is sent, and the canvas shrinks to that crop
     const [w, h, ox, oy, W, H] = [0, 4, 8, 12, 16, 20].map((o) => dv.getUint32(o, true));
     if (!w || !h || !W || !H || ab.byteLength < 24 + w * h * 4) return;
     const px = new Uint8ClampedArray(ab, 24, w * h * 4);
-    if (glassCanvas.width !== W || glassCanvas.height !== H) {
-      glassCanvas.width = W;
-      glassCanvas.height = H;
+    if (glassCanvas.width !== w || glassCanvas.height !== h) {
+      glassCanvas.width = w;
+      glassCanvas.height = h;
+    }
+    const geom = `${w},${h},${ox},${oy},${W},${H}`;
+    if (geom !== lastGlassGeom) {
+      lastGlassGeom = geom;
+      glassCanvas.style.setProperty("--gx", `${(ox / W * 100).toFixed(4)}vw`);
+      glassCanvas.style.setProperty("--gy", `${(oy / H * 100).toFixed(4)}vh`);
+      glassCanvas.style.setProperty("--gw", `${(w / W * 100).toFixed(4)}vw`);
+      glassCanvas.style.setProperty("--gh", `${(h / H * 100).toFixed(4)}vh`);
     }
     legible(px);
-    gctx.putImageData(new ImageData(px, w, h), ox, oy);
+    gctx.putImageData(new ImageData(px, w, h), 0, 0);
     adaptTint(px, w, h, ox, oy, W, H);
     JSPERF.glass++;
     JSPERF.glassMs += performance.now() - t0;
@@ -6779,14 +6859,40 @@ function logView(tag) {
 }
 
 let resizeTimer = null;
+let resizeRaf = 0;
+let resizeSnapRaf1 = 0;
+let resizeSnapRaf2 = 0;
+let resizeLogTimer = 0;
 window.addEventListener("resize", () => {
-  if (!MANAGER && !editing) applySize();
-  reportRect();
-  syncTabFade();
   if (MANAGER) {
+    reportRect();
+    syncTabFade();
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => renderList(true), 150); // charts follow the window width
-  } else logView("resize");
+    return;
+  }
+  cancelAnimationFrame(resizeRaf);
+  cancelAnimationFrame(resizeSnapRaf1);
+  cancelAnimationFrame(resizeSnapRaf2);
+  island.classList.add("no-transition");
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = 0;
+    if (!editing) applySize();
+    reportRect();
+    syncTabFade();
+    resizeSnapRaf1 = requestAnimationFrame(() => {
+      resizeSnapRaf1 = 0;
+      resizeSnapRaf2 = requestAnimationFrame(() => {
+        resizeSnapRaf2 = 0;
+        island.classList.remove("no-transition");
+      });
+    });
+  });
+  clearTimeout(resizeLogTimer);
+  resizeLogTimer = setTimeout(() => {
+    resizeLogTimer = 0;
+    logView("resize");
+  }, 250);
 });
 if (MANAGER) {
   listen("goto", (e) => {

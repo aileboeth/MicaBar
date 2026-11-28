@@ -4,9 +4,11 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tauri::{AppHandle, Manager};
 use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, FILETIME, HANDLE};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetExitCodeThread, GetProcessTimes, GetThreadTimes, OpenProcess,
@@ -14,6 +16,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::log;
+use crate::window_ctl::WinState;
 
 const STILL_ACTIVE_CODE: u32 = 259;
 
@@ -114,9 +117,34 @@ fn tree() -> Vec<(u32, String)> {
     out
 }
 
-/// Starts the line every 10 minutes (percentages are averages over that time).
-pub fn start() {
-    std::thread::spawn(|| {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WvMemAction {
+    None,
+    PulseLow,
+    Reload,
+}
+
+fn evaluate_wv_memory(max_wv_mb: u64, idle: bool, high_streak: &mut u32) -> WvMemAction {
+    if idle && max_wv_mb >= 1500 {
+        *high_streak = high_streak.saturating_add(1);
+        if *high_streak >= 2 {
+            *high_streak = 0;
+            return WvMemAction::Reload;
+        }
+    } else {
+        *high_streak = 0;
+    }
+    if idle && max_wv_mb >= 600 {
+        WvMemAction::PulseLow
+    } else {
+        WvMemAction::None
+    }
+}
+
+/// Starts the line every 10 minutes (percentages are averages over that time) and self-heals
+/// runaway WebView2 memory while the island is collapsed and idle.
+pub fn start(app: AppHandle, ws: Arc<WinState>, glass: crate::glass::FrameChannel) {
+    std::thread::spawn(move || {
         let mut prev_procs: HashMap<u32, u64> = HashMap::new();
         for (pid, _) in tree() {
             if let Some((cpu, _)) = unsafe { proc_cpu_mem(pid) } {
@@ -124,6 +152,7 @@ pub fn start() {
             }
         }
         let mut at = Instant::now();
+        let mut high_wv_streak: u32 = 0;
         loop {
             std::thread::sleep(Duration::from_secs(600));
             let wall = (at.elapsed().as_secs_f64() * 1e7).max(1.0); // in 100 ns
@@ -159,6 +188,13 @@ pub fn start() {
                 }
             }
             prev_procs = alive;
+            let max_wv_mb = procs
+                .iter()
+                .skip(1)
+                .filter(|(e, _, _)| e.to_ascii_lowercase().contains("webview2"))
+                .map(|(_, _, m)| *m / 1_048_576)
+                .max()
+                .unwrap_or(0);
             let own = procs.first().map(|p| p.1).unwrap_or(0);
             let tracked: u64 = parts.values().sum();
             let mut pv: Vec<(&str, u64)> = parts.into_iter().filter(|(_, d)| *d > 0).collect();
@@ -197,6 +233,58 @@ pub fn start() {
                 line += &format!(" | {}", cv_strs.join(", "));
             }
             log(line);
+
+            let idle = !ws.expanded.load(Ordering::SeqCst)
+                && !ws.edit.load(Ordering::SeqCst)
+                && !ws.grab.load(Ordering::SeqCst)
+                && !ws.tour.load(Ordering::SeqCst);
+            match evaluate_wv_memory(max_wv_mb, idle, &mut high_wv_streak) {
+                WvMemAction::PulseLow => {
+                    log(format!("perf: high WebView2 memory ({max_wv_mb}M); pulsing LOW memory target"));
+                    crate::window_ctl::pulse_webview_memory_low(&app);
+                }
+                WvMemAction::Reload => {
+                    log(format!(
+                        "perf: WebView2 renderer stuck at {max_wv_mb}M; reloading island webview to reclaim memory"
+                    ));
+                    crate::glass::set_channel(&glass, None);
+                    if let Some(w) = app.get_webview_window("main") {
+                        ws.mem_is_low.store(false, Ordering::SeqCst);
+                        crate::window_ctl::schedule_mem_low(&ws, 5000, false);
+                        let _ = w.eval("location.reload()");
+                    }
+                }
+                WvMemAction::None => {}
+            }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wv_memory_self_heal_thresholds_and_streak() {
+        let mut streak = 0;
+        assert_eq!(evaluate_wv_memory(599, true, &mut streak), WvMemAction::None);
+        assert_eq!(streak, 0);
+
+        assert_eq!(evaluate_wv_memory(600, true, &mut streak), WvMemAction::PulseLow);
+        assert_eq!(streak, 0);
+
+        // First >=1500M window pulses LOW and bumps streak to 1.
+        assert_eq!(evaluate_wv_memory(1500, true, &mut streak), WvMemAction::PulseLow);
+        assert_eq!(streak, 1);
+
+        // Non-idle resets streak and performs no action.
+        assert_eq!(evaluate_wv_memory(1600, false, &mut streak), WvMemAction::None);
+        assert_eq!(streak, 0);
+
+        // Two consecutive idle >=1500M windows trigger Reload and reset streak.
+        assert_eq!(evaluate_wv_memory(1550, true, &mut streak), WvMemAction::PulseLow);
+        assert_eq!(streak, 1);
+        assert_eq!(evaluate_wv_memory(1650, true, &mut streak), WvMemAction::Reload);
+        assert_eq!(streak, 0);
+    }
 }
